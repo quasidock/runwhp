@@ -11,16 +11,21 @@ build.
 
 ## Status
 
-`runwhp` is at the design stage. Nothing here is a usable runtime yet.
+`runwhp` is experimental. It runs non-interactive Linux containers from
+registry images, and nothing more yet.
 
+- **Iteration 1** (2026-11-20): `runwhp run IMAGE [COMMAND...]` pulls an image,
+  converts its layers to ext4, boots one VM, runs the entrypoint and command
+  with the image's environment, working directory and user, sends stdout and
+  stderr to the host separately, and exits with the container's exit code.
+  See [Usage](#usage) and [Iteration 1 results](#iteration-1-results).
 - **Proven by a spike** (2026-11-17): an unelevated Go program boots a Linux
-  kernel on WHP, delivers device interrupts, attaches virtio block devices, and
-  runs a process chrooted into an overlay root built from an ext4 image layer.
-  See [Boot spike](#boot-spike).
-- **Proposed, not yet agreed**: the architecture in
+  kernel on WHP. See [Boot spike](#boot-spike).
+- **Proposed, not yet agreed**: the rest of the architecture in
   [Proposed design](#proposed-design).
-- **Not started**: networking, host file sharing, more than one vCPU, the OCI
-  runtime command line, and a kernel of our own.
+- **Not started**: stdin and terminals, signal forwarding, networking, host
+  file sharing, more than one vCPU, the runc-style lifecycle commands, and a
+  kernel of our own.
 
 ## Why not runhcs, HCS, or WSL
 
@@ -57,6 +62,99 @@ Platform" optional feature enabled first. Enabling a feature takes
 administrator rights and a reboot, once. The test machine cannot answer this
 because WSL2 had already turned the hypervisor on.
 
+Until runwhp has its own kernel, it boots the WSL kernel, so WSL must be
+installed. The WSL kernel builds `virtio_blk` as a module, and that module has
+to be copied out of a WSL distro once per kernel version (see below).
+
+## Usage
+
+Build, from the repository root in PowerShell. This produces `out\runwhp.exe`
+and the guest init `out\runwhp-init`, which must stay next to it:
+
+```powershell
+.\build.ps1
+```
+
+Once per WSL kernel version, copy the block driver into runwhp's store:
+
+```powershell
+wsl -e sh hack/wsl-modules.sh "$env:LOCALAPPDATA\runwhp\modules"
+```
+
+Then:
+
+```powershell
+.\out\runwhp.exe run alpine:3.20 echo hello
+.\out\runwhp.exe run -u nobody -e FOO=bar -w /tmp alpine:3.20 sh -c 'id; echo $FOO; pwd'
+.\out\runwhp.exe run python:3.12-slim python3 -c 'print(1)'
+.\out\runwhp.exe pull debian:12
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--entrypoint` | image's | Replace the entrypoint; `""` removes it. Also drops the image's command, as in Docker |
+| `-e`, `--env` | | `KEY=VALUE`, or `KEY` to copy it from the host; repeatable |
+| `-w`, `--workdir` | image's, else `/` | Working directory; created if missing |
+| `-u`, `--user` | image's, else root | `name`, `uid`, `name:group` or `uid:gid`, resolved against the image's `/etc/passwd` and `/etc/group` |
+| `-m`, `--memory` | `512m` | Guest RAM, `128m` to `3328m`. The writable layer is a tmpfs inside it |
+| `--hostname` | random | Hostname, also written to `/etc/hostname` and `/etc/hosts` |
+| `--pull` | `missing` | `missing`, `always` or `never` |
+| `--kernel` | `C:\Program Files\WSL\tools\kernel` | bzImage to boot |
+| `--debug` | off | Kernel console, init's steps and VMM statistics on stderr |
+
+Exit codes follow Docker: the container's own code, 128+N if a signal N killed
+it, 125 if runwhp failed, 126 if the command cannot be run, 127 if it does not
+exist, and 130 after Ctrl+C. Ctrl+C stops the VM at once; the container gets no
+signal. When runwhp fails after the guest booted, it prints the last kernel
+console lines.
+
+Images and layers are cached in `%LOCALAPPDATA%\runwhp`, or in `RUNWHP_ROOT`
+when it is set. Registry credentials come from Docker's configuration and
+credential helpers. Only `linux/amd64` images run. Nothing is ever removed from
+the cache yet.
+
+In Git Bash, set `MSYS_NO_PATHCONV=1`, or MSYS rewrites container paths such
+as `/tmp` into Windows paths before runwhp sees them.
+
+### How a run works
+
+1. The image's layers are pulled and each one is converted to an ext4 image
+   with `tar2ext4`, with OCI whiteouts turned into overlayfs whiteouts. Layers
+   are cached by diffID and verified against it; empty layers are skipped.
+2. runwhp writes an initramfs holding `runwhp-init`, the `virtio_blk` module,
+   and a JSON spec of the process.
+3. The guest gets one multiport virtio console, with ports named `stdout`,
+   `stderr` and `control`, and one read-only virtio-blk disk per layer. Each disk's
+   serial number names its layer, so init does not depend on probe order.
+4. `runwhp-init` mounts the layers under an overlay with a tmpfs upper layer, adds `/proc`,
+   `/sys`, a minimal `/dev` and a hostname, and runs the process chrooted
+   into it. The process writes straight to the console ports, which are
+   character devices, not ttys.
+5. When the process exits, init kills whatever is left, writes the exit status
+   as JSON to the `control` port, and resets the machine, which ends the VMM.
+
+### Code layout
+
+| Path | Contents |
+| --- | --- |
+| [`cmd/runwhp`](cmd/runwhp) | Command line |
+| [`internal/whp`](internal/whp) | Bindings for `WinHvPlatform.dll` and `WinHvEmulation.dll` |
+| [`internal/vm`](internal/vm) | Partition setup, vCPU loop, serial port, RTC stub, I/O APIC |
+| [`internal/boot`](internal/boot) | Kernel loader, page tables, ACPI tables, initramfs builder. Builds on any OS |
+| [`internal/virtio`](internal/virtio) | virtio-mmio transport, block device, multiport console. Builds on any OS |
+| [`internal/image`](internal/image), [`internal/layer`](internal/layer) | Registry pulls, image records, layer conversion and cache |
+| [`internal/guestspec`](internal/guestspec) | The contract between host and guest |
+| [`internal/passwd`](internal/passwd) | User and group resolution |
+| [`guest/init`](guest/init) | `runwhp-init`, PID 1 in the guest |
+| [`test/e2e`](test/e2e) | End-to-end tests against WHP |
+
+`go test ./...` runs the unit tests anywhere. The end-to-end tests need a
+build, WHP, the module and network access, and run with `RUNWHP_E2E=1`:
+
+```powershell
+$env:RUNWHP_E2E = '1'; go test -count=1 ./test/e2e
+```
+
 ## Proposed design
 
 One small virtual machine per container, with the VMM process acting as the
@@ -65,18 +163,19 @@ supervisor process and one Job Object per container, with no daemon.
 
 | Concern | Approach | State |
 | --- | --- | --- |
-| Hypervisor | WHP from Go through `WinHvPlatform.dll`, no cgo | Spiked |
-| Boot | Direct kernel boot (Linux 64-bit boot protocol), no firmware | Spiked |
-| Clock and timers | Hyper-V enlightenments supply TSC and APIC timer frequencies | Spiked |
-| Interrupts | Hypervisor's local APIC plus an emulated I/O APIC | Spiked, edge-triggered only |
-| Device discovery | Hardware-reduced ACPI with a generated DSDT | Spiked |
-| Root filesystem | One read-only ext4 image per layer on virtio-blk, overlayfs in the guest, writable scratch disk | Spiked with a single layer and a tmpfs upper |
-| Layer conversion | `tar2ext4`, cached per layer digest | Not started |
-| Guest agent | Tiny init as PID 1 that mounts the overlay and execs the process, instead of hcsshim's GCS plus runc | Spiked as a test program only |
+| Hypervisor | WHP from Go through `WinHvPlatform.dll`, no cgo | Done |
+| Boot | Direct kernel boot (Linux 64-bit boot protocol), no firmware | Done |
+| Clock and timers | Hyper-V enlightenments supply TSC and APIC timer frequencies | Done |
+| Interrupts | Hypervisor's local APIC plus an emulated 64-pin I/O APIC | Done, edge-triggered only |
+| Device discovery | Hardware-reduced ACPI with a generated DSDT | Done |
+| Root filesystem | One read-only ext4 image per layer on virtio-blk, overlayfs in the guest, writable scratch disk | Done, but the upper layer is a tmpfs, not a scratch disk |
+| Layer conversion | `tar2ext4`, cached per layer digest | Done |
+| Container I/O | Multiport virtio console with named ports for stdout, stderr and control | Done for output; no stdin yet |
+| Guest agent | Tiny init as PID 1 that mounts the overlay and execs the process, instead of hcsshim's GCS plus runc | Done (`runwhp-init`) |
 | Bind mounts and volumes | 9p server in Go on the host, carried over vsock | Not started |
 | Networking | User-mode network stack in the VMM (gVisor netstack); published ports are loopback listeners | Not started |
-| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | Not started |
-| Kernel | Our own build with virtio drivers built in, shipped as a signed OCI artifact | Not started |
+| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | `run` and `pull` only |
+| Kernel | Our own build with virtio drivers built in, shipped as a signed OCI artifact | Not started; the WSL kernel stands in |
 
 ### Relationship to Quasidock
 
@@ -90,11 +189,35 @@ Dockerfile. Whether Quasidock should do that is undecided.
 Linux GUI applications, GPU access, ARM64 hosts, and running many containers in
 one shared VM.
 
+## Iteration 1 results
+
+Measured on the test machine, unelevated, from process start to exit,
+including VM teardown, with the image already cached.
+
+| Measurement | Result |
+| --- | --- |
+| `run alpine:3.20 true` | 723-729 ms over three runs |
+| `run python:3.12-slim python3 -c 'print(1)'` (4 layers) | 770 ms |
+| First run of `python:3.12-slim`, including pull and conversion | 14.5 s |
+| 200 MB to stdout in 32 KiB writes, redirected to a file | 1.25 s in total |
+| 200 MB to stdout from `head -c`, which writes in small pieces | 21 s |
+| 200 MB in 32 KiB writes, piped into `wc` in Git Bash | 32.5 s |
+
+The end-to-end tests cover image defaults and overrides, separate streams,
+exit codes 3, 126, 127, 130 and 137, users, three parallel runs sharing layer
+files, a real multi-layer image, and whiteouts and opaque directories across
+layers.
+
+Output costs a few VM exits per guest `write()` (the notification and the
+interrupt that follows it), about 50-100 µs. Large writes therefore run at hundreds of MB/s
+and many small writes are slow. Host-side writes happen on the vCPU thread, so
+a slow reader, such as an MSYS pipe, stalls the guest.
+
 ## Boot spike
 
-The spike lives in [`spike/`](spike/) and is throwaway evidence, not
-the start of the runtime. It is about 1,800 lines of Go, guest init included,
-with no dependencies beyond the standard library.
+The spike lives in [`spike/`](spike/) and is kept as a reference; the runtime
+in `internal/` grew out of it. It is about 1,800 lines of Go, guest init
+included, with no dependencies beyond the standard library.
 
 | File | Contents |
 | --- | --- |
@@ -160,7 +283,7 @@ The initramfs holds a statically linked Go program as `/init`. It:
 From the repository root, in PowerShell:
 
 ```powershell
-go build -o out/spike/runw-spike.exe ./spike
+go build -o out/spike/runwhp-spike.exe ./spike
 
 $env:GOOS = 'linux'; $env:CGO_ENABLED = '0'
 go build -trimpath -ldflags="-s -w" -o out/spike/init ./spike/init
@@ -173,11 +296,12 @@ Kernel and userspace only:
 .\out\spike\runwhp-spike.exe -init out\spike\init
 ```
 
-With disks. The fixture script runs inside WSL and needs `e2fsprogs`; pass it
-the WSL form of your checkout's `out/spike` path:
+With disks. The fixture script runs inside WSL and needs `e2fsprogs`. Run it
+from the repository root; WSL starts in the same directory, so relative paths
+work:
 
 ```powershell
-wsl -e sh /mnt/e/quasidock/spike//fixtures.sh /mnt/e/quasidock/out/spike
+wsl -e sh spike/fixtures.sh out/spike
 $f = [IO.File]::Create("$PWD\out\spike\scratch.img"); $f.SetLength(256MB); $f.Close()
 
 .\out\spike\runwhp-spike.exe -init out\spike\init -module out\spike\virtio_blk.ko `
@@ -249,20 +373,26 @@ starts, which covers decompressing the kernel and early memory setup.
 
 ## Known gaps
 
-- The serial port takes no input, so there is no interactive console.
+- No stdin: the process reads `/dev/null`, and there is no `-i` or `-t`.
+- Ctrl+C stops the VM without signalling the container, so it cannot clean up.
+- The writable layer is a tmpfs in guest RAM. Writes are limited by `--memory`,
+  and nothing written survives the run.
+- Booting needs the WSL kernel, plus `virtio_blk.ko` copied out of a WSL
+  distro whose kernel version matches.
+- An image can have at most 58 non-empty layers, one I/O APIC line per disk.
+- The cache only grows: there is no `images` or `rmi` yet.
 - Interrupts are edge-triggered only; level-triggered lines and EOI tracking
   are not implemented.
 - One vCPU. Starting further processors is untested.
-- Device emulation blocks the vCPU. Disk requests should move to worker
-  goroutines.
+- Device emulation blocks the vCPU, for disk and console alike. Each MMIO
+  access also takes several round trips through `WinHvEmulation.dll`; a fast
+  path for common instructions would cut the per-write output cost.
 - Guest memory is committed up front and never returned to Windows.
 - The guest clock starts at whatever the RTC stub reports and is not kept in
   step with the host afterwards.
-- The test disk image is built with `mkfs.ext4` inside WSL. The runtime must
-  generate ext4 itself.
 - String port I/O is not handled and stops the VMM with an error.
-- No tests, and no way yet to run this in CI: it is unknown whether hosted
-  Windows runners expose WHP.
+- It is unknown whether hosted Windows CI runners expose WHP, so the
+  end-to-end tests run only by hand.
 
 ## Open questions
 
