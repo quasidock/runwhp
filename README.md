@@ -11,9 +11,15 @@ build.
 
 ## Status
 
-`runwhp` is experimental. It runs non-interactive Linux containers from
-registry images, and nothing more yet.
+`runwhp` is experimental. It runs Linux containers from registry images,
+interactively or not, without networking or access to host files yet.
 
+- **Iteration 2** (2026-11-20): `-i` passes stdin to the container with a real
+  end of file, `-t` gives it a pseudo-terminal that follows the console's size,
+  and Ctrl+C reaches the container as SIGINT instead of killing the VM.
+  Container output no longer runs on the vCPU thread, so a slow reader stalls
+  only its own stream. See [Usage](#usage) and
+  [Iteration 2 results](#iteration-2-results).
 - **Iteration 1** (2026-11-20): `runwhp run IMAGE [COMMAND...]` pulls an image,
   converts its layers to ext4, boots one VM, runs the entrypoint and command
   with the image's environment, working directory and user, sends stdout and
@@ -23,9 +29,8 @@ registry images, and nothing more yet.
   kernel on WHP. See [Boot spike](#boot-spike).
 - **Proposed, not yet agreed**: the rest of the architecture in
   [Proposed design](#proposed-design).
-- **Not started**: stdin and terminals, signal forwarding, networking, host
-  file sharing, more than one vCPU, the runc-style lifecycle commands, and a
-  kernel of our own.
+- **Not started**: networking, host file sharing, more than one vCPU, the
+  runc-style lifecycle commands, and a kernel of our own.
 
 ## Why not runhcs, HCS, or WSL
 
@@ -87,11 +92,15 @@ Then:
 .\out\runwhp.exe run alpine:3.20 echo hello
 .\out\runwhp.exe run -u nobody -e FOO=bar -w /tmp alpine:3.20 sh -c 'id; echo $FOO; pwd'
 .\out\runwhp.exe run python:3.12-slim python3 -c 'print(1)'
+.\out\runwhp.exe run -it alpine:3.20 sh
+Get-Content data.csv | .\out\runwhp.exe run -i alpine:3.20 wc -l
 .\out\runwhp.exe pull debian:12
 ```
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
+| `-i`, `--interactive` | off | Pass stdin to the container. Without it, the container reads `/dev/null` |
+| `-t`, `--tty` | off | Run the container on a pseudo-terminal of the console's size, with stderr merged into stdout. With `-i`, stdin must be a console, and keys go to the container raw. `-it` works as a shorthand |
 | `--entrypoint` | image's | Replace the entrypoint; `""` removes it. Also drops the image's command, as in Docker |
 | `-e`, `--env` | | `KEY=VALUE`, or `KEY` to copy it from the host; repeatable |
 | `-w`, `--workdir` | image's, else `/` | Working directory; created if missing |
@@ -104,9 +113,20 @@ Then:
 
 Exit codes follow Docker: the container's own code, 128+N if a signal N killed
 it, 125 if runwhp failed, 126 if the command cannot be run, 127 if it does not
-exist, and 130 after Ctrl+C. Ctrl+C stops the VM at once; the container gets no
-signal. When runwhp fails after the guest booted, it prints the last kernel
-console lines.
+exist, and 130 if runwhp stopped the VM after Ctrl+C. When runwhp fails after
+the guest booted, it prints the last kernel console lines.
+
+Ctrl+C and Ctrl+Break send SIGINT to the container's process group, as a
+terminal would. A container that does not handle it exits with 130; one that
+traps it decides for itself. A second Ctrl+C stops the VM at once. With
+`-it`, Ctrl+C is a key like any other, and the container's terminal turns it
+into SIGINT. Closing the console window, logging off or shutting down sends
+SIGTERM to the container's main process and stops the VM 10 seconds later.
+While the guest is still booting, Ctrl+C stops the VM at once.
+
+With `-i` and a console but no `-t`, the console edits each line before
+sending it, ends lines with `\n`, and Ctrl+Z at the start of a line ends the
+input, as usual on Windows.
 
 Images and layers are cached in `%LOCALAPPDATA%\runwhp`, or in `RUNWHP_ROOT`
 when it is set. Registry credentials come from Docker's configuration and
@@ -114,7 +134,11 @@ credential helpers. Only `linux/amd64` images run. Nothing is ever removed from
 the cache yet.
 
 In Git Bash, set `MSYS_NO_PATHCONV=1`, or MSYS rewrites container paths such
-as `/tmp` into Windows paths before runwhp sees them.
+as `/tmp` into Windows paths before runwhp sees them. Under mintty, the
+default Git Bash window, stdin is a pipe rather than a console, so `-it`
+fails with "the input device is not a TTY"; prefix the command with
+`winpty`. Pipes from MSYS programs into native ones are slow (about 8 MB/s
+on the test machine), and stdin through `-i` is no exception.
 
 ### How a run works
 
@@ -124,14 +148,22 @@ as `/tmp` into Windows paths before runwhp sees them.
 2. runwhp writes an initramfs holding `runwhp-init`, the `virtio_blk` module,
    and a JSON spec of the process.
 3. The guest gets one multiport virtio console, with ports named `stdout`,
-   `stderr` and `control`, and one read-only virtio-blk disk per layer. Each disk's
-   serial number names its layer, so init does not depend on probe order.
-4. `runwhp-init` mounts the layers under an overlay with a tmpfs upper layer, adds `/proc`,
-   `/sys`, a minimal `/dev` and a hostname, and runs the process chrooted
-   into it. The process writes straight to the console ports, which are
-   character devices, not ttys.
-5. When the process exits, init kills whatever is left, writes the exit status
-   as JSON to the `control` port, and resets the machine, which ends the VMM.
+   `stderr`, `stdin` and `control`, and one read-only virtio-blk disk per
+   layer. Each disk's serial number names its layer, so init does not depend
+   on probe order. Each port's output is written to the host by a goroutine
+   of its own, and input is delivered to the guest from another, so the vCPU
+   never waits on the host's console or pipes.
+4. `runwhp-init` mounts the layers under an overlay with a tmpfs upper layer,
+   adds `/proc`, `/sys`, a minimal `/dev` and a hostname, and runs the
+   process chrooted into it. The process's stdin, stdout and stderr are
+   pipes, or with `-t` a pseudo-terminal from the container's own devpts,
+   and init relays them to and from the ports. A port can be open only once
+   at a time, so handing the process the ports themselves would break
+   `/dev/stdout` and similar paths.
+5. The `control` port carries JSON lines both ways: signals and terminal
+   sizes from the host, and the exit status from init. When the process
+   exits, init kills whatever is left, waits for the last output to reach
+   the ports, writes the status, and resets the machine, which ends the VMM.
 
 ### Code layout
 
@@ -170,7 +202,7 @@ supervisor process and one Job Object per container, with no daemon.
 | Device discovery | Hardware-reduced ACPI with a generated DSDT | Done |
 | Root filesystem | One read-only ext4 image per layer on virtio-blk, overlayfs in the guest, writable scratch disk | Done, but the upper layer is a tmpfs, not a scratch disk |
 | Layer conversion | `tar2ext4`, cached per layer digest | Done |
-| Container I/O | Multiport virtio console with named ports for stdout, stderr and control | Done for output; no stdin yet |
+| Container I/O | Multiport virtio console with named ports for stdout, stderr, stdin and control; pipes or a pty in the guest | Done, including `-i`, `-t`, resize and signals |
 | Guest agent | Tiny init as PID 1 that mounts the overlay and execs the process, instead of hcsshim's GCS plus runc | Done (`runwhp-init`) |
 | Bind mounts and volumes | 9p server in Go on the host, carried over vsock | Not started |
 | Networking | User-mode network stack in the VMM (gVisor netstack); published ports are loopback listeners | Not started |
@@ -212,6 +244,38 @@ Output costs a few VM exits per guest `write()` (the notification and the
 interrupt that follows it), about 50-100 µs. Large writes therefore run at hundreds of MB/s
 and many small writes are slow. Host-side writes happen on the vCPU thread, so
 a slow reader, such as an MSYS pipe, stalls the guest.
+
+## Iteration 2 results
+
+Measured on the test machine as for iteration 1, after iteration 2's changes.
+
+| Measurement | Iteration 1 | Iteration 2 |
+| --- | --- | --- |
+| `run alpine:3.20 true` | 723-729 ms | 707-709 ms over three runs |
+| `run python:3.12-slim python3 -c 'print(1)'` (4 layers) | 770 ms | 762 ms |
+| 200 MB to stdout in 32 KiB writes, redirected to a file | 1.25 s | 1.16-1.21 s |
+| 200 MB to stdout from `head -c`, which writes in small pieces | 21 s | 3.0 s |
+| 200 MB in 32 KiB writes, piped into `wc` in Git Bash | 32.5 s | 1.2 s |
+| 200 MB to stdin with `-i`, redirected from a file | | 4.4-4.5 s |
+| 200 MB to stdin with `-i`, piped from `cat` in Git Bash | | 24.5 s; a plain Go program reading the same pipe takes 23.8 s |
+
+Small writes got faster because init now reads the process's output from a
+pipe in pieces of up to 64 KiB, so many small writes reach the port as few
+large ones. The Git Bash pipe no longer holds up the guest, because output is
+written to the host off the vCPU thread.
+
+The new end-to-end tests cover:
+
+- piped stdin, empty stdin and 10 MB of stdin with its checksum
+- stdin that arrives while the guest is idle, which shows that an interrupt
+  raised from another thread wakes the halted vCPU
+- stderr flowing while stdout is not being read
+- reopening `/dev/stdout`, `/dev/stderr` and `/dev/stdin`
+- Ctrl+Break against a container that does not handle SIGINT, one that traps
+  it, and one that ignores it until the second Ctrl+Break
+- `-it` on a Windows pseudo console: `tty`, the size and a resize, `TERM`,
+  Ctrl+C as a key, and the exit code
+- Ctrl+C during a line-mode `-i` read
 
 ## Boot spike
 
@@ -373,8 +437,8 @@ starts, which covers decompressing the kernel and early memory setup.
 
 ## Known gaps
 
-- No stdin: the process reads `/dev/null`, and there is no `-i` or `-t`.
-- Ctrl+C stops the VM without signalling the container, so it cannot clean up.
+- There is no detaching or reattaching, and no way to send signals other
+  than SIGINT and SIGTERM.
 - The writable layer is a tmpfs in guest RAM. Writes are limited by `--memory`,
   and nothing written survives the run.
 - Booting needs the WSL kernel, plus `virtio_blk.ko` copied out of a WSL
@@ -384,9 +448,9 @@ starts, which covers decompressing the kernel and early memory setup.
 - Interrupts are edge-triggered only; level-triggered lines and EOI tracking
   are not implemented.
 - One vCPU. Starting further processors is untested.
-- Device emulation blocks the vCPU, for disk and console alike. Each MMIO
-  access also takes several round trips through `WinHvEmulation.dll`; a fast
-  path for common instructions would cut the per-write output cost.
+- Disk emulation blocks the vCPU. Each MMIO access also takes several round
+  trips through `WinHvEmulation.dll`; a fast path for common instructions
+  would cut the per-write output cost.
 - Guest memory is committed up front and never returned to Windows.
 - The guest clock starts at whatever the RTC stub reports and is not kept in
   step with the host afterwards.

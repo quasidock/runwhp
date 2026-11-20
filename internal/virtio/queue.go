@@ -1,6 +1,11 @@
 package virtio
 
-import "errors"
+import (
+	"encoding/binary"
+	"errors"
+	"sync/atomic"
+	"unsafe"
+)
 
 // MaxQueueSize is the largest queue a driver may configure.
 const MaxQueueSize = 256
@@ -44,7 +49,7 @@ var errBadChain = errors.New("virtio: malformed descriptor chain")
 func (q *Queue) Pop(mem Memory) (c Chain, ok bool, err error) {
 	n := uint64(q.Size)
 	avail, okA := mem.Slice(q.Avail, 4+2*n)
-	if !okA || q.lastAvail == le.Uint16(avail[2:]) {
+	if !okA || q.lastAvail == loadIdx(avail) {
 		return c, false, nil
 	}
 	c.Head = le.Uint16(avail[4+2*(uint64(q.lastAvail)%n):])
@@ -83,7 +88,38 @@ func (q *Queue) Push(mem Memory, head uint16, written uint32) {
 	slot := used[4+8*(uint64(idx)%n):]
 	le.PutUint32(slot[0:], uint32(head))
 	le.PutUint32(slot[4:], written)
-	le.PutUint16(used[2:], idx+1)
+	// The guest may be reading the ring right now: publish the index only
+	// after the element.
+	storeIdx(used, idx+1)
+}
+
+// loadIdx and storeIdx access the index of a ring whose first four bytes
+// are {flags, idx}, atomically when that word is aligned, as rings laid out by
+// Linux are. The guest runs while devices work on their queues, so plain
+// accesses could be reordered around the ring contents they publish.
+func loadIdx(ring []byte) uint16 {
+	if p, ok := word(ring); ok {
+		var b [4]byte
+		binary.NativeEndian.PutUint32(b[:], atomic.LoadUint32(p))
+		return le.Uint16(b[2:])
+	}
+	return le.Uint16(ring[2:])
+}
+
+func storeIdx(ring []byte, idx uint16) {
+	if p, ok := word(ring); ok {
+		var b [4]byte
+		copy(b[:2], ring[:2]) // flags, which the same side owns
+		le.PutUint16(b[2:], idx)
+		atomic.StoreUint32(p, binary.NativeEndian.Uint32(b[:]))
+		return
+	}
+	le.PutUint16(ring[2:], idx)
+}
+
+func word(ring []byte) (*uint32, bool) {
+	p := unsafe.Pointer(&ring[0])
+	return (*uint32)(p), uintptr(p)%4 == 0
 }
 
 // interruptsSuppressed reports whether the driver set VIRTQ_AVAIL_F_NO_INTERRUPT.

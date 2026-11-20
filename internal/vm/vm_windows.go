@@ -2,8 +2,12 @@
 
 // Package vm runs one Linux guest on the Windows Hypervisor Platform: one
 // vCPU, guest RAM at address 0, a serial port for the kernel console, an
-// emulated I/O APIC, and virtio-mmio devices. All device emulation happens on
-// the vCPU thread.
+// emulated I/O APIC, and virtio-mmio devices.
+//
+// Register accesses are served on the vCPU thread. Devices may also work from
+// goroutines of their own, through virtio.Transport.Do, and raise interrupts
+// from there: WHvRequestInterrupt wakes the vCPU even while the hypervisor
+// holds it halted, which it does without exiting to us when the guest idles.
 package vm
 
 import (
@@ -47,6 +51,14 @@ type Config struct {
 	ConsoleLine func(line string)
 	// Logf receives VMM diagnostics. nil discards them.
 	Logf func(format string, a ...any)
+}
+
+// drainer is implemented by devices that work outside the vCPU thread.
+// Drain is called once the guest has stopped. It waits until the device has
+// finished with guest memory, or until ctx is done, and reports whether it
+// finished.
+type drainer interface {
+	Drain(ctx context.Context) bool
 }
 
 // Result says how the guest stopped.
@@ -123,7 +135,12 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 	if err != nil {
 		return m.result, err
 	}
-	defer whp.FreeMemory(host)
+	freeMemory := true
+	defer func() {
+		if freeMemory {
+			whp.FreeMemory(host)
+		}
+	}()
 	m.mem = mem
 	if err := part.MapGpa(host, 0, cfg.Memory, whp.MapRead|whp.MapWrite|whp.MapExecute); err != nil {
 		return m.result, err
@@ -170,8 +187,33 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 	err = m.loop(ctx)
 	m.uart.flush()
 	m.logf("%s  stopped: %s", since(), m.result.Reason)
+	if !m.drain(ctx) {
+		// A device is still reading guest memory, most likely blocked
+		// writing to the host. The process is about to exit; leaving the
+		// memory allocated is safer than freeing it under the device.
+		freeMemory = false
+		m.logf("devices still busy; guest memory left allocated")
+	} else {
+		m.logf("%s  devices drained", since())
+	}
 	m.result.Stats = m.stats()
 	return m.result, err
+}
+
+// drain waits for devices working outside the vCPU thread to finish, then
+// closes every transport so nothing more reaches guest memory. It reports
+// whether the devices finished.
+func (m *machine) drain(ctx context.Context) bool {
+	idle := true
+	for _, t := range m.virtio {
+		if d, ok := t.Device().(drainer); ok && !d.Drain(ctx) {
+			idle = false
+		}
+	}
+	for _, t := range m.virtio {
+		t.Close()
+	}
+	return idle
 }
 
 func (m *machine) configure() error {
@@ -447,7 +489,7 @@ func (m *machine) stats() []string {
 		out = append(out, fmt.Sprintf("console: %d lines, %d bytes", m.uart.lines, m.uart.bytes))
 	}
 	if m.ioapic != nil {
-		out = append(out, fmt.Sprintf("mmio accesses: %d, interrupts delivered through the I/O APIC: %d", m.mmioCount, m.ioapic.delivered))
+		out = append(out, fmt.Sprintf("mmio accesses: %d, interrupts delivered through the I/O APIC: %d", m.mmioCount, m.ioapic.deliveredCount()))
 	}
 	for i, t := range m.virtio {
 		switch d := t.Device().(type) {
@@ -455,7 +497,7 @@ func (m *machine) stats() []string {
 			out = append(out, fmt.Sprintf("virtio %d: blk %q, %d requests, %d MiB read, %d MiB written",
 				i, d.Serial, d.Requests, d.BytesRead>>20, d.BytesWritten>>20))
 		case *virtio.Console:
-			out = append(out, fmt.Sprintf("virtio %d: console, %d bytes from the guest", i, d.BytesWritten))
+			out = append(out, fmt.Sprintf("virtio %d: console, %d bytes from the guest, %d to it", i, d.BytesWritten.Load(), d.BytesRead.Load()))
 		}
 	}
 	return out

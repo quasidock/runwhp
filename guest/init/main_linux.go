@@ -1,9 +1,10 @@
 //go:build linux
 
 // runwhp-init is PID 1 inside a runwhp guest. It mounts the image layers as
-// an overlay, runs the container process in it with its output wired to the
-// host through virtio console ports, reports how the process ended, and
-// resets the machine so the VMM exits.
+// an overlay, runs the container process in it with its standard streams
+// relayed to the host through virtio console ports, passes on the host's
+// signals and terminal sizes, reports how the process ended, and resets the
+// machine so the VMM exits.
 //
 // The contract with the host is in internal/guestspec.
 package main
@@ -104,10 +105,17 @@ func start(begin time.Time) (*outcome, error) {
 	debugf("started %d ms after the kernel handed over", time.Since(begin).Milliseconds())
 	loadModules()
 
-	ports, err := openPorts([]string{guestspec.PortStdout, guestspec.PortStderr, guestspec.PortControl}, 5*time.Second)
+	// Control first: once it is open, the host can send signals.
+	want := []portMode{{guestspec.PortControl, os.O_RDWR}, {guestspec.PortStdout, os.O_WRONLY}, {guestspec.PortStderr, os.O_WRONLY}}
+	if spec.Stdin {
+		want = append(want, portMode{guestspec.PortStdin, os.O_RDONLY})
+	}
+	ports, err := openPorts(want, 5*time.Second)
 	out := &outcome{}
+	ctl := &controller{}
 	if p := ports[guestspec.PortControl]; p != nil {
 		out.port = p
+		go ctl.listen(p)
 	}
 	if err != nil {
 		return out, err
@@ -121,7 +129,7 @@ func start(begin time.Time) (*outcome, error) {
 	if err := prepareRoot(spec.Hostname); err != nil {
 		return out, err
 	}
-	out.status, err = runProcess(&spec, ports[guestspec.PortStdout], ports[guestspec.PortStderr])
+	out.status, err = runProcess(&spec, ports, ctl)
 	return out, err
 }
 
@@ -175,9 +183,14 @@ func poll(limit time.Duration, found func() bool) bool {
 	}
 }
 
-// openPorts opens the named virtio console ports for writing. The host names
+type portMode struct {
+	name string
+	flag int
+}
+
+// openPorts opens the named virtio console ports, in order. The host names
 // each port shortly after the driver adds it, so this waits for the names.
-func openPorts(names []string, limit time.Duration) (map[string]*os.File, error) {
+func openPorts(want []portMode, limit time.Duration) (map[string]*os.File, error) {
 	byName := map[string]string{}
 	complete := func() bool {
 		dirs, _ := filepath.Glob("/sys/class/virtio-ports/vport*")
@@ -186,8 +199,8 @@ func openPorts(names []string, limit time.Duration) (map[string]*os.File, error)
 				byName[name] = filepath.Base(dir)
 			}
 		}
-		for _, n := range names {
-			if byName[n] == "" {
+		for _, p := range want {
+			if byName[p.name] == "" {
 				return false
 			}
 		}
@@ -195,16 +208,16 @@ func openPorts(names []string, limit time.Duration) (map[string]*os.File, error)
 	}
 	ok := poll(limit, complete)
 	ports := map[string]*os.File{}
-	for _, n := range names {
-		dev := byName[n]
+	for _, p := range want {
+		dev := byName[p.name]
 		if dev == "" {
 			continue
 		}
-		f, err := os.OpenFile("/dev/"+dev, os.O_WRONLY, 0)
+		f, err := os.OpenFile("/dev/"+dev, p.flag, 0)
 		if err != nil {
-			return ports, fmt.Errorf("opening console port %s: %w", n, err)
+			return ports, fmt.Errorf("opening console port %s: %w", p.name, err)
 		}
-		ports[n] = f
+		ports[p.name] = f
 	}
 	if !ok {
 		return ports, fmt.Errorf("console ports did not appear (found %v)", byName)

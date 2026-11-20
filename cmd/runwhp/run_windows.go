@@ -18,7 +18,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
+
+	"golang.org/x/sys/windows"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
@@ -41,15 +44,17 @@ func (l *listFlag) String() string     { return strings.Join(*l, ",") }
 func (l *listFlag) Set(s string) error { *l = append(*l, s); return nil }
 
 type runOptions struct {
-	entrypoint string
-	env        listFlag
-	workdir    string
-	user       string
-	memory     string
-	hostname   string
-	pull       string
-	kernel     string
-	debug      bool
+	interactive bool
+	tty         bool
+	entrypoint  string
+	env         listFlag
+	workdir     string
+	user        string
+	memory      string
+	hostname    string
+	pull        string
+	kernel      string
+	debug       bool
 
 	// Development flags, left out of the usage text.
 	init    string
@@ -59,6 +64,15 @@ type runOptions struct {
 
 func runFlags(o *runOptions) *flag.FlagSet {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+	fs.BoolVar(&o.interactive, "i", false, "")
+	fs.BoolVar(&o.interactive, "interactive", false, "")
+	fs.BoolVar(&o.tty, "t", false, "")
+	fs.BoolVar(&o.tty, "tty", false, "")
+	// The flag package does not combine short flags, and -it is how
+	// everyone types it.
+	both := func(string) error { o.interactive, o.tty = true, true; return nil }
+	fs.BoolFunc("it", "", both)
+	fs.BoolFunc("ti", "", both)
 	fs.StringVar(&o.entrypoint, "entrypoint", "", "")
 	fs.Var(&o.env, "e", "")
 	fs.Var(&o.env, "env", "")
@@ -79,7 +93,9 @@ func runFlags(o *runOptions) *flag.FlagSet {
 		fmt.Fprint(fs.Output(), `Usage: runwhp run [flags] IMAGE [COMMAND [ARG...]]
 
 Flags:
-  --entrypoint CMD       override the image's entrypoint ("" removes it)
+  -i, --interactive      pass this program's standard input to the container
+  -t, --tty              give the container a terminal; with -i, keys go to it raw
+      --entrypoint CMD   override the image's entrypoint ("" removes it)
   -e, --env KEY[=VALUE]  set an environment variable (repeatable); KEY alone copies it from here
   -w, --workdir DIR      working directory inside the container
   -u, --user USER[:GROUP]  user to run as: name or uid, optionally with a group
@@ -105,9 +121,17 @@ func cmdRun(args []string) int {
 	entrypointSet := false
 	fs.Visit(func(f *flag.Flag) { entrypointSet = entrypointSet || f.Name == "entrypoint" })
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-	code, err := run(ctx, &o, entrypointSet, fs.Args())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	proxy := &signalProxy{stop: cancel, queue: newControlQueue(), logf: func(string, ...any) {}}
+	if o.debug {
+		proxy.logf = func(format string, a ...any) { fmt.Fprintf(os.Stderr, "[vmm] "+format+"\n", a...) }
+	}
+	sigs := make(chan os.Signal, 4)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigs)
+	go proxy.run(sigs)
+	code, err := run(ctx, &o, entrypointSet, fs.Args(), proxy)
 	if err != nil {
 		if ctx.Err() != nil {
 			errorf("interrupted")
@@ -118,8 +142,11 @@ func cmdRun(args []string) int {
 	return code
 }
 
-func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string) (int, error) {
+func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, proxy *signalProxy) (int, error) {
 	const fail = guestspec.ExitRuntime
+	if o.interactive && o.tty && !isTerminal(os.Stdin) {
+		return fail, errors.New("the input device is not a TTY; if you are using mintty, try prefixing the command with 'winpty'")
+	}
 	memory, err := parseMemory(o.memory)
 	if err != nil {
 		return fail, err
@@ -219,6 +246,10 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string) 
 	spec := guestspec.Spec{
 		Args: config.Args, Env: config.Env, Cwd: config.Cwd, User: config.User,
 		Hostname: hostname, Layers: len(layerFiles), Debug: o.debug,
+		Stdin: o.interactive, TTY: o.tty,
+	}
+	if o.tty {
+		spec.Rows, spec.Cols, _ = terminalSize(os.Stdout)
 	}
 	specJSON, err := json.Marshal(spec)
 	if err != nil {
@@ -238,15 +269,24 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string) 
 	}
 
 	// Devices: the console first, then one disk per layer, bottom first.
+	var stdin io.Reader
+	if o.interactive {
+		stdin = os.Stdin
+		if isTerminal(os.Stdin) {
+			stdin = &consoleReader{h: windows.Handle(os.Stdin.Fd()), lines: !o.tty}
+		}
+	}
 	status := &statusWriter{}
 	console := &virtio.Console{
 		Ports: []virtio.Port{
 			{Name: guestspec.PortStdout, Out: os.Stdout},
 			{Name: guestspec.PortStderr, Out: os.Stderr},
-			{Name: guestspec.PortControl, Out: status},
+			{Name: guestspec.PortControl, Out: status, In: proxy.queue},
+			{Name: guestspec.PortStdin, In: stdin},
 		},
 		Logf: logf,
 	}
+	proxy.console.Store(console)
 	devices := []virtio.Device{console}
 	for i, path := range layerFiles {
 		f, err := os.Open(path)
@@ -272,6 +312,17 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string) 
 		consoleLine = func(line string) { fmt.Fprintln(os.Stderr, line) }
 	}
 
+	var term *consoleState
+	if o.tty {
+		term, err = setupConsole(o.interactive, isTerminal(os.Stdout))
+		if err != nil {
+			return fail, fmt.Errorf("setting up the console: %w", err)
+		}
+		defer term.restore()
+		done := make(chan struct{})
+		defer close(done)
+		go watchSize(done, spec.Rows, spec.Cols, proxy.queue)
+	}
 	res, err := vm.Run(ctx, vm.Config{
 		Kernel:      kernel,
 		Initrd:      boot.CPIO(files),
@@ -281,6 +332,7 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string) 
 		ConsoleLine: consoleLine,
 		Logf:        logf,
 	})
+	term.restore() // before anything else is printed
 	for _, s := range res.Stats {
 		logf("%s", s)
 	}

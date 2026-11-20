@@ -3,11 +3,16 @@
 // interface and signal the guest through a callback, so nothing here depends
 // on the hypervisor and everything can be tested against a byte slice.
 //
-// A Transport is not safe for concurrent use: the VMM drives all of them from
-// the vCPU thread.
+// Each Transport has a lock. The VMM's register accesses take it, and so does
+// Do, through which a device works on its queues from other goroutines while
+// the guest runs: the console, for instance, writes output and delivers input
+// without holding up the vCPU.
 package virtio
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"sync"
+)
 
 var le = binary.LittleEndian
 
@@ -19,6 +24,9 @@ type Memory interface {
 }
 
 // Device is the device-specific half of a virtio device.
+//
+// Config, Notify and Reset are called with the transport's lock held, so they
+// may use t.Queue and t.Interrupt directly but must not call t.Do.
 type Device interface {
 	DeviceID() uint32
 	Features() uint64
@@ -38,6 +46,9 @@ const WindowSize = 0x1000
 
 // Transport is one virtio-mmio register window.
 type Transport struct {
+	mu     sync.Mutex
+	closed bool
+
 	dev   Device
 	mem   Memory
 	raise func()
@@ -60,7 +71,29 @@ func NewTransport(dev Device, mem Memory, raise func()) *Transport {
 func (t *Transport) Device() Device { return t.dev }
 func (t *Transport) Memory() Memory { return t.mem }
 
-// Queue returns queue i, or nil if the driver has not made it ready.
+// Do runs f with the transport locked, so f may use Queue, Memory and
+// Interrupt. It does nothing once the transport is closed, and reports whether
+// f ran.
+func (t *Transport) Do(f func()) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return false
+	}
+	f()
+	return true
+}
+
+// Close stops all further work through Do. It waits for work in progress, so
+// once it returns nothing reaches guest memory through this transport.
+func (t *Transport) Close() {
+	t.mu.Lock()
+	t.closed = true
+	t.mu.Unlock()
+}
+
+// Queue returns queue i, or nil if the driver has not made it ready. The
+// lock must be held.
 func (t *Transport) Queue(i int) *Queue {
 	if i < 0 || i >= len(t.queues) || !t.queues[i].ready() {
 		return nil
@@ -69,7 +102,7 @@ func (t *Transport) Queue(i int) *Queue {
 }
 
 // Interrupt reports used buffers to the driver unless queue q asked for no
-// interrupts.
+// interrupts. The lock must be held.
 func (t *Transport) Interrupt(q int) {
 	if qu := t.Queue(q); qu != nil && qu.interruptsSuppressed(t.mem) {
 		return
@@ -115,6 +148,8 @@ func (t *Transport) selected() *Queue {
 
 // Read serves a guest read of size bytes at offset off in the window.
 func (t *Transport) Read(off uint64, size int) uint64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	if off >= regConfig {
 		cfg := t.dev.Config()
 		var val uint64
@@ -157,6 +192,8 @@ func (t *Transport) Read(off uint64, size int) uint64 {
 
 // Write serves a guest write of size bytes at offset off in the window.
 func (t *Transport) Write(off uint64, size int, val uint64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	v32 := uint32(val)
 	setLow := func(p *uint64) { *p = *p&^0xffffffff | uint64(v32) }
 	setHigh := func(p *uint64) { *p = *p&0xffffffff | uint64(v32)<<32 }

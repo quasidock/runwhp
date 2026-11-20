@@ -1,12 +1,16 @@
 package vm
 
+import "sync"
+
 // IOAPICPins is the number of interrupt lines the emulated I/O APIC has.
 // Line 4 is the serial port; virtio devices use lines 5 and up.
 const IOAPICPins = 64
 
 // ioapic routes device interrupt lines to local APIC vectors as programmed by
-// the guest. Only edge-triggered delivery is implemented.
+// the guest. Only edge-triggered delivery is implemented. Devices pulse lines
+// from their own goroutines, so all access goes through mu.
 type ioapic struct {
+	mu sync.Mutex
 	// deliver hands one interrupt to the local APIC emulation.
 	deliver   func(deliveryMode, destMode, destination, vector uint32) error
 	logf      func(format string, a ...any)
@@ -26,6 +30,8 @@ func newIOAPIC(deliver func(deliveryMode, destMode, destination, vector uint32) 
 }
 
 func (a *ioapic) read(off uint64) uint32 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	switch off {
 	case 0x00:
 		return a.sel
@@ -47,6 +53,8 @@ func (a *ioapic) read(off uint64) uint32 {
 }
 
 func (a *ioapic) write(off uint64, val uint32) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	switch off {
 	case 0x00:
 		a.sel = val & 0xff
@@ -71,6 +79,8 @@ func (a *ioapic) write(off uint64, val uint32) {
 
 // pulse signals one edge on an interrupt line.
 func (a *ioapic) pulse(pin int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if pin < 0 || pin >= len(a.redir) {
 		return
 	}
@@ -79,6 +89,13 @@ func (a *ioapic) pulse(pin int) {
 		return
 	}
 	a.send(pin)
+}
+
+// deliveredCount returns how many interrupts have gone to the local APIC.
+func (a *ioapic) deliveredCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.delivered
 }
 
 func (a *ioapic) send(pin int) {

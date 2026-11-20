@@ -8,7 +8,12 @@ package e2e
 
 import (
 	"archive/tar"
+	"bufio"
 	"bytes"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"io"
 	"log"
 	"net/http/httptest"
@@ -53,9 +58,15 @@ type result struct {
 
 func run(t *testing.T, args ...string) result {
 	t.Helper()
+	return runWithInput(t, nil, args...)
+}
+
+// runWithInput runs with stdin, or with no stdin (the null device) if nil.
+func runWithInput(t *testing.T, stdin io.Reader, args ...string) result {
+	t.Helper()
 	cmd := exec.Command(runwhp(t), append([]string{"run"}, args...)...)
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, &stdout, &stderr
 	err := cmd.Run()
 	code := 0
 	if ee, ok := err.(*exec.ExitError); ok {
@@ -155,32 +166,207 @@ func TestWhiteouts(t *testing.T) {
 	expect(t, run(t, "--pull", "always", ref, "sh", "-c", "ls /data /opq"), "/data:\nkeep\n\n/opq:\nnew\n", 0)
 }
 
-// TestInterrupt sends Ctrl+Break, which Go delivers as os.Interrupt like
-// Ctrl+C, and expects the VM to stop with exit code 130.
-func TestInterrupt(t *testing.T) {
-	cmd := exec.Command(runwhp(t), "run", alpine, "sleep", "30")
-	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP}
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+func TestStdin(t *testing.T) {
+	expect(t, runWithInput(t, strings.NewReader("hello\n"), "-i", alpine, "cat"), "hello\n", 0)
+	expect(t, runWithInput(t, strings.NewReader(""), "-i", alpine, "wc", "-c"), "0\n", 0)
+	// Without -i the process reads the null device, even with input there.
+	expect(t, runWithInput(t, strings.NewReader("ignored"), alpine, "cat"), "", 0)
+}
+
+func TestStdinLarge(t *testing.T) {
+	data := make([]byte, 10<<20)
+	rand.Read(data)
+	sum := sha256.Sum256(data)
+	r := runWithInput(t, bytes.NewReader(data), "-i", alpine, "sha256sum")
+	expect(t, r, hex.EncodeToString(sum[:])+"  -\n", 0)
+}
+
+// TestStdinDelayed writes input only once the guest has been idle a while,
+// so the vCPU is halted in the hypervisor when the data arrives.
+func TestStdinDelayed(t *testing.T) {
+	cmd := exec.Command(runwhp(t), "run", "-i", alpine, "sh", "-c", "read x; echo got $x")
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(2 * time.Second)
-	const ctrlBreak = 1
-	r, _, err := syscall.NewLazyDLL("kernel32.dll").NewProc("GenerateConsoleCtrlEvent").Call(ctrlBreak, uintptr(cmd.Process.Pid))
-	if r == 0 {
-		cmd.Process.Kill()
-		t.Skipf("cannot send Ctrl+Break here (no shared console?): %v", err)
+	time.Sleep(3 * time.Second)
+	sent := time.Now()
+	io.WriteString(in, "late\n")
+	in.Close()
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("%v; stderr %q", err, stderr.String())
 	}
+	if stdout.String() != "got late\n" {
+		t.Errorf("stdout = %q", stdout.String())
+	}
+	if d := time.Since(sent); d > time.Second {
+		t.Errorf("took %v after the input arrived", d)
+	}
+}
+
+// TestSlowReader leaves stdout unread until stderr has shown progress. When
+// output was written on the vCPU thread, the full stdout pipe stopped the
+// whole guest and this deadlocked.
+func TestSlowReader(t *testing.T) {
+	const n = 4000000
+	cmd := exec.Command(runwhp(t), "run", alpine, "sh", "-c", fmt.Sprintf("head -c %d /dev/zero & sleep 1; echo tick >&2; wait", n))
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ticked := make(chan bool, 1)
+	go func() {
+		sc := bufio.NewScanner(stderr)
+		for sc.Scan() {
+			if sc.Text() == "tick" {
+				ticked <- true
+				io.Copy(io.Discard, stderr)
+				return
+			}
+		}
+		ticked <- false
+	}()
+	select {
+	case ok := <-ticked:
+		if !ok {
+			t.Fatal("stderr ended without tick")
+		}
+	case <-time.After(15 * time.Second):
+		cmd.Process.Kill()
+		t.Fatal("stderr stalled behind unread stdout")
+	}
+	got, _ := io.Copy(io.Discard, stdout)
+	if err := cmd.Wait(); err != nil || got != n {
+		t.Errorf("read %d bytes of stdout, exit %v", got, err)
+	}
+}
+
+// TestReopenStdio opens the standard streams by name. They used to be the
+// console ports themselves, which can be open only once.
+func TestReopenStdio(t *testing.T) {
+	r := runWithInput(t, strings.NewReader("in\n"), "-i", alpine, "sh", "-c", "cat /dev/stdin; echo a > /dev/stdout; echo b | tee /dev/stderr >/dev/null")
+	expect(t, r, "in\na\n", 0)
+	if r.stderr != "b\n" {
+		t.Errorf("stderr = %q", r.stderr)
+	}
+}
+
+// interruptible starts runwhp in a process group of its own, waits for ready
+// on stdout, and returns a function that sends it Ctrl+Break, which Go
+// delivers as os.Interrupt like Ctrl+C.
+func interruptible(t *testing.T, stdout *syncBuffer, stderr *bytes.Buffer, args ...string) (*exec.Cmd, func()) {
+	t.Helper()
+	cmd := exec.Command(runwhp(t), append([]string{"run"}, args...)...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(15 * time.Second); !strings.Contains(stdout.String(), "ready"); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			cmd.Process.Kill()
+			t.Fatalf("container never got ready; stderr %q", stderr.String())
+		}
+	}
+	return cmd, func() {
+		const ctrlBreak = 1
+		r, _, err := syscall.NewLazyDLL("kernel32.dll").NewProc("GenerateConsoleCtrlEvent").Call(ctrlBreak, uintptr(cmd.Process.Pid))
+		if r == 0 {
+			cmd.Process.Kill()
+			t.Skipf("cannot send Ctrl+Break here (no shared console?): %v", err)
+		}
+	}
+}
+
+func exitCode(err error) int {
+	if ee, ok := err.(*exec.ExitError); ok {
+		return ee.ExitCode()
+	}
+	if err != nil {
+		return -1
+	}
+	return 0
+}
+
+// TestInterrupt checks that Ctrl+Break reaches a container that does not
+// handle it, which then dies of SIGINT.
+func TestInterrupt(t *testing.T) {
+	var stdout syncBuffer
+	var stderr bytes.Buffer
+	cmd, interrupt := interruptible(t, &stdout, &stderr, alpine, "sh", "-c", "echo ready; sleep 30")
+	interrupt()
 	start := time.Now()
-	err = cmd.Wait()
-	ee, ok := err.(*exec.ExitError)
-	if !ok || ee.ExitCode() != 130 {
-		t.Errorf("exit = %v, want 130; stderr %q", err, stderr.String())
+	if code := exitCode(cmd.Wait()); code != 130 {
+		t.Errorf("exit = %d, want 130; stderr %q", code, stderr.String())
 	}
 	if d := time.Since(start); d > 5*time.Second {
 		t.Errorf("took %v to stop", d)
 	}
+}
+
+// TestInterruptTrapped checks that the container can handle the interrupt.
+func TestInterruptTrapped(t *testing.T) {
+	var stdout syncBuffer
+	var stderr bytes.Buffer
+	cmd, interrupt := interruptible(t, &stdout, &stderr, alpine, "sh", "-c", `trap "echo bye; exit 5" INT; echo ready; sleep 30 & wait`)
+	interrupt()
+	if code := exitCode(cmd.Wait()); code != 5 || stdout.String() != "ready\nbye\n" {
+		t.Errorf("exit %d, stdout %q, want 5 and bye; stderr %q", code, stdout.String(), stderr.String())
+	}
+}
+
+// TestSecondInterrupt checks that a second interrupt stops a container that
+// ignores the first.
+func TestSecondInterrupt(t *testing.T) {
+	var stdout syncBuffer
+	var stderr bytes.Buffer
+	cmd, interrupt := interruptible(t, &stdout, &stderr, alpine, "sh", "-c", `trap "" INT; echo ready; sleep 30`)
+	exited := make(chan error, 1)
+	interrupt()
+	go func() { exited <- cmd.Wait() }()
+	select {
+	case err := <-exited:
+		t.Fatalf("stopped after the first interrupt: %v", err)
+	case <-time.After(time.Second):
+	}
+	interrupt()
+	start := time.Now()
+	if code := exitCode(<-exited); code != 130 {
+		t.Errorf("exit = %d, want 130; stderr %q", code, stderr.String())
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("took %v to stop", d)
+	}
+}
+
+// syncBuffer is a bytes.Buffer that can be read while a process writes it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 func tarLayer(t *testing.T, files map[string]string) v1.Layer {

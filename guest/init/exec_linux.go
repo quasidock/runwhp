@@ -19,8 +19,9 @@ import (
 const defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 // runProcess starts the container process chrooted into the overlay, waits
-// for it, and kills whatever it left behind.
-func runProcess(spec *guestspec.Spec, stdout, stderr *os.File) (guestspec.Status, error) {
+// for it, kills whatever it left behind, and waits for the last of its
+// output to reach the ports.
+func runProcess(spec *guestspec.Spec, ports map[string]*os.File, ctl *controller) (guestspec.Status, error) {
 	if len(spec.Args) == 0 {
 		return guestspec.Status{}, fail(guestspec.ExitRuntime, "no command specified")
 	}
@@ -41,6 +42,9 @@ func runProcess(spec *guestspec.Spec, stdout, stderr *os.File) (guestspec.Status
 	if lookupEnv(env, "HOME") == "" {
 		env = append(env, "HOME="+user.Home)
 	}
+	if spec.TTY && lookupEnv(env, "TERM") == "" {
+		env = append(env, "TERM=xterm")
+	}
 
 	cwd := spec.Cwd
 	if cwd == "" {
@@ -58,29 +62,37 @@ func runProcess(spec *guestspec.Spec, stdout, stderr *os.File) (guestspec.Status
 		return guestspec.Status{}, err
 	}
 
-	devnull, err := os.Open("/dev/null")
+	streams, err := newStdio(spec, ports, user.UID)
 	if err != nil {
 		return guestspec.Status{}, err
 	}
-	defer devnull.Close()
+	ctl.setTerminal(streams.master)
 	attr := &syscall.ProcAttr{
 		Dir:   cwd,
 		Env:   env,
-		Files: []uintptr{devnull.Fd(), stdout.Fd(), stderr.Fd()},
+		Files: streams.fds(),
 		Sys: &syscall.SysProcAttr{
 			Chroot:     root,
 			Credential: &syscall.Credential{Uid: user.UID, Gid: user.GID, Groups: user.Groups},
 			Setsid:     true,
+			Setctty:    spec.TTY,
+			Ctty:       0,
 		},
 	}
-	debugf("exec %q as %d:%d in %s", spec.Args, user.UID, user.GID, cwd)
+	debugf("exec %q as %d:%d in %s (stdin %v, tty %v)", spec.Args, user.UID, user.GID, cwd, spec.Stdin, spec.TTY)
 	pid, err := syscall.ForkExec(exe, spec.Args, attr)
+	streams.started()
 	if err != nil {
 		return guestspec.Status{}, execFailure(spec.Args[0], err)
 	}
+	ctl.start(pid)
 
 	status := reap(pid)
+	ctl.exited()
 	cleanUp()
+	if !streams.wait(2 * time.Second) {
+		logf("output still pending 2 s after the processes ended; reporting without it")
+	}
 	return status, nil
 }
 
