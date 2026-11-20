@@ -25,7 +25,9 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
 	"github.com/quasidock/runwhp/internal/boot"
+	"github.com/quasidock/runwhp/internal/fuse"
 	"github.com/quasidock/runwhp/internal/guestspec"
+	"github.com/quasidock/runwhp/internal/hostfs"
 	"github.com/quasidock/runwhp/internal/image"
 	"github.com/quasidock/runwhp/internal/kernel"
 	"github.com/quasidock/runwhp/internal/netstack"
@@ -62,6 +64,8 @@ type runOptions struct {
 	network     string
 	publish     listFlag
 	addHosts    listFlag
+	volumes     listFlag
+	mounts      listFlag
 
 	// Development flags, left out of the usage text.
 	init    string
@@ -98,6 +102,9 @@ func runFlags(o *runOptions) *flag.FlagSet {
 	fs.Var(&o.publish, "p", "")
 	fs.Var(&o.publish, "publish", "")
 	fs.Var(&o.addHosts, "add-host", "")
+	fs.Var(&o.volumes, "v", "")
+	fs.Var(&o.volumes, "volume", "")
+	fs.Var(&o.mounts, "mount", "")
 	fs.StringVar(&o.init, "init", "", "")
 	fs.Var(&o.layers, "layer", "")
 	fs.Var(&o.modules, "module", "")
@@ -118,6 +125,9 @@ Flags:
                          IP defaults to 127.0.0.1
       --add-host NAME:IP add an /etc/hosts entry (repeatable); IP host-gateway reaches
                          this machine's 127.0.0.1
+  -v, --volume HOSTPATH:PATH[:ro]  bind a host directory or file into the container (repeatable);
+                         HOSTPATH is absolute or starts with a dot, and is created if missing
+      --mount type=bind,source=HOSTPATH,target=PATH[,readonly]  the same, Docker's long form
       --pull POLICY      when to pull the image: missing, always or never (default missing);
                          never also keeps runwhp from fetching its own kernel
       --kernel PATH      Linux bzImage to boot instead of runwhp's own kernel
@@ -170,6 +180,10 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 		return fail, err
 	}
 	network, err := parseNetworkFlags(o.network, o.publish, o.addHosts)
+	if err != nil {
+		return fail, err
+	}
+	shares, mounts, err := parseBinds(o.volumes, o.mounts)
 	if err != nil {
 		return fail, err
 	}
@@ -235,8 +249,11 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 	if network.enabled {
 		others++
 	}
+	if len(shares) > 0 {
+		others++
+	}
 	if others+len(layerFiles) > vm.MaxDevices {
-		return fail, fmt.Errorf("the image has %d layers; runwhp supports at most %d (%d with --network none)",
+		return fail, fmt.Errorf("the image has %d layers; runwhp supports at most %d here (%d with --network none and no -v)",
 			len(layerFiles), vm.MaxDevices-others, vm.MaxDevices-1)
 	}
 	logf("%4d ms  image ready: %d layers", time.Since(start).Milliseconds(), len(layerFiles))
@@ -277,7 +294,7 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 	spec := guestspec.Spec{
 		Args: config.Args, Env: config.Env, Cwd: config.Cwd, User: config.User,
 		Hostname: hostname, Hosts: network.hosts, Layers: len(layerFiles), Debug: o.debug,
-		Stdin: o.interactive, TTY: o.tty, Network: network.spec(),
+		Stdin: o.interactive, TTY: o.tty, Network: network.spec(), Mounts: mounts,
 	}
 	if o.tty {
 		spec.Rows, spec.Cols, _ = terminalSize(os.Stdout)
@@ -296,8 +313,8 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 	}
 	files = append(files, modules...)
 
-	// Devices: the console first, then the network device if any, then one
-	// disk per layer, bottom first.
+	// Devices: the console first, then the network device and the shares'
+	// file system if any, then one disk per layer, bottom first.
 	var stdin io.Reader
 	if o.interactive {
 		stdin = os.Stdin
@@ -334,6 +351,16 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 		}()
 		nic.Recv = stack.Inject
 		devices = append(devices, nic)
+	}
+	if len(shares) > 0 {
+		fsys, err := hostfs.New(shares, logf)
+		if err != nil {
+			return fail, err
+		}
+		defer fsys.Close()
+		server := &fuse.Server{FS: fsys, Logf: logf}
+		defer func() { logf("%s", server.Stats()) }()
+		devices = append(devices, &virtio.Fs{Tag: guestspec.FSTag, Handler: server})
 	}
 	for i, path := range layerFiles {
 		f, err := os.Open(path)

@@ -129,10 +129,19 @@ func start(begin time.Time) (*outcome, error) {
 	if err := prepareRoot(&spec); err != nil {
 		return out, err
 	}
+	user, err := resolveUser(&spec)
+	if err != nil {
+		return out, err
+	}
+	// After prepareRoot, so the user's own /etc/hosts, say, wins over the
+	// one runwhp writes, and runwhp never writes into a host file.
+	if err := mountShares(spec.Mounts, user); err != nil {
+		return out, err
+	}
 	if err := enterRoot(); err != nil {
 		return out, err
 	}
-	out.status, err = runProcess(&spec, ports, ctl)
+	out.status, err = runProcess(&spec, user, ports, ctl)
 	return out, err
 }
 

@@ -1,4 +1,4 @@
-# runwhp - minimalistic container runtime for Windows
+# runwhp - lightweight, rootless container runtime for Windows
 
 `runwhp` is an experimental OCI runtime that runs Linux containers on any Windows
 edition, including Home. It drives the Windows Hypervisor Platform (WHP)
@@ -12,9 +12,14 @@ build.
 ## Status
 
 `runwhp` is experimental. It runs Linux containers from registry images,
-interactively or not, with a network, on a kernel of its own, but without
-access to host files yet.
+interactively or not, with a network and the host's files, on a kernel of
+its own.
 
+- **Iteration 5** (2026-11-21): `-v` and `--mount` bind host directories and
+  files into the container. runwhp serves them itself over virtio-fs, and
+  keeps the owners, modes, symlinks and special files the container makes in
+  the format WSL uses, so WSL sees them the same way. See
+  [Host files](#host-files) and [Iteration 5 results](#iteration-5-results).
 - **Iteration 4** (2026-11-20): runwhp boots its own kernel, Linux 6.18 with
   everything it needs built in, fetched once from ghcr.io and pinned by
   digest. WSL is no longer needed, nor is copying a driver out of it, and
@@ -41,7 +46,7 @@ access to host files yet.
   kernel on WHP. See [Boot spike](#boot-spike).
 - **Proposed, not yet agreed**: the rest of the architecture in
   [Proposed design](#proposed-design).
-- **Not started**: host file sharing, more than one vCPU, and the runc-style
+- **Not started**: named volumes, more than one vCPU, and the runc-style
   lifecycle commands.
 
 ## Why not runhcs, HCS, or WSL
@@ -102,6 +107,8 @@ Get-Content data.csv | .\out\runwhp.exe run -i alpine:3.20 wc -l
 .\out\runwhp.exe run alpine:3.20 sh -c 'apk add -q curl && curl -sI https://example.com'
 .\out\runwhp.exe run -p 8080:80 nginx:alpine
 .\out\runwhp.exe run --add-host host.docker.internal:host-gateway alpine:3.20 wget -qO- http://host.docker.internal:3000/
+.\out\runwhp.exe run -v ${PWD}:/src -w /src alpine:3.20 ls -l
+.\out\runwhp.exe run --mount type=bind,source=C:\data,target=/data,readonly alpine:3.20 du -sh /data
 .\out\runwhp.exe pull debian:12
 ```
 
@@ -118,6 +125,8 @@ Get-Content data.csv | .\out\runwhp.exe run -i alpine:3.20 wc -l
 | `--network`, `--net` | `user` | `user` gives the container a network through runwhp; `none` leaves it only loopback |
 | `-p`, `--publish` | | `[IP:]HOSTPORT:PORT[/tcp]`: listen on the host and forward to the container's TCP port; repeatable. IP defaults to `127.0.0.1` |
 | `--add-host` | | `NAME:IP` or `NAME=IP`, added to `/etc/hosts`; repeatable. `NAME:host-gateway` also lets the container reach the host's `127.0.0.1` at that name |
+| `-v`, `--volume` | | `HOSTPATH:PATH[:ro]`: bind a host directory or file at `PATH`; repeatable. A missing `HOSTPATH` is made as a directory. See [Host files](#host-files) |
+| `--mount` | | `type=bind,source=HOSTPATH,target=PATH[,readonly]`: the same, in Docker's long form; `HOSTPATH` must exist |
 | `--pull` | `missing` | When to pull the image: `missing`, `always` or `never`. `never` also keeps runwhp from fetching its kernel |
 | `--kernel` | runwhp's own | bzImage to boot instead; see [Kernel](#kernel) |
 | `--debug` | off | Kernel console, init's steps and VMM statistics on stderr |
@@ -146,7 +155,8 @@ Registry credentials come from Docker's configuration and credential helpers.
 Only `linux/amd64` images run. Nothing is ever removed from the cache yet.
 
 In Git Bash, set `MSYS_NO_PATHCONV=1`, or MSYS rewrites container paths such
-as `/tmp` into Windows paths before runwhp sees them. Under mintty, the
+as `/tmp` into Windows paths before runwhp sees them; then
+`-v "$(pwd -W):/src"` binds the current directory. Under mintty, the
 default Git Bash window, stdin is a pipe rather than a console, so `-it`
 fails with "the input device is not a TTY"; prefix the command with
 `winpty`. Pipes from MSYS programs into native ones are slow (about 8 MB/s
@@ -185,6 +195,61 @@ listens on the port is accepted and then closed, as with Docker.
 `ping` gets answers only from the gateway: runwhp carries TCP and UDP, not
 ICMP.
 
+### Host files
+
+`-v HOSTPATH:PATH` makes a host directory or file appear at `PATH` in the
+container. Changes either side makes show on the other.
+
+- `HOSTPATH` is an absolute Windows path (`C:\src`, `C:/src`,
+  `\\server\share\dir`), a path starting with a dot (`.`, `.\src`), which is
+  relative to the current directory, or Git Bash's `/c/src`. A name without
+  a path, such as `data`, would be a named volume, which runwhp does not have
+  yet.
+- `-v` makes a missing `HOSTPATH` as a directory, as Docker does; `--mount`
+  requires it to exist.
+- `PATH` must be absolute, and cannot be `/` or lie under `/proc` or `/sys`.
+  A missing `PATH` is made in the container; if it leads through a link in
+  the image, such as alpine's `/var/run`, the mount goes where the link
+  leads. Mounts inside mounts work whatever order they are given in. A file
+  bound over one runwhp writes, such as `/etc/hosts`, wins.
+- `:ro` makes the mount read-only, and `:rw`, the default, writable. `z`,
+  `Z`, `cached`, `delegated` and `consistent` are accepted and ignored.
+
+**Owners and modes.** Windows has no Unix owners or modes. A file that has
+never had them shows as belonging to the container's user, the one `-u` or
+the image's `USER` names, with mode 755. A file Windows marks read-only
+shows without write bits. Everything the container sets is kept: files it
+makes belong to the process that made them, and `chmod`, `chown`, symlinks,
+FIFOs, sockets and device nodes survive the run. runwhp stores them as WSL
+does with its `metadata` mount option, in the extended attributes `$LXUID`,
+`$LXGID`, `$LXMOD` and `$LXDEV` and in WSL's reparse points, so WSL shows
+the same owners, modes and links. Taking away the owner's write bit also
+marks the file read-only for Windows. On a volume without extended
+attributes, such as FAT or some network shares, `chmod` and `chown` succeed
+and change nothing.
+
+**Links.** A symlink made in the container is a WSL symlink, which Windows
+programs do not follow. Windows symlinks and junctions show as symlinks: one
+pointing into the same mount shows its container path, and any other its
+Windows path, which leads nowhere in the container. runwhp never follows a
+link on the host, so no link reaches outside what was mounted. Hard links
+work within a mount.
+
+**Names.** Lookups are case-insensitive, as on the host, unless the directory
+has been made case-sensitive with `fsutil file setCaseSensitiveInfo`.
+Listings show names as stored. Characters Windows forbids in names
+(`\ : * ? " < > |`) are stored as WSL stores them, as U+F000 plus the
+character.
+
+**Caching.** The container caches names and attributes for a second, and file
+contents until a file's size or modification time changes, so a change made
+on the host shows within about a second. Host changes raise no inotify
+events in the container, so file watchers there must poll.
+
+Removing a file that is open works as on Linux: the name goes at once and
+the open file stays readable. A rename replaces the target, even a read-only
+one. File locks are kept in the guest and are invisible to host programs.
+
 ### Kernel
 
 runwhp boots unmodified upstream Linux, currently 6.18.64 (a longterm
@@ -197,7 +262,7 @@ configuration, [`kernel/runwhp.config`](kernel/runwhp.config), applies over
 | Booting on runwhp's VMM | Hyper-V clock and APIC enlightenments without VMBus, ACPI (which needs PCI support, though runwhp boots with `pci=off`), virtio-mmio, the COM1 console, an uncompressed initramfs |
 | runwhp-init | ext4, overlayfs, tmpfs with xattrs, devtmpfs, virtio block, console and network devices, IPv4 and Unix sockets |
 | Containers | Namespaces, cgroup v2 controllers, seccomp, BPF, IPv6, 32-bit binaries, `binfmt_misc`, FUSE, TUN, veth, bridges, nftables and iptables (both over nftables and legacy) |
-| Later work | vsock, 9p and virtio-fs for host file sharing; the virtio balloon with free page reporting |
+| Later work | Host file sharing: virtio-fs, which bind mounts now use, and vsock and 9p, which nothing uses yet; the virtio balloon with free page reporting |
 
 CPU vulnerability mitigations stay at upstream's defaults. The kernel is
 LZ4-compressed, which decompresses fastest.
@@ -265,7 +330,8 @@ bzImage.
    of the process.
 3. The guest gets one multiport virtio console, with ports named `stdout`,
    `stderr`, `stdin` and `control`; a virtio network device, unless
-   `--network none`; and one read-only virtio-blk disk per layer. Each disk's
+   `--network none`; a virtio-fs device, with `-v` or `--mount`; and one
+   read-only virtio-blk disk per layer. Each disk's
    serial number names its layer, so init does not depend on probe order.
    Each port's output is written to the host by a goroutine of its own, and
    input is delivered to the guest from another, so the vCPU never waits on
@@ -279,16 +345,24 @@ bzImage.
    opens a host socket to the same destination and copies between the two.
    Published ports are host listeners whose connections the stack opens
    towards the guest.
-5. `runwhp-init` mounts the layers under an overlay with a tmpfs upper layer,
+5. The virtio-fs device's far end is a FUSE server inside runwhp, which
+   serves every mount at once: its root, which only init sees, holds them as
+   entries `0`, `1`, and so on. Requests are served on goroutines, up to 16
+   at a time, through Windows' native API, and complete in whatever order
+   they finish. A read or write carries up to 512 KiB.
+6. `runwhp-init` mounts the layers under an overlay with a tmpfs upper layer,
    adds `/proc`, `/sys`, a minimal `/dev`, a hostname and `/etc/hosts`,
-   configures `eth0` and `/etc/resolv.conf` when there is a network, moves
-   the overlay over the initramfs as the root, as `switch_root` does, and
+   configures `eth0` and `/etc/resolv.conf` when there is a network,
+   resolves the container's user, mounts the virtio-fs device, tells it who
+   owns host files without an owner, and binds each mount onto its target.
+   It then moves the overlay over the initramfs as the root, as `switch_root`
+   does, which leaves the virtio-fs root out of the container's reach, and
    runs the process in it. The process's stdin, stdout and stderr are
    pipes, or with `-t` a pseudo-terminal from the container's own devpts,
    and init relays them to and from the ports. A port can be open only once
    at a time, so handing the process the ports themselves would break
    `/dev/stdout` and similar paths.
-6. The `control` port carries JSON lines both ways: signals and terminal
+7. The `control` port carries JSON lines both ways: signals and terminal
    sizes from the host, and the exit status from init. When the process
    exits, init kills whatever is left, waits for the last output to reach
    the ports, writes the status, and resets the machine, which ends the VMM.
@@ -301,8 +375,10 @@ bzImage.
 | [`internal/whp`](internal/whp) | Bindings for `WinHvPlatform.dll` and `WinHvEmulation.dll` |
 | [`internal/vm`](internal/vm) | Partition setup, vCPU loop, serial port, RTC stub, I/O APIC |
 | [`internal/boot`](internal/boot) | Kernel loader, page tables, ACPI tables, initramfs builder. Builds on any OS |
-| [`internal/virtio`](internal/virtio) | virtio-mmio transport, block device, multiport console, network device. Builds on any OS |
+| [`internal/virtio`](internal/virtio) | virtio-mmio transport, block device, multiport console, network device, file system device. Builds on any OS |
 | [`internal/netstack`](internal/netstack) | The host end of the container's network: gVisor's netstack, TCP and UDP forwarding, DNS, published ports. Builds on any OS |
+| [`internal/fuse`](internal/fuse) | The FUSE protocol as virtio-fs speaks it, served from a file system interface. Builds on any OS |
+| [`internal/hostfs`](internal/hostfs) | The host end of bind mounts: Windows files served as that file system, with WSL's metadata |
 | [`internal/image`](internal/image), [`internal/layer`](internal/layer) | Registry pulls, image records, layer conversion and cache |
 | [`internal/kernel`](internal/kernel) | The kernel artifact's format, the pinned build, and fetching it into the store |
 | [`kernel`](kernel) | The kernel's configuration and build; [`kernel/push`](kernel/push) publishes it |
@@ -340,7 +416,7 @@ supervisor process and one Job Object per container, with no daemon.
 | Layer conversion | `tar2ext4`, cached per layer digest | Done |
 | Container I/O | Multiport virtio console with named ports for stdout, stderr, stdin and control; pipes or a pty in the guest | Done, including `-i`, `-t`, resize and signals |
 | Guest agent | Tiny init as PID 1 that mounts the overlay and execs the process, instead of hcsshim's GCS plus runc | Done (`runwhp-init`) |
-| Bind mounts and volumes | 9p server in Go on the host, carried over vsock | Not started |
+| Bind mounts and volumes | virtio-fs, with a FUSE server in Go serving Windows files and keeping Unix metadata as WSL does | Bind mounts done; named volumes not started |
 | Networking | User-mode network stack in the VMM (gVisor netstack); published ports are loopback listeners | Done, IPv4 only, TCP ports only |
 | Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | `run` and `pull` only |
 | Kernel | Our own build with virtio drivers built in, shipped as a signed OCI artifact | Done: Linux 6.18 LTS on ghcr.io, pinned by digest rather than signed |
@@ -513,6 +589,99 @@ The new tests cover:
 
 The whole suite passes on runwhp's kernel and, through
 `RUNWHP_E2E_RUN_FLAGS`, on the WSL kernel.
+
+## Iteration 5 results
+
+Measured on the test machine with runwhp's kernel, on its NTFS system volume
+(`C:`, where the temporary directory is) and a ReFS volume (`E:`).
+
+A bind mount costs almost nothing at start, over five runs from Git Bash:
+
+| Measurement | Result |
+| --- | --- |
+| `run alpine:3.20 true` | 278-280 ms |
+| the same with one `-v` | 279-286 ms |
+| the same with five `-v` | 282-287 ms |
+
+Moving 200 MB, timed inside the guest with `-m 1g`, over three runs. Reads
+follow a `drop_caches`, so they come from the host. The overlay, a tmpfs in
+guest RAM, is there for scale:
+
+| Measurement | NTFS | ReFS | Overlay |
+| --- | --- | --- | --- |
+| `dd` in 1 MiB blocks, then `fsync` | 0.96-1.09 s | 0.97-1.03 s | 0.46-0.47 s |
+| `dd` reading it back | 0.21 s | 0.18-0.21 s | 0.01-0.02 s |
+| `head -c`, which writes about 820 bytes at a time | 34.7-34.9 s | 32.3-32.9 s | 1.24-1.26 s |
+
+Large reads and writes go at 200 MB/s to 1 GB/s. Small writes are slow
+because each `write()` is a request to the host, and a request costs about
+100-150 µs: three or four VM exits for the notification and the interrupt,
+which the MMIO fast path in [Known gaps](#known-gaps) would cut, and the
+Windows call. Writing 20 MB from `dd` took 0.12 s in 64 KiB blocks and
+0.8 s in 4 KiB blocks. FUSE's writeback cache would gather small writes
+together, but at a cost to host edits; see [Open questions](#open-questions).
+
+A tree of 10,000 small files in 100 directories, one run each. "New
+container" is the first run of a command after a fresh boot, "again" the
+second in the same container. WSL2's `/mnt/c`, a 9p mount of the same NTFS
+volume, is there for comparison:
+
+| Measurement | NTFS | ReFS | WSL2 `/mnt/c` | Overlay |
+| --- | --- | --- | --- | --- |
+| `tar -x` from the overlay | 40.8 s | 35.9 s | 35.5 s | 0.37 s |
+| `find`, new container | 0.36 s | 0.49 s | 0.35 s | 0.02 s |
+| `ls -lR` | 0.33 s | 0.43 s | 27.5 s | 0.03 s |
+| `git add -A` and `git commit` | 69 s | 53 s | 184 s | 0.9 s |
+| `git status`, new container | 0.84-0.94 s | 0.94-1.05 s | 3.96-3.98 s | 0.02-0.03 s |
+| `git status` again | 0.13-0.21 s | 0.17-0.33 s | 4.0 s | 0.03 s |
+| `rm -rf` | 7.7-16.6 s over three runs | 14.3 s | 26.2 s | |
+
+Reading a tree is fast: the guest caches what it learns, and listings carry
+attributes. Making files is slow. `tar -x` made 12 requests per file, and
+the host spent 20 of its 41 seconds in Windows calls: creating a file took
+0.5 ms, each of the three changes to its owner, mode and times 0.26 ms, and
+closing it after a write 0.14 ms. `git add` spent 15 s making 10,000 hard links at 1.5 ms each;
+outside the VM, `CreateHardLink` alone takes 0.6-0.7 ms per link on NTFS and
+0.24 ms on ReFS.
+
+Statting files with `NtQueryInformationByName` instead of opening them,
+8 µs instead of 38 µs per file on NTFS, halved `find` and `ls -lR`.
+
+The new tests cover:
+
+- the virtio-fs device against a simulated driver: its tag, requests and
+  replies split over several buffers, requests completing out of order,
+  FORGET without a reply, a reset with requests in flight, draining, and
+  shared memory regions reading as absent
+- the FUSE server against a fake file system: INIT with older and newer
+  kernels, entries and negative entries, errors, forgets, reads across
+  page-sized buffers, READDIRPLUS counting only the entries that fit, and
+  SETATTR
+- the host file system, on NTFS and, through `RUNWHP_TEST_DIR`, on ReFS:
+  - lookups, case-insensitive ones included, and listings
+  - creating, writing, truncating and setting times
+  - metadata surviving into a new server, and the read-only attribute
+  - removing open and read-only files
+  - renames over a file, over an empty directory and to another case
+  - hard links
+  - WSL symlinks, FIFOs, sockets and device nodes
+  - junctions not followed, and their targets translated
+  - read-only mounts, file mounts, and forgetting nodes
+- parsing `-v` and `--mount`
+- end to end:
+  - reading and writing both ways, with a 20 MB checksum each way
+  - `:ro` and `readonly`
+  - file mounts, including over `/etc/hosts`, which stays untouched on the host
+  - nested mounts given in either order
+  - owners with and without `-u`, and `git` as a non-root user
+  - `chmod`, `chown`, a symlink and a FIFO surviving into the next run
+  - renames, and removing an open file
+  - a host change showing within a second
+  - a junction to outside the mount not followed
+  - a mount point through an image's link, and a working directory in a mount
+  - missing sources and named volumes
+
+The whole suite passes on runwhp's kernel and on the WSL kernel.
 
 ## Boot spike
 
@@ -687,19 +856,48 @@ starts, which covers decompressing the kernel and early memory setup.
   root, as `switch_root` does, instead of starting the process in a chroot.
 - **LZ4 boots fastest**, even though it makes the largest kernel; see
   [Iteration 4 results](#iteration-4-results).
+- **A missing virtio shared memory region must read as length -1.** The WSL
+  kernel, built with FUSE DAX, asks a virtio-fs device for its DAX window.
+  The transport answered 0, so the kernel tried to reserve an empty region at
+  address 0, failed with EBUSY, and dropped the device. runwhp's kernel has
+  no DAX and never asked.
+- **NT checks the alignment of what it fills in.** A Go byte array has none,
+  and `NtQueryInformationFile` then fails with
+  `STATUS_DATATYPE_MISALIGNMENT`, which at first looked like a file system
+  without WSL's metadata. Every buffer runwhp hands to NT is now 8-byte
+  aligned.
+- **ReFS file ids are 128 bits.** The 64-bit id a stat reports is a packed
+  form, which matches what `FILE_ID_BOTH_DIR_INFO` listings report, but not
+  the 128-bit ids of `FILE_ID_EXTD_DIR_INFO` listings, whose low halves are
+  small and repeat across directories.
+- **An unelevated process can do what WSL does.** It can set WSL's reparse
+  points and extended attributes, and delete and rename with POSIX
+  semantics, on NTFS and on ReFS alike.
+- **`NtQueryInformationByName` stats without opening.** On NTFS it is five
+  times faster than an open, a query and a close. It does not follow a link,
+  and with `FileStatLxInformation` it returns WSL's metadata too.
 
 ## Known gaps
 
 - There is no detaching or reattaching, and no way to send signals other
   than SIGINT and SIGTERM.
 - The writable layer is a tmpfs in guest RAM. Writes are limited by `--memory`,
-  and nothing written survives the run.
+  and nothing written outside a bind mount survives the run.
+- There are no named volumes and no `--tmpfs`.
+- Every `write()` to a bind mount is a request to the host, about 130 µs each
+  on the test machine, so a program writing in small pieces is slow there;
+  see [Iteration 5 results](#iteration-5-results). Making files is slow too,
+  at 3-4 ms each, mostly in Windows itself.
+- Host changes in bind mounts raise no inotify events in the container.
+  Extended attributes cannot be set there, and file locks are not shared with
+  host programs.
 - The kernel's first fetch needs ghcr.io, unless `--kernel` names one. A new
   kernel build reaches runwhp only when someone moves the pin in
   `internal/kernel/pin.go`, and the pinned digest is the only check on it:
   builds are not signed.
-- An image can have at most 57 non-empty layers, or 58 with
-  `--network none`: each device takes an I/O APIC line.
+- An image can have at most 57 non-empty layers, one more with
+  `--network none`, and one fewer with bind mounts: each device takes an
+  I/O APIC line.
 - The network is IPv4 only and carries no ICMP. Only TCP ports can be
   published, each with an explicit host port, and there is no `-P`, `--dns`
   or `--dns-search`.
@@ -729,8 +927,10 @@ starts, which covers decompressing the kernel and early memory setup.
   is off, or must there be a fallback that needs none?
 - virtio-mmio with generated ACPI, as spiked, or virtio over PCI with MSI-X,
   which avoids both the I/O APIC and the bytecode but needs PCI emulation?
-- How should host directories behave when shared into the guest, given NTFS
-  case-insensitivity and the lack of Unix permissions and symlinks?
+- Should bind mounts use FUSE's writeback cache? It would gather small
+  writes into large ones, but Linux then trusts its own idea of a file's size
+  and modification time, so a host program changing a file in place could go
+  unseen in the container. See [Iteration 5 results](#iteration-5-results).
 - What protection does the guest kernel owe a container from itself? The VM
   is the boundary with the host, and the container is the guest's only
   tenant, so KASLR is off; CPU mitigations are on, at a cost to system

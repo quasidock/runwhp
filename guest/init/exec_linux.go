@@ -18,18 +18,24 @@ import (
 
 const defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-// runProcess starts the container process, once enterRoot has made the
-// overlay the root, waits for it, kills whatever it left behind, and waits
-// for the last of its output to reach the ports.
-func runProcess(spec *guestspec.Spec, ports map[string]*os.File, ctl *controller) (guestspec.Status, error) {
-	if len(spec.Args) == 0 {
-		return guestspec.Status{}, fail(guestspec.ExitRuntime, "no command specified")
-	}
+// resolveUser resolves the container's user against the image's
+// /etc/passwd and /etc/group.
+func resolveUser(spec *guestspec.Spec) (passwd.User, error) {
 	pw, _ := os.ReadFile(filepath.Join(root, "etc/passwd"))
 	gr, _ := os.ReadFile(filepath.Join(root, "etc/group"))
 	user, err := passwd.Resolve(spec.User, pw, gr)
 	if err != nil {
-		return guestspec.Status{}, fail(guestspec.ExitRuntime, "%v", err)
+		return user, fail(guestspec.ExitRuntime, "%v", err)
+	}
+	return user, nil
+}
+
+// runProcess starts the container process, once enterRoot has made the
+// overlay the root, waits for it, kills whatever it left behind, and waits
+// for the last of its output to reach the ports.
+func runProcess(spec *guestspec.Spec, user passwd.User, ports map[string]*os.File, ctl *controller) (guestspec.Status, error) {
+	if len(spec.Args) == 0 {
+		return guestspec.Status{}, fail(guestspec.ExitRuntime, "no command specified")
 	}
 
 	env := append([]string(nil), spec.Env...)
