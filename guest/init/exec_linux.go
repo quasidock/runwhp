@@ -18,9 +18,9 @@ import (
 
 const defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-// runProcess starts the container process chrooted into the overlay, waits
-// for it, kills whatever it left behind, and waits for the last of its
-// output to reach the ports.
+// runProcess starts the container process, once enterRoot has made the
+// overlay the root, waits for it, kills whatever it left behind, and waits
+// for the last of its output to reach the ports.
 func runProcess(spec *guestspec.Spec, ports map[string]*os.File, ctl *controller) (guestspec.Status, error) {
 	if len(spec.Args) == 0 {
 		return guestspec.Status{}, fail(guestspec.ExitRuntime, "no command specified")
@@ -72,7 +72,6 @@ func runProcess(spec *guestspec.Spec, ports map[string]*os.File, ctl *controller
 		Env:   env,
 		Files: streams.fds(),
 		Sys: &syscall.SysProcAttr{
-			Chroot:     root,
 			Credential: &syscall.Credential{Uid: user.UID, Gid: user.GID, Groups: user.Groups},
 			Setsid:     true,
 			Setctty:    spec.TTY,
@@ -107,7 +106,8 @@ func lookupEnv(env []string, key string) string {
 
 // lookPath finds the command the way a shell inside the container would,
 // returning its path inside the container. exec.LookPath cannot be used: it
-// would search init's root, not the container's.
+// would search init's PATH from init's working directory, not the
+// container's.
 func lookPath(name, cwd, pathEnv string) (string, error) {
 	check := func(p string) error {
 		host := filepath.Join(root, p)
@@ -178,7 +178,7 @@ func statIn(p string) (os.FileInfo, error) {
 		} else {
 			p = filepath.Join(filepath.Dir(p), target)
 		}
-		if p != root && !strings.HasPrefix(p, root+"/") {
+		if !within(p) {
 			p = root // a link climbing out of the root stays at the root, as chroot would
 		}
 	}

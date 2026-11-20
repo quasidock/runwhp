@@ -13,7 +13,37 @@ import (
 	"github.com/quasidock/runwhp/internal/guestspec"
 )
 
-const root = "/merged"
+// root is where init mounts the container's root filesystem, and "/" once
+// enterRoot has made it init's own.
+var root = "/merged"
+
+// enterRoot makes the container's root filesystem init's root, as
+// switch_root does: it moves the overlay, with everything mounted in it, over
+// the initramfs and changes root into it. The container's processes then have
+// their mount namespace's real root instead of a chroot, which the kernel
+// requires before it lets them create user namespaces or pivot_root, as
+// container tools do.
+func enterRoot() error {
+	if err := syscall.Chdir(root); err != nil {
+		return err
+	}
+	if err := syscall.Mount(".", "/", "", syscall.MS_MOVE, ""); err != nil {
+		return fmt.Errorf("moving the root filesystem over the initramfs: %w", err)
+	}
+	if err := syscall.Chroot("."); err != nil {
+		return err
+	}
+	if err := syscall.Chdir("/"); err != nil {
+		return err
+	}
+	root = "/"
+	return nil
+}
+
+// within reports whether p, a clean absolute path, is root or below it.
+func within(p string) bool {
+	return p == root || strings.HasPrefix(p, strings.TrimSuffix(root, "/")+"/")
+}
 
 // mountRoot mounts each layer read-only and stacks them under an overlay
 // whose writable upper layer is a tmpfs.

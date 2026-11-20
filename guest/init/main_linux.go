@@ -129,6 +129,9 @@ func start(begin time.Time) (*outcome, error) {
 	if err := prepareRoot(&spec); err != nil {
 		return out, err
 	}
+	if err := enterRoot(); err != nil {
+		return out, err
+	}
 	out.status, err = runProcess(&spec, ports, ctl)
 	return out, err
 }
