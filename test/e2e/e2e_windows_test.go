@@ -1,9 +1,18 @@
 //go:build windows
 
 // Package e2e runs the built runwhp.exe against real images. It needs the
-// Windows Hypervisor Platform, network access to Docker Hub, the virtio_blk
-// module in the store (see hack/wsl-modules.sh), and a build in out\ (see
+// Windows Hypervisor Platform, network access to Docker Hub and to ghcr.io,
+// where the first run fetches runwhp's kernel from, and a build in out\ (see
 // build.ps1). It is skipped unless RUNWHP_E2E=1.
+//
+// RUNWHP_KERNEL, which runwhp itself reads, boots a locally built kernel
+// instead of the pinned one. RUNWHP_E2E_RUN_FLAGS adds flags, separated by
+// semicolons, to every runwhp run; for example
+//
+//	--kernel=C:\Program Files\WSL\tools\kernel;--module=C:\wsl\virtio_blk.ko
+//
+// runs the suite on the WSL kernel. Tests of runwhp's own kernel are then
+// skipped.
 package e2e
 
 import (
@@ -51,6 +60,18 @@ func runwhp(t *testing.T) string {
 	return exe
 }
 
+// runArgs is the argument list of runwhp run, with RUNWHP_E2E_RUN_FLAGS
+// before args.
+func runArgs(args ...string) []string {
+	out := []string{"run"}
+	for _, f := range filepath.SplitList(os.Getenv("RUNWHP_E2E_RUN_FLAGS")) {
+		if f != "" {
+			out = append(out, f)
+		}
+	}
+	return append(out, args...)
+}
+
 type result struct {
 	stdout, stderr string
 	code           int
@@ -64,7 +85,7 @@ func run(t *testing.T, args ...string) result {
 // runWithInput runs with stdin, or with no stdin (the null device) if nil.
 func runWithInput(t *testing.T, stdin io.Reader, args ...string) result {
 	t.Helper()
-	cmd := exec.Command(runwhp(t), append([]string{"run"}, args...)...)
+	cmd := exec.Command(runwhp(t), runArgs(args...)...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, &stdout, &stderr
 	err := cmd.Run()
@@ -184,7 +205,7 @@ func TestStdinLarge(t *testing.T) {
 // TestStdinDelayed writes input only once the guest has been idle a while,
 // so the vCPU is halted in the hypervisor when the data arrives.
 func TestStdinDelayed(t *testing.T) {
-	cmd := exec.Command(runwhp(t), "run", "-i", alpine, "sh", "-c", "read x; echo got $x")
+	cmd := exec.Command(runwhp(t), runArgs("-i", alpine, "sh", "-c", "read x; echo got $x")...)
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -214,7 +235,7 @@ func TestStdinDelayed(t *testing.T) {
 // whole guest and this deadlocked.
 func TestSlowReader(t *testing.T) {
 	const n = 4000000
-	cmd := exec.Command(runwhp(t), "run", alpine, "sh", "-c", fmt.Sprintf("head -c %d /dev/zero & sleep 1; echo tick >&2; wait", n))
+	cmd := exec.Command(runwhp(t), runArgs(alpine, "sh", "-c", fmt.Sprintf("head -c %d /dev/zero & sleep 1; echo tick >&2; wait", n))...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -268,7 +289,7 @@ func TestReopenStdio(t *testing.T) {
 // delivers as os.Interrupt like Ctrl+C.
 func interruptible(t *testing.T, stdout *syncBuffer, stderr *bytes.Buffer, args ...string) (*exec.Cmd, func()) {
 	t.Helper()
-	cmd := exec.Command(runwhp(t), append([]string{"run"}, args...)...)
+	cmd := exec.Command(runwhp(t), runArgs(args...)...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	if err := cmd.Start(); err != nil {

@@ -10,11 +10,14 @@ import (
 	"os/signal"
 
 	"github.com/quasidock/runwhp/internal/image"
+	"github.com/quasidock/runwhp/internal/kernel"
 )
 
 func cmdPull(args []string) int {
 	fs := flag.NewFlagSet("pull", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprintln(fs.Output(), "Usage: runwhp pull IMAGE") }
+	fs.Usage = func() {
+		fmt.Fprintln(fs.Output(), "Usage: runwhp pull IMAGE\n\nPulls the image, and runwhp's kernel if it is missing, into the local store.")
+	}
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -35,6 +38,16 @@ func cmdPull(args []string) int {
 	if err != nil {
 		errorf("%v", err)
 		return 1
+	}
+	// Also fetch the kernel if it is missing, so that a machine prepared
+	// with pull can run the image offline.
+	if os.Getenv("RUNWHP_KERNEL") == "" {
+		kernels := kernel.Open(root)
+		kernels.Progress = os.Stderr
+		if _, err := kernels.Ensure(ctx, kernel.Default, true); err != nil {
+			errorf("%v", err)
+			return 1
+		}
 	}
 	fmt.Println(img.Digest)
 	return 0

@@ -40,7 +40,7 @@ const (
 // Kernel is a parsed bzImage.
 type Kernel struct {
 	// Version is the first word of the image's version string, which is
-	// what uname -r reports in the guest and names its module directory.
+	// what uname -r reports in the guest.
 	Version  string
 	Protocol uint16
 

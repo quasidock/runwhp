@@ -65,8 +65,8 @@ func startPTY(t *testing.T, rows, cols int16, args ...string) *pty {
 	// Null standard handles, so the child uses the pseudo console rather
 	// than the pipes go test gave us.
 	si.Flags = windows.STARTF_USESTDHANDLES
-	cmdline := syscall.EscapeArg(exe) + " run"
-	for _, a := range args {
+	cmdline := syscall.EscapeArg(exe)
+	for _, a := range runArgs(args...) {
 		cmdline += " " + syscall.EscapeArg(a)
 	}
 	var pi windows.ProcessInformation

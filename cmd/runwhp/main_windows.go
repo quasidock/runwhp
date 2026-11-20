@@ -12,11 +12,12 @@ import (
 
 const usage = `Usage:
   runwhp run [flags] IMAGE [COMMAND [ARG...]]   run a command in a new container
-  runwhp pull IMAGE                             pull an image into the local store
+  runwhp pull IMAGE                             pull an image, and runwhp's kernel, into the local store
 
 Run 'runwhp run -h' for the run flags.
 
-The local store is in %LOCALAPPDATA%\runwhp unless RUNWHP_ROOT is set.
+The local store is in %LOCALAPPDATA%\runwhp unless RUNWHP_ROOT is set. The
+first run or pull fetches runwhp's kernel into it.
 `
 
 func main() { os.Exit(realMain(os.Args[1:])) }
@@ -39,7 +40,7 @@ func realMain(args []string) int {
 	return 2
 }
 
-// storeRoot is where images, layers and kernel modules are kept.
+// storeRoot is where images, layers and kernels are kept.
 func storeRoot() (string, error) {
 	if root := os.Getenv("RUNWHP_ROOT"); root != "" {
 		return root, nil

@@ -91,7 +91,7 @@ func background(t *testing.T, stdout, stderr io.Writer, args ...string) *exec.Cm
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
-	cmd := exec.CommandContext(ctx, runwhp(t), append([]string{"run"}, args...)...)
+	cmd := exec.CommandContext(ctx, runwhp(t), runArgs(args...)...)
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)

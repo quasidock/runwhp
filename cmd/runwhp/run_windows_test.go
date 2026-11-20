@@ -4,12 +4,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/quasidock/runwhp/internal/guestspec"
+	"github.com/quasidock/runwhp/internal/image"
+	"github.com/quasidock/runwhp/internal/kernel"
 	"github.com/quasidock/runwhp/internal/virtio"
 )
 
@@ -207,5 +211,58 @@ func TestSignalProxyBeforeInit(t *testing.T) {
 	p.handle(os.Interrupt)
 	if stopped != 2 || len(p.queue.ch) != 0 {
 		t.Errorf("stopped %d times, %d messages queued", stopped, len(p.queue.ch))
+	}
+}
+
+func TestResolveKernel(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	t.Setenv("RUNWHP_KERNEL", `C:\env\bzImage`)
+	if p, err := resolveKernel(ctx, root, &runOptions{kernel: `C:\flag\bzImage`}, image.PullMissing); err != nil || p != `C:\flag\bzImage` {
+		t.Errorf("--kernel: %q, %v", p, err)
+	}
+	if p, err := resolveKernel(ctx, root, &runOptions{}, image.PullMissing); err != nil || p != `C:\env\bzImage` {
+		t.Errorf("RUNWHP_KERNEL: %q, %v", p, err)
+	}
+
+	t.Setenv("RUNWHP_KERNEL", "")
+	if kernel.Default.Digest == "" {
+		t.Skip("no kernel is pinned")
+	}
+	// A stored kernel is used without any network access, whatever the
+	// policy; a missing one is not fetched under --pull never.
+	_, err := resolveKernel(ctx, root, &runOptions{}, image.PullNever)
+	if err == nil || !strings.Contains(err.Error(), "runwhp pull") {
+		t.Errorf("missing kernel under --pull never: %v", err)
+	}
+	stored, err := kernel.Open(root).Path(kernel.Default)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(stored), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stored, []byte("bzImage"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, policy := range []image.Policy{image.PullNever, image.PullMissing, image.PullAlways} {
+		if p, err := resolveKernel(ctx, root, &runOptions{}, policy); err != nil || p != stored {
+			t.Errorf("stored kernel, --pull %s: %q, %v", policy, p, err)
+		}
+	}
+}
+
+func TestReadModules(t *testing.T) {
+	if files, err := readModules(nil); err != nil || files != nil {
+		t.Errorf("no modules: %v, %v", files, err)
+	}
+	ko := filepath.Join(t.TempDir(), "virtio_blk.ko")
+	os.WriteFile(ko, []byte("module"), 0o644)
+	files, err := readModules([]string{ko})
+	if err != nil || len(files) != 2 || files[0].Name != "modules" || files[1].Name != "modules/virtio_blk.ko" || string(files[1].Data) != "module" {
+		t.Errorf("readModules: %+v, %v", files, err)
+	}
+	if _, err := readModules([]string{ko + ".missing"}); err == nil {
+		t.Error("read a missing module")
 	}
 }

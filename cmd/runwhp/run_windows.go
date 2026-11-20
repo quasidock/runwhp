@@ -14,7 +14,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,15 +27,19 @@ import (
 	"github.com/quasidock/runwhp/internal/boot"
 	"github.com/quasidock/runwhp/internal/guestspec"
 	"github.com/quasidock/runwhp/internal/image"
+	"github.com/quasidock/runwhp/internal/kernel"
 	"github.com/quasidock/runwhp/internal/netstack"
 	"github.com/quasidock/runwhp/internal/virtio"
 	"github.com/quasidock/runwhp/internal/vm"
 )
 
 const (
-	defaultKernel = `C:\Program Files\WSL\tools\kernel`
-	baseCmdline   = "console=ttyS0 nokaslr panic=-1 reboot=acpi"
-	consoleTail   = 200 // kernel console lines kept for error reports
+	// pci=off: ACPI needs PCI support built in, but there is no PCI bus to
+	// probe. no5lvl: on CPUs with 5-level paging, the bzImage decompressor
+	// would otherwise switch paging modes through a trampoline in low
+	// memory, which runwhp's boot layout has not been tried with.
+	baseCmdline = "console=ttyS0 nokaslr no5lvl pci=off panic=-1 reboot=acpi"
+	consoleTail = 200 // kernel console lines kept for error reports
 )
 
 type listFlag []string
@@ -88,7 +91,7 @@ func runFlags(o *runOptions) *flag.FlagSet {
 	fs.StringVar(&o.memory, "memory", "512m", "")
 	fs.StringVar(&o.hostname, "hostname", "", "")
 	fs.StringVar(&o.pull, "pull", "missing", "")
-	fs.StringVar(&o.kernel, "kernel", defaultKernel, "")
+	fs.StringVar(&o.kernel, "kernel", "", "")
 	fs.BoolVar(&o.debug, "debug", false, "")
 	fs.StringVar(&o.network, "network", "user", "")
 	fs.StringVar(&o.network, "net", "user", "")
@@ -115,8 +118,9 @@ Flags:
                          IP defaults to 127.0.0.1
       --add-host NAME:IP add an /etc/hosts entry (repeatable); IP host-gateway reaches
                          this machine's 127.0.0.1
-      --pull POLICY      missing, always or never (default missing)
-      --kernel PATH      Linux bzImage to boot (default: the WSL kernel)
+      --pull POLICY      when to pull the image: missing, always or never (default missing);
+                         never also keeps runwhp from fetching its own kernel
+      --kernel PATH      Linux bzImage to boot instead of runwhp's own kernel
       --debug            show the kernel console and VMM diagnostics on stderr
 `)
 	}
@@ -177,6 +181,10 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 	if o.debug {
 		logf = func(format string, a ...any) { fmt.Fprintf(os.Stderr, "[vmm] "+format+"\n", a...) }
 	}
+	policy, err := image.ParsePolicy(o.pull)
+	if err != nil {
+		return fail, err
+	}
 	start := time.Now()
 
 	// The process and its layers, from an image or (for development)
@@ -196,10 +204,6 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 	} else {
 		if len(args) == 0 {
 			return fail, fmt.Errorf("no image given; run 'runwhp run -h' for usage")
-		}
-		policy, err := image.ParsePolicy(o.pull)
-		if err != nil {
-			return fail, err
 		}
 		store := image.Open(root)
 		store.Progress = os.Stderr
@@ -237,15 +241,19 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 	}
 	logf("%4d ms  image ready: %d layers", time.Since(start).Milliseconds(), len(layerFiles))
 
-	kernelImage, err := os.ReadFile(o.kernel)
+	kernelPath, err := resolveKernel(ctx, root, o, policy)
+	if err != nil {
+		return fail, err
+	}
+	kernelImage, err := os.ReadFile(kernelPath)
 	if err != nil {
 		return fail, fmt.Errorf("reading the kernel: %w", err)
 	}
-	kernel, err := boot.ParseKernel(kernelImage)
+	bzImage, err := boot.ParseKernel(kernelImage)
 	if err != nil {
-		return fail, fmt.Errorf("%s: %w", o.kernel, err)
+		return fail, fmt.Errorf("%s: %w", kernelPath, err)
 	}
-	modules, err := kernelModules(root, kernel.Version, o.modules)
+	modules, err := readModules(o.modules)
 	if err != nil {
 		return fail, err
 	}
@@ -285,11 +293,8 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 		{Name: "init", Mode: boot.ModeFile | 0o755, Data: initBinary},
 		{Name: "runwhp", Mode: boot.ModeDir | 0o755},
 		{Name: guestspec.SpecPath, Mode: boot.ModeFile | 0o644, Data: specJSON},
-		{Name: "modules", Mode: boot.ModeDir | 0o755},
 	}
-	for _, m := range modules {
-		files = append(files, boot.File{Name: "modules/" + m.name, Mode: boot.ModeFile | 0o644, Data: m.data})
-	}
+	files = append(files, modules...)
 
 	// Devices: the console first, then the network device if any, then one
 	// disk per layer, bottom first.
@@ -366,7 +371,7 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 		go watchSize(done, spec.Rows, spec.Cols, proxy.queue)
 	}
 	res, err := vm.Run(ctx, vm.Config{
-		Kernel:      kernel,
+		Kernel:      bzImage,
 		Initrd:      boot.CPIO(files),
 		Cmdline:     cmdline,
 		Memory:      memory,
@@ -396,39 +401,41 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 	return st.Exit, nil
 }
 
-type module struct {
-	name string
-	data []byte
+// resolveKernel returns the bzImage to boot: the one --kernel names, else the
+// one RUNWHP_KERNEL names, else runwhp's own kernel from the store, fetched
+// first if it is missing and the pull policy allows.
+func resolveKernel(ctx context.Context, root string, o *runOptions, policy image.Policy) (string, error) {
+	if o.kernel != "" {
+		return o.kernel, nil
+	}
+	if p := os.Getenv("RUNWHP_KERNEL"); p != "" {
+		return p, nil
+	}
+	store := kernel.Open(root)
+	store.Progress = os.Stderr
+	path, err := store.Ensure(ctx, kernel.Default, policy != image.PullNever)
+	if errors.Is(err, kernel.ErrNotPresent) {
+		return "", fmt.Errorf("%w, and --pull=never was given; run 'runwhp pull IMAGE' once to fetch it, or pass --kernel PATH", err)
+	}
+	return path, err
 }
 
-// kernelModules returns the modules to load in the guest: those given with
-// --module, or every .ko in the store's directory for this kernel version,
-// which must include virtio_blk.
-func kernelModules(root, version string, explicit []string) ([]module, error) {
-	paths := explicit
+// readModules reads the kernel modules given with --module, for booting a
+// kernel that builds drivers runwhp needs as modules. WSL's kernel, for one,
+// needs its virtio_blk.ko.
+func readModules(paths []string) ([]boot.File, error) {
 	if len(paths) == 0 {
-		if version == "" {
-			return nil, fmt.Errorf("the kernel image has no version string, so its modules cannot be found; pass --module")
-		}
-		dir := filepath.Join(root, "modules", version)
-		found, _ := filepath.Glob(filepath.Join(dir, "*.ko"))
-		slices.Sort(found)
-		if !slices.ContainsFunc(found, func(p string) bool { return filepath.Base(p) == "virtio_blk.ko" }) {
-			return nil, fmt.Errorf("kernel %s needs virtio_blk.ko in %s.\n"+
-				"Copy it out of WSL once, from a runwhp checkout, in PowerShell:\n"+
-				"  wsl -e sh hack/wsl-modules.sh \"%s\"", version, dir, filepath.Join(root, "modules"))
-		}
-		paths = found
+		return nil, nil
 	}
-	var out []module
+	files := []boot.File{{Name: "modules", Mode: boot.ModeDir | 0o755}}
 	for _, p := range paths {
 		data, err := os.ReadFile(p)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, module{filepath.Base(p), data})
+		files = append(files, boot.File{Name: "modules/" + filepath.Base(p), Mode: boot.ModeFile | 0o644, Data: data})
 	}
-	return out, nil
+	return files, nil
 }
 
 // parseMemory reads a size the way docker run -m does (b, k, m or g suffix,

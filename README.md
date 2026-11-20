@@ -12,8 +12,14 @@ build.
 ## Status
 
 `runwhp` is experimental. It runs Linux containers from registry images,
-interactively or not, with a network, but without access to host files yet.
+interactively or not, with a network, on a kernel of its own, but without
+access to host files yet.
 
+- **Iteration 4** (2026-11-20): runwhp boots its own kernel, Linux 6.18 with
+  everything it needs built in, fetched once from ghcr.io and pinned by
+  digest. WSL is no longer needed, nor is copying a driver out of it, and
+  `run alpine:3.20 true` takes under 300 ms instead of over 700. See
+  [Kernel](#kernel) and [Iteration 4 results](#iteration-4-results).
 - **Iteration 3** (2026-11-20): containers have a network. Outbound TCP and
   UDP leave through the host's own sockets, names resolve through the host's
   resolver, `-p` publishes container ports on the host, and
@@ -35,8 +41,8 @@ interactively or not, with a network, but without access to host files yet.
   kernel on WHP. See [Boot spike](#boot-spike).
 - **Proposed, not yet agreed**: the rest of the architecture in
   [Proposed design](#proposed-design).
-- **Not started**: host file sharing, more than one vCPU, the runc-style
-  lifecycle commands, and a kernel of our own.
+- **Not started**: host file sharing, more than one vCPU, and the runc-style
+  lifecycle commands.
 
 ## Why not runhcs, HCS, or WSL
 
@@ -73,9 +79,8 @@ Platform" optional feature enabled first. Enabling a feature takes
 administrator rights and a reboot, once. The test machine cannot answer this
 because WSL2 had already turned the hypervisor on.
 
-Until runwhp has its own kernel, it boots the WSL kernel, so WSL must be
-installed. The WSL kernel builds `virtio_blk` as a module, and that module has
-to be copied out of a WSL distro once per kernel version (see below).
+runwhp boots a kernel of its own, which its first `run` or `pull` fetches
+from `ghcr.io/quasidock/runwhp-kernel` (about 8 MB). WSL is not needed.
 
 ## Usage
 
@@ -84,12 +89,6 @@ and the guest init `out\runwhp-init`, which must stay next to it:
 
 ```powershell
 .\build.ps1
-```
-
-Once per WSL kernel version, copy the block driver into runwhp's store:
-
-```powershell
-wsl -e sh hack/wsl-modules.sh "$env:LOCALAPPDATA\runwhp\modules"
 ```
 
 Then:
@@ -119,8 +118,8 @@ Get-Content data.csv | .\out\runwhp.exe run -i alpine:3.20 wc -l
 | `--network`, `--net` | `user` | `user` gives the container a network through runwhp; `none` leaves it only loopback |
 | `-p`, `--publish` | | `[IP:]HOSTPORT:PORT[/tcp]`: listen on the host and forward to the container's TCP port; repeatable. IP defaults to `127.0.0.1` |
 | `--add-host` | | `NAME:IP` or `NAME=IP`, added to `/etc/hosts`; repeatable. `NAME:host-gateway` also lets the container reach the host's `127.0.0.1` at that name |
-| `--pull` | `missing` | `missing`, `always` or `never` |
-| `--kernel` | `C:\Program Files\WSL\tools\kernel` | bzImage to boot |
+| `--pull` | `missing` | When to pull the image: `missing`, `always` or `never`. `never` also keeps runwhp from fetching its kernel |
+| `--kernel` | runwhp's own | bzImage to boot instead; see [Kernel](#kernel) |
 | `--debug` | off | Kernel console, init's steps and VMM statistics on stderr |
 
 Exit codes follow Docker: the container's own code, 128+N if a signal N killed
@@ -140,10 +139,11 @@ With `-i` and a console but no `-t`, the console edits each line before
 sending it, ends lines with `\n`, and Ctrl+Z at the start of a line ends the
 input, as usual on Windows.
 
-Images and layers are cached in `%LOCALAPPDATA%\runwhp`, or in `RUNWHP_ROOT`
-when it is set. Registry credentials come from Docker's configuration and
-credential helpers. Only `linux/amd64` images run. Nothing is ever removed from
-the cache yet.
+Images, layers and runwhp's kernel are cached in `%LOCALAPPDATA%\runwhp`, or
+in `RUNWHP_ROOT` when it is set. `runwhp pull` fetches the kernel as well as
+the image, so a machine prepared with it can run that image offline.
+Registry credentials come from Docker's configuration and credential helpers.
+Only `linux/amd64` images run. Nothing is ever removed from the cache yet.
 
 In Git Bash, set `MSYS_NO_PATHCONV=1`, or MSYS rewrites container paths such
 as `/tmp` into Windows paths before runwhp sees them. Under mintty, the
@@ -185,13 +185,84 @@ listens on the port is accepted and then closed, as with Docker.
 `ping` gets answers only from the gateway: runwhp carries TCP and UDP, not
 ICMP.
 
+### Kernel
+
+runwhp boots unmodified upstream Linux, currently 6.18.64 (a longterm
+release), built for it with everything built in and no modules. The
+configuration, [`kernel/runwhp.config`](kernel/runwhp.config), applies over
+`allnoconfig`, so anything it does not name stays off, and has four groups:
+
+| Group | What |
+| --- | --- |
+| Booting on runwhp's VMM | Hyper-V clock and APIC enlightenments without VMBus, ACPI (which needs PCI support, though runwhp boots with `pci=off`), virtio-mmio, the COM1 console, an uncompressed initramfs |
+| runwhp-init | ext4, overlayfs, tmpfs with xattrs, devtmpfs, virtio block, console and network devices, IPv4 and Unix sockets |
+| Containers | Namespaces, cgroup v2 controllers, seccomp, BPF, IPv6, 32-bit binaries, `binfmt_misc`, FUSE, TUN, veth, bridges, nftables and iptables (both over nftables and legacy) |
+| Later work | vsock, 9p and virtio-fs for host file sharing; the virtio balloon with free page reporting |
+
+CPU vulnerability mitigations stay at upstream's defaults. The kernel is
+LZ4-compressed, which decompresses fastest.
+
+**Where it comes from.** CI publishes each build to
+`ghcr.io/quasidock/runwhp-kernel` as an OCI artifact, tagged with the
+upstream version and a build revision (`6.18.64-1`).
+[`internal/kernel/pin.go`](internal/kernel/pin.go) names the build this
+runwhp boots by its manifest digest, which stands in for a signature: runwhp
+fetches only that digest and checks every byte against it. The first `run`
+or `pull` downloads the bzImage, anonymously, into
+`kernels\sha256\<digest>\bzImage` in the store, and it is never fetched
+again. `--pull never` does not fetch it at all.
+
+**Another kernel.** `--kernel PATH`, or the `RUNWHP_KERNEL` environment
+variable, boots any other bzImage. The WSL kernel builds `virtio_blk` as a
+module, which runwhp then has to load from its initramfs; copy it out of a WSL
+distro and pass it with the development flag `--module`:
+
+```powershell
+wsl -e sh -c 'cp /lib/modules/$(uname -r)/kernel/drivers/block/virtio_blk.ko /mnt/c/temp/'
+.\out\runwhp.exe run --kernel 'C:\Program Files\WSL\tools\kernel' --module C:\temp\virtio_blk.ko alpine:3.20 uname -r
+```
+
+**Building it.** [`kernel/Dockerfile`](kernel/Dockerfile) builds the kernel
+from kernel.org's tarball, checked against the checksum in kernel.org's
+signed `sha256sums.asc`, in a Debian image pinned by digest whose packages
+come from a fixed `snapshot.debian.org` date, with the build's timestamp,
+user and host fixed. The same inputs should give the same bzImage. Locally
+it needs Docker inside WSL:
+
+```powershell
+.\kernel\build.ps1                  # out\kernel\bzImage, in a few minutes
+$env:RUNWHP_KERNEL = "$PWD\out\kernel\bzImage"   # boot it instead of the pinned one
+```
+
+[`kernel/full.config`](kernel/full.config) records the configuration
+`runwhp.config` resolves to, and the build fails if they disagree, so every
+consequence of a change, or of a new upstream release, shows in review.
+`.\kernel\build.ps1 -Target config` regenerates it. The build also fails if a
+setting in `runwhp.config` does not survive, which is how Kconfig reports a
+missing dependency or a renamed option: it does not.
+
+**Publishing it.** [`.github/workflows/kernel.yml`](.github/workflows/kernel.yml)
+builds the kernel for every pull request that touches it, and publishes it
+from `main`. A tag never moves: if it already names a different build, the
+job fails, and `KERNEL_REVISION` in the Dockerfile has to go up. Rerunning it
+on an unchanged build publishes nothing. To move runwhp to a new build, copy
+the tag and digest from the job's summary into `pin.go`. A new package on
+ghcr.io starts private, and runwhp pulls anonymously, so the package has to
+be made public once in its settings; the job checks for that.
+
+**Source.** Besides the bzImage, the artifact carries the kernel's
+`.config`, a tar of `kernel/`, and kernel.org's tarball, so the source of
+the binary is published with it, as GPLv2 asks. runwhp downloads only the
+bzImage.
+
 ### How a run works
 
 1. The image's layers are pulled and each one is converted to an ext4 image
    with `tar2ext4`, with OCI whiteouts turned into overlayfs whiteouts. Layers
    are cached by diffID and verified against it; empty layers are skipped.
-2. runwhp writes an initramfs holding `runwhp-init`, the `virtio_blk` module,
-   and a JSON spec of the process.
+2. runwhp loads its kernel from the store, fetching it first if this is the
+   first run, and writes an initramfs holding `runwhp-init` and a JSON spec
+   of the process.
 3. The guest gets one multiport virtio console, with ports named `stdout`,
    `stderr`, `stdin` and `control`; a virtio network device, unless
    `--network none`; and one read-only virtio-blk disk per layer. Each disk's
@@ -210,8 +281,9 @@ ICMP.
    towards the guest.
 5. `runwhp-init` mounts the layers under an overlay with a tmpfs upper layer,
    adds `/proc`, `/sys`, a minimal `/dev`, a hostname and `/etc/hosts`,
-   configures `eth0` and `/etc/resolv.conf` when there is a network, and runs
-   the process chrooted into it. The process's stdin, stdout and stderr are
+   configures `eth0` and `/etc/resolv.conf` when there is a network, moves
+   the overlay over the initramfs as the root, as `switch_root` does, and
+   runs the process in it. The process's stdin, stdout and stderr are
    pipes, or with `-t` a pseudo-terminal from the container's own devpts,
    and init relays them to and from the ports. A port can be open only once
    at a time, so handing the process the ports themselves would break
@@ -232,17 +304,24 @@ ICMP.
 | [`internal/virtio`](internal/virtio) | virtio-mmio transport, block device, multiport console, network device. Builds on any OS |
 | [`internal/netstack`](internal/netstack) | The host end of the container's network: gVisor's netstack, TCP and UDP forwarding, DNS, published ports. Builds on any OS |
 | [`internal/image`](internal/image), [`internal/layer`](internal/layer) | Registry pulls, image records, layer conversion and cache |
+| [`internal/kernel`](internal/kernel) | The kernel artifact's format, the pinned build, and fetching it into the store |
+| [`kernel`](kernel) | The kernel's configuration and build; [`kernel/push`](kernel/push) publishes it |
 | [`internal/guestspec`](internal/guestspec) | The contract between host and guest |
 | [`internal/passwd`](internal/passwd) | User and group resolution |
 | [`guest/init`](guest/init) | `runwhp-init`, PID 1 in the guest |
 | [`test/e2e`](test/e2e) | End-to-end tests against WHP |
 
 `go test ./...` runs the unit tests anywhere. The end-to-end tests need a
-build, WHP, the module and network access, and run with `RUNWHP_E2E=1`:
+build, WHP and network access, and run with `RUNWHP_E2E=1`:
 
 ```powershell
 $env:RUNWHP_E2E = '1'; go test -count=1 ./test/e2e
 ```
+
+They boot whatever runwhp would: the pinned kernel, or the one
+`RUNWHP_KERNEL` names. `RUNWHP_E2E_RUN_FLAGS` adds flags, separated by
+semicolons, to every `runwhp run`, such as `--kernel` and `--module` for the
+WSL kernel; tests of runwhp's own kernel are then skipped.
 
 ## Proposed design
 
@@ -264,7 +343,7 @@ supervisor process and one Job Object per container, with no daemon.
 | Bind mounts and volumes | 9p server in Go on the host, carried over vsock | Not started |
 | Networking | User-mode network stack in the VMM (gVisor netstack); published ports are loopback listeners | Done, IPv4 only, TCP ports only |
 | Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | `run` and `pull` only |
-| Kernel | Our own build with virtio drivers built in, shipped as a signed OCI artifact | Not started; the WSL kernel stands in |
+| Kernel | Our own build with virtio drivers built in, shipped as a signed OCI artifact | Done: Linux 6.18 LTS on ghcr.io, pinned by digest rather than signed |
 
 ### Relationship to Quasidock
 
@@ -382,6 +461,58 @@ The new tests cover:
   without it, 20 MB downloaded with its checksum, DNS and TLS to the
   internet, `--network none`, `-p` in both directions with a 20 MB checksum,
   and a busy host port
+
+## Iteration 4 results
+
+Both columns are measured the same way, with the same `runwhp.exe`, on the
+test machine, over five runs from Git Bash, so compare them with each other
+rather than with earlier tables. The WSL kernel booted with `--kernel` and
+`--module`.
+
+| Measurement | WSL kernel 6.6 | runwhp kernel 6.18 |
+| --- | --- | --- |
+| `run alpine:3.20 true` | 710-719 ms | 269-285 ms |
+| `run alpine:3.20 true` with `--network none` | 709-720 ms | 265-271 ms |
+| `run python:3.12-slim python3 -c 'print(1)'` (4 layers) | 761-785 ms | 324-329 ms, and 427 ms once |
+| Kernel uptime when `/init` starts | 0.42 s | 0.18 s |
+| bzImage | 16.0 MB, gzip | 7.7 MB, LZ4 |
+| Initramfs | 2494 KiB, with `virtio_blk.ko` | 2433 KiB |
+| `MemTotal` and `MemAvailable` with `-m 512m` | 461 and 426 MiB | 486 and 459 MiB |
+
+On an empty store, the first `run alpine:3.20 true` took 5.5-6.4 s, pulling
+the image and fetching the kernel; a run that fetched only the kernel took
+2.7-2.8 s.
+
+The build is reproducible: a local build, a second one without Docker's
+cache, and the one CI published all produced the same bzImage, and the
+local and published artifacts have the same manifest digest.
+
+The same configuration with each compression:
+
+| Compression | bzImage | `run alpine:3.20 true` |
+| --- | --- | --- |
+| LZ4 | 7.7 MB | 276-296 ms |
+| zstd | 5.4 MB | 303-320 ms |
+| gzip | 6.0 MB | 321-342 ms |
+
+The new tests cover:
+
+- the kernel artifact: a manifest that depends only on its content, and
+  fetching the pinned build once, refusing to without permission, rejecting
+  the wrong artifact type, a missing or oversized bzImage, one that is not a
+  kernel and one whose bytes do not match, and three first runs at once
+- which kernel boots: `--kernel`, then `RUNWHP_KERNEL`, then the store, whatever
+  the pull policy, and `--module`
+- end to end on runwhp's kernel: its release string; namespaces, cgroup v2,
+  overlayfs, 9p, virtio-fs, FUSE, `binfmt_misc`, seccomp, vsock, IPv6 on the
+  loopback and options in `/proc/config.gz`; `unshare` of a user and PID
+  namespace; `#!` scripts; an opaque directory on the writable layer; and a
+  wall clock within 5 s of the host's
+- end to end from an empty store: the kernel is fetched, `--pull never`
+  refuses to fetch it, and `runwhp pull` brings it back
+
+The whole suite passes on runwhp's kernel and, through
+`RUNWHP_E2E_RUN_FLAGS`, on the WSL kernel.
 
 ## Boot spike
 
@@ -539,7 +670,23 @@ starts, which covers decompressing the kernel and early memory setup.
   it use the reset register instead.
 - **The WSL kernel is the wrong kernel to ship.** `virtio_blk` and the virtio
   vsock transport are modules, and the configuration carries much that a
-  container guest does not need.
+  container guest does not need. Iteration 4 replaced it.
+- **Linux 6.18 needs PCI support for ACPI.** Built without `CONFIG_PCI`,
+  ACPICA fails to load the tables ("AE_BAD_PARAMETER, During Region
+  initialization"), no device appears, and init never reports back. With PCI
+  built in, `pci=off` keeps the kernel from probing a bus that is not there.
+- **6.18 still reads the CMOS clock** under hardware-reduced ACPI, without an
+  RTC driver, so the VMM's stub still sets the wall clock.
+- **On AMD Zen, 6.18 reads the FCH at `0xfed80000`** to report why the
+  machine last reset. The VMM ignores the unbacked page and the kernel
+  carries on.
+- **A chrooted process cannot create user namespaces.** The kernel refuses
+  `unshare(CLONE_NEWUSER)` when the caller's root is not its mount
+  namespace's root, and `pivot_root` fails the same way, so container tools
+  inside the container broke. runwhp-init now makes the overlay the real
+  root, as `switch_root` does, instead of starting the process in a chroot.
+- **LZ4 boots fastest**, even though it makes the largest kernel; see
+  [Iteration 4 results](#iteration-4-results).
 
 ## Known gaps
 
@@ -547,8 +694,10 @@ starts, which covers decompressing the kernel and early memory setup.
   than SIGINT and SIGTERM.
 - The writable layer is a tmpfs in guest RAM. Writes are limited by `--memory`,
   and nothing written survives the run.
-- Booting needs the WSL kernel, plus `virtio_blk.ko` copied out of a WSL
-  distro whose kernel version matches.
+- The kernel's first fetch needs ghcr.io, unless `--kernel` names one. A new
+  kernel build reaches runwhp only when someone moves the pin in
+  `internal/kernel/pin.go`, and the pinned digest is the only check on it:
+  builds are not signed.
 - An image can have at most 57 non-empty layers, or 58 with
   `--network none`: each device takes an I/O APIC line.
 - The network is IPv4 only and carries no ICMP. Only TCP ports can be
@@ -582,3 +731,7 @@ starts, which covers decompressing the kernel and early memory setup.
   which avoids both the I/O APIC and the bytecode but needs PCI emulation?
 - How should host directories behave when shared into the guest, given NTFS
   case-insensitivity and the lack of Unix permissions and symlinks?
+- What protection does the guest kernel owe a container from itself? The VM
+  is the boundary with the host, and the container is the guest's only
+  tenant, so KASLR is off; CPU mitigations are on, at a cost to system
+  calls that has not been measured.
