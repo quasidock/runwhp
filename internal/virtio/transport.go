@@ -62,11 +62,26 @@ type Transport struct {
 	queues        []Queue
 }
 
+// Attacher is implemented by devices that work on their queues from outside
+// Notify, at the host's initiative, and so need their transport before the
+// driver first kicks them.
+type Attacher interface {
+	Attach(t *Transport)
+}
+
 // NewTransport attaches dev to an MMIO window. raise signals one edge on the
 // device's interrupt line.
 func NewTransport(dev Device, mem Memory, raise func()) *Transport {
-	return &Transport{dev: dev, mem: mem, raise: raise, queues: make([]Queue, dev.NumQueues())}
+	t := &Transport{dev: dev, mem: mem, raise: raise, queues: make([]Queue, dev.NumQueues())}
+	if a, ok := dev.(Attacher); ok {
+		a.Attach(t)
+	}
+	return t
 }
+
+// DriverFeatures returns the feature bits the driver accepted. The lock must
+// be held.
+func (t *Transport) DriverFeatures() uint64 { return t.drvFeatures }
 
 func (t *Transport) Device() Device { return t.dev }
 func (t *Transport) Memory() Memory { return t.mem }

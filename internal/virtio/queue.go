@@ -76,6 +76,10 @@ func (q *Queue) Pop(mem Memory) (c Chain, ok bool, err error) {
 	}
 }
 
+// Unpop puts back the last n chains taken with Pop, none of which may have
+// been pushed, so the next Pop returns them again.
+func (q *Queue) Unpop(n int) { q.lastAvail -= uint16(n) }
+
 // Push returns a chain to the driver, reporting how many bytes the device
 // wrote into its writable buffers.
 func (q *Queue) Push(mem Memory, head uint16, written uint32) {

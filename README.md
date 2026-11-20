@@ -12,8 +12,14 @@ build.
 ## Status
 
 `runwhp` is experimental. It runs Linux containers from registry images,
-interactively or not, without networking or access to host files yet.
+interactively or not, with a network, but without access to host files yet.
 
+- **Iteration 3** (2026-11-20): containers have a network. Outbound TCP and
+  UDP leave through the host's own sockets, names resolve through the host's
+  resolver, `-p` publishes container ports on the host, and
+  `--add-host NAME:host-gateway` reaches services on the host's loopback. It
+  needs no elevation and no new kernel module. See [Networking](#networking)
+  and [Iteration 3 results](#iteration-3-results).
 - **Iteration 2** (2026-11-20): `-i` passes stdin to the container with a real
   end of file, `-t` gives it a pseudo-terminal that follows the console's size,
   and Ctrl+C reaches the container as SIGINT instead of killing the VM.
@@ -29,8 +35,8 @@ interactively or not, without networking or access to host files yet.
   kernel on WHP. See [Boot spike](#boot-spike).
 - **Proposed, not yet agreed**: the rest of the architecture in
   [Proposed design](#proposed-design).
-- **Not started**: networking, host file sharing, more than one vCPU, the
-  runc-style lifecycle commands, and a kernel of our own.
+- **Not started**: host file sharing, more than one vCPU, the runc-style
+  lifecycle commands, and a kernel of our own.
 
 ## Why not runhcs, HCS, or WSL
 
@@ -94,6 +100,9 @@ Then:
 .\out\runwhp.exe run python:3.12-slim python3 -c 'print(1)'
 .\out\runwhp.exe run -it alpine:3.20 sh
 Get-Content data.csv | .\out\runwhp.exe run -i alpine:3.20 wc -l
+.\out\runwhp.exe run alpine:3.20 sh -c 'apk add -q curl && curl -sI https://example.com'
+.\out\runwhp.exe run -p 8080:80 nginx:alpine
+.\out\runwhp.exe run --add-host host.docker.internal:host-gateway alpine:3.20 wget -qO- http://host.docker.internal:3000/
 .\out\runwhp.exe pull debian:12
 ```
 
@@ -107,6 +116,9 @@ Get-Content data.csv | .\out\runwhp.exe run -i alpine:3.20 wc -l
 | `-u`, `--user` | image's, else root | `name`, `uid`, `name:group` or `uid:gid`, resolved against the image's `/etc/passwd` and `/etc/group` |
 | `-m`, `--memory` | `512m` | Guest RAM, `128m` to `3328m`. The writable layer is a tmpfs inside it |
 | `--hostname` | random | Hostname, also written to `/etc/hostname` and `/etc/hosts` |
+| `--network`, `--net` | `user` | `user` gives the container a network through runwhp; `none` leaves it only loopback |
+| `-p`, `--publish` | | `[IP:]HOSTPORT:PORT[/tcp]`: listen on the host and forward to the container's TCP port; repeatable. IP defaults to `127.0.0.1` |
+| `--add-host` | | `NAME:IP` or `NAME=IP`, added to `/etc/hosts`; repeatable. `NAME:host-gateway` also lets the container reach the host's `127.0.0.1` at that name |
 | `--pull` | `missing` | `missing`, `always` or `never` |
 | `--kernel` | `C:\Program Files\WSL\tools\kernel` | bzImage to boot |
 | `--debug` | off | Kernel console, init's steps and VMM statistics on stderr |
@@ -140,6 +152,39 @@ fails with "the input device is not a TTY"; prefix the command with
 `winpty`. Pipes from MSYS programs into native ones are slow (about 8 MB/s
 on the test machine), and stdin through `-i` is no exception.
 
+### Networking
+
+Unless run with `--network none`, the container has one interface, `eth0`,
+on a private network that exists only inside runwhp:
+
+| Address | What it is |
+| --- | --- |
+| `10.0.2.15/24` | The container |
+| `10.0.2.2` | The gateway, which is runwhp itself. With `--add-host NAME:host-gateway`, connections to it reach the host's `127.0.0.1`; without it they are refused |
+| `10.0.2.3` | DNS, answered by runwhp |
+
+runwhp ends the container's TCP connections and UDP flows itself and opens
+the same connections from the host, as any program on the host would. The
+container reaches whatever the host reaches, LAN and VPN included, and nothing
+in the host's network configuration changes. Names resolve through Windows's
+own resolver, so the hosts file, VPN DNS and per-domain DNS servers apply as
+they do on the host. The network is IPv4 only: AAAA queries get an empty
+answer, which sends programs straight to IPv4.
+
+The host's loopback is closed to the container unless `host-gateway` opens
+it. A service that listens on all of the host's interfaces can still be
+reached at the host's LAN address, as with Docker.
+
+`-p 8080:80` listens on the host's `127.0.0.1:8080` and forwards each
+connection to port 80 in the container, which sees it come from `10.0.2.2`.
+`-p 0.0.0.0:8080:80` listens on every interface; Windows Firewall then asks,
+once, whether to allow it, and allowing it on public networks needs an
+administrator. A connection that arrives before anything in the container
+listens on the port is accepted and then closed, as with Docker.
+
+`ping` gets answers only from the gateway: runwhp carries TCP and UDP, not
+ICMP.
+
 ### How a run works
 
 1. The image's layers are pulled and each one is converted to an ext4 image
@@ -148,19 +193,30 @@ on the test machine), and stdin through `-i` is no exception.
 2. runwhp writes an initramfs holding `runwhp-init`, the `virtio_blk` module,
    and a JSON spec of the process.
 3. The guest gets one multiport virtio console, with ports named `stdout`,
-   `stderr`, `stdin` and `control`, and one read-only virtio-blk disk per
-   layer. Each disk's serial number names its layer, so init does not depend
-   on probe order. Each port's output is written to the host by a goroutine
-   of its own, and input is delivered to the guest from another, so the vCPU
-   never waits on the host's console or pipes.
-4. `runwhp-init` mounts the layers under an overlay with a tmpfs upper layer,
-   adds `/proc`, `/sys`, a minimal `/dev` and a hostname, and runs the
-   process chrooted into it. The process's stdin, stdout and stderr are
+   `stderr`, `stdin` and `control`; a virtio network device, unless
+   `--network none`; and one read-only virtio-blk disk per layer. Each disk's
+   serial number names its layer, so init does not depend on probe order.
+   Each port's output is written to the host by a goroutine of its own, and
+   input is delivered to the guest from another, so the vCPU never waits on
+   the host's console or pipes.
+4. The network device's far end is a user-mode TCP/IP stack inside runwhp,
+   gVisor's netstack. Frames the guest sends are copied out on the vCPU
+   thread and processed on other goroutines; frames for the guest go into
+   receive buffers it has posted, or wait in a bounded backlog. The link's
+   MTU is 65520, so bulk data crosses in few, large frames. The stack takes
+   packets for any address, and for each new TCP connection or UDP flow it
+   opens a host socket to the same destination and copies between the two.
+   Published ports are host listeners whose connections the stack opens
+   towards the guest.
+5. `runwhp-init` mounts the layers under an overlay with a tmpfs upper layer,
+   adds `/proc`, `/sys`, a minimal `/dev`, a hostname and `/etc/hosts`,
+   configures `eth0` and `/etc/resolv.conf` when there is a network, and runs
+   the process chrooted into it. The process's stdin, stdout and stderr are
    pipes, or with `-t` a pseudo-terminal from the container's own devpts,
    and init relays them to and from the ports. A port can be open only once
    at a time, so handing the process the ports themselves would break
    `/dev/stdout` and similar paths.
-5. The `control` port carries JSON lines both ways: signals and terminal
+6. The `control` port carries JSON lines both ways: signals and terminal
    sizes from the host, and the exit status from init. When the process
    exits, init kills whatever is left, waits for the last output to reach
    the ports, writes the status, and resets the machine, which ends the VMM.
@@ -173,7 +229,8 @@ on the test machine), and stdin through `-i` is no exception.
 | [`internal/whp`](internal/whp) | Bindings for `WinHvPlatform.dll` and `WinHvEmulation.dll` |
 | [`internal/vm`](internal/vm) | Partition setup, vCPU loop, serial port, RTC stub, I/O APIC |
 | [`internal/boot`](internal/boot) | Kernel loader, page tables, ACPI tables, initramfs builder. Builds on any OS |
-| [`internal/virtio`](internal/virtio) | virtio-mmio transport, block device, multiport console. Builds on any OS |
+| [`internal/virtio`](internal/virtio) | virtio-mmio transport, block device, multiport console, network device. Builds on any OS |
+| [`internal/netstack`](internal/netstack) | The host end of the container's network: gVisor's netstack, TCP and UDP forwarding, DNS, published ports. Builds on any OS |
 | [`internal/image`](internal/image), [`internal/layer`](internal/layer) | Registry pulls, image records, layer conversion and cache |
 | [`internal/guestspec`](internal/guestspec) | The contract between host and guest |
 | [`internal/passwd`](internal/passwd) | User and group resolution |
@@ -205,7 +262,7 @@ supervisor process and one Job Object per container, with no daemon.
 | Container I/O | Multiport virtio console with named ports for stdout, stderr, stdin and control; pipes or a pty in the guest | Done, including `-i`, `-t`, resize and signals |
 | Guest agent | Tiny init as PID 1 that mounts the overlay and execs the process, instead of hcsshim's GCS plus runc | Done (`runwhp-init`) |
 | Bind mounts and volumes | 9p server in Go on the host, carried over vsock | Not started |
-| Networking | User-mode network stack in the VMM (gVisor netstack); published ports are loopback listeners | Not started |
+| Networking | User-mode network stack in the VMM (gVisor netstack); published ports are loopback listeners | Done, IPv4 only, TCP ports only |
 | Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | `run` and `pull` only |
 | Kernel | Our own build with virtio drivers built in, shipped as a signed OCI artifact | Not started; the WSL kernel stands in |
 
@@ -276,6 +333,55 @@ The new end-to-end tests cover:
 - `-it` on a Windows pseudo console: `tty`, the size and a resize, `TERM`,
   Ctrl+C as a key, and the exit code
 - Ctrl+C during a line-mode `-i` read
+
+## Iteration 3 results
+
+Measured on the test machine. Boot times are from process start to exit, as
+before, but taken with a different timer than the earlier tables, so compare
+them with each other rather than with iteration 2's. Transfer times leave out
+booting: they are timed inside the guest with `time`, or for published ports
+on the host's end of the connection.
+
+| Measurement | Result |
+| --- | --- |
+| `run alpine:3.20 true` with the network | 655-664 ms over three runs |
+| `run alpine:3.20 true` with `--network none` | 654-658 ms over three runs |
+| 200 MB from a host server into the container through `host-gateway` (`wget`) | 0.61-1.14 s over five runs |
+| 200 MB from the container to a host server through `host-gateway` (`dd \| nc`) | 2.26-2.31 s |
+| 200 MB into the container through `-p` | 0.75-0.80 s |
+| 200 MB out of the container through `-p` | 2.28-2.44 s |
+| 100 sequential `wget` runs against a host server | 0.27-0.28 s |
+| Cold DNS lookups through the host's resolver | 50-180 ms each |
+| `apk add curl` from the internet, including boot | 2.1-3.0 s |
+
+The network costs nothing measurable at boot. Sending from the container is
+about three times slower than receiving because it is bound by VM exits.
+Sending 200 MB took about 16,000 frames each way: the stack acknowledges
+almost every segment, and busybox `nc` writes small pieces. That came to
+81,000 MMIO exits and 32,000 interrupts. Receiving the same amount took 6,500
+frames of about 32 KiB, which the guest acknowledges in batches. Notification
+suppression (`VIRTIO_F_EVENT_IDX`) is the usual cure and is not implemented
+yet.
+
+gVisor's `go` branch, the one Go programs import, has required Go 1.27 since
+October 2026. runwhp pins its last commit that builds with Go 1.26
+(2026-10-08), so it keeps building with the same toolchain.
+
+The new tests cover:
+
+- the virtio network device against a simulated driver: headers stripped
+  from chains of several descriptors, frames split over mergeable receive
+  buffers, frames held until the guest posts buffers and dropped beyond the
+  backlog, and reset
+- the stack against a second gVisor stack standing in for the guest: TCP
+  both ways with half-close, a refused connection, which destinations are
+  allowed, `host-gateway`, UDP including a 30 KB datagram, DNS over UDP and
+  TCP for each record type, truncation and EDNS, published ports, a busy
+  host port, and closing with connections open
+- end to end: a host server reached through `host-gateway` and refused
+  without it, 20 MB downloaded with its checksum, DNS and TLS to the
+  internet, `--network none`, `-p` in both directions with a 20 MB checksum,
+  and a busy host port
 
 ## Boot spike
 
@@ -443,7 +549,14 @@ starts, which covers decompressing the kernel and early memory setup.
   and nothing written survives the run.
 - Booting needs the WSL kernel, plus `virtio_blk.ko` copied out of a WSL
   distro whose kernel version matches.
-- An image can have at most 58 non-empty layers, one I/O APIC line per disk.
+- An image can have at most 57 non-empty layers, or 58 with
+  `--network none`: each device takes an I/O APIC line.
+- The network is IPv4 only and carries no ICMP. Only TCP ports can be
+  published, each with an explicit host port, and there is no `-P`, `--dns`
+  or `--dns-search`.
+- The network device has neither notification suppression (EVENT_IDX) nor
+  checksum and segmentation offloads, so sending from the container is
+  limited to about 90 MB/s on the test machine.
 - The cache only grows: there is no `images` or `rmi` yet.
 - Interrupts are edge-triggered only; level-triggered lines and EOI tracking
   are not implemented.

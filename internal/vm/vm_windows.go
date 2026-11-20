@@ -498,6 +498,9 @@ func (m *machine) stats() []string {
 				i, d.Serial, d.Requests, d.BytesRead>>20, d.BytesWritten>>20))
 		case *virtio.Console:
 			out = append(out, fmt.Sprintf("virtio %d: console, %d bytes from the guest, %d to it", i, d.BytesWritten.Load(), d.BytesRead.Load()))
+		case *virtio.Net:
+			out = append(out, fmt.Sprintf("virtio %d: net, %d frames (%d KiB) from the guest, %d frames (%d KiB) to it, %d dropped",
+				i, d.TxFrames.Load(), d.TxBytes.Load()>>10, d.RxFrames.Load(), d.RxBytes.Load()>>10, d.RxDropped.Load()))
 		}
 	}
 	return out

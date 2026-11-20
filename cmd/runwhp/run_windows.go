@@ -28,6 +28,7 @@ import (
 	"github.com/quasidock/runwhp/internal/boot"
 	"github.com/quasidock/runwhp/internal/guestspec"
 	"github.com/quasidock/runwhp/internal/image"
+	"github.com/quasidock/runwhp/internal/netstack"
 	"github.com/quasidock/runwhp/internal/virtio"
 	"github.com/quasidock/runwhp/internal/vm"
 )
@@ -55,6 +56,9 @@ type runOptions struct {
 	pull        string
 	kernel      string
 	debug       bool
+	network     string
+	publish     listFlag
+	addHosts    listFlag
 
 	// Development flags, left out of the usage text.
 	init    string
@@ -86,6 +90,11 @@ func runFlags(o *runOptions) *flag.FlagSet {
 	fs.StringVar(&o.pull, "pull", "missing", "")
 	fs.StringVar(&o.kernel, "kernel", defaultKernel, "")
 	fs.BoolVar(&o.debug, "debug", false, "")
+	fs.StringVar(&o.network, "network", "user", "")
+	fs.StringVar(&o.network, "net", "user", "")
+	fs.Var(&o.publish, "p", "")
+	fs.Var(&o.publish, "publish", "")
+	fs.Var(&o.addHosts, "add-host", "")
 	fs.StringVar(&o.init, "init", "", "")
 	fs.Var(&o.layers, "layer", "")
 	fs.Var(&o.modules, "module", "")
@@ -101,6 +110,11 @@ Flags:
   -u, --user USER[:GROUP]  user to run as: name or uid, optionally with a group
   -m, --memory SIZE      guest memory, such as 512m or 2g (default 512m)
       --hostname NAME    container hostname (default: random)
+      --network MODE     user (default: outbound access through this machine) or none
+  -p, --publish [IP:]HOSTPORT:PORT  forward a host port to a container TCP port (repeatable);
+                         IP defaults to 127.0.0.1
+      --add-host NAME:IP add an /etc/hosts entry (repeatable); IP host-gateway reaches
+                         this machine's 127.0.0.1
       --pull POLICY      missing, always or never (default missing)
       --kernel PATH      Linux bzImage to boot (default: the WSL kernel)
       --debug            show the kernel console and VMM diagnostics on stderr
@@ -148,6 +162,10 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 		return fail, errors.New("the input device is not a TTY; if you are using mintty, try prefixing the command with 'winpty'")
 	}
 	memory, err := parseMemory(o.memory)
+	if err != nil {
+		return fail, err
+	}
+	network, err := parseNetworkFlags(o.network, o.publish, o.addHosts)
 	if err != nil {
 		return fail, err
 	}
@@ -209,8 +227,13 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 			layerFiles = append(layerFiles, p)
 		}
 	}
-	if 1+len(layerFiles) > vm.MaxDevices {
-		return fail, fmt.Errorf("the image has %d layers; runwhp supports at most %d", len(layerFiles), vm.MaxDevices-1)
+	others := 1 // the console
+	if network.enabled {
+		others++
+	}
+	if others+len(layerFiles) > vm.MaxDevices {
+		return fail, fmt.Errorf("the image has %d layers; runwhp supports at most %d (%d with --network none)",
+			len(layerFiles), vm.MaxDevices-others, vm.MaxDevices-1)
 	}
 	logf("%4d ms  image ready: %d layers", time.Since(start).Milliseconds(), len(layerFiles))
 
@@ -245,8 +268,8 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 	}
 	spec := guestspec.Spec{
 		Args: config.Args, Env: config.Env, Cwd: config.Cwd, User: config.User,
-		Hostname: hostname, Layers: len(layerFiles), Debug: o.debug,
-		Stdin: o.interactive, TTY: o.tty,
+		Hostname: hostname, Hosts: network.hosts, Layers: len(layerFiles), Debug: o.debug,
+		Stdin: o.interactive, TTY: o.tty, Network: network.spec(),
 	}
 	if o.tty {
 		spec.Rows, spec.Cols, _ = terminalSize(os.Stdout)
@@ -268,7 +291,8 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 		files = append(files, boot.File{Name: "modules/" + m.name, Mode: boot.ModeFile | 0o644, Data: m.data})
 	}
 
-	// Devices: the console first, then one disk per layer, bottom first.
+	// Devices: the console first, then the network device if any, then one
+	// disk per layer, bottom first.
 	var stdin io.Reader
 	if o.interactive {
 		stdin = os.Stdin
@@ -288,6 +312,24 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 	}
 	proxy.console.Store(console)
 	devices := []virtio.Device{console}
+	if network.enabled {
+		nic := &virtio.Net{MAC: netstack.GuestMAC, MTU: netstack.MTU}
+		stack, err := netstack.New(netstack.Config{
+			Output:      nic.Deliver,
+			HostGateway: network.hostGateway,
+			Publish:     network.publish,
+			Logf:        logf,
+		})
+		if err != nil {
+			return fail, err
+		}
+		defer func() {
+			logf("%s", stack.Stats())
+			stack.Close()
+		}()
+		nic.Recv = stack.Inject
+		devices = append(devices, nic)
+	}
 	for i, path := range layerFiles {
 		f, err := os.Open(path)
 		if err != nil {

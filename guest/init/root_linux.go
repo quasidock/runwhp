@@ -9,7 +9,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"unsafe"
 
 	"github.com/quasidock/runwhp/internal/guestspec"
 )
@@ -80,8 +79,9 @@ func mountRoot(layers int) error {
 }
 
 // prepareRoot gives the container the usual kernel filesystems, a minimal
-// /dev, a hostname and a loopback interface.
-func prepareRoot(hostname string) error {
+// /dev, a hostname, /etc/hosts, a loopback interface and, if the spec asks
+// for one, a network with its /etc/resolv.conf.
+func prepareRoot(spec *guestspec.Spec) error {
 	in := func(p string) string { return filepath.Join(root, p) }
 	type mount struct {
 		source, target, fstype string
@@ -110,16 +110,33 @@ func prepareRoot(hostname string) error {
 		}
 	}
 
-	if hostname != "" {
-		if err := syscall.Sethostname([]byte(hostname)); err != nil {
+	os.MkdirAll(in("/etc"), 0o755)
+	if spec.Hostname != "" {
+		if err := syscall.Sethostname([]byte(spec.Hostname)); err != nil {
 			return fmt.Errorf("setting hostname: %w", err)
 		}
-		os.MkdirAll(in("/etc"), 0o755)
-		writeEtc(in("/etc/hostname"), hostname+"\n")
-		writeEtc(in("/etc/hosts"), "127.0.0.1\tlocalhost "+hostname+"\n::1\tlocalhost ip6-localhost ip6-loopback\n")
+		writeEtc(in("/etc/hostname"), spec.Hostname+"\n")
+	}
+	if spec.Hostname != "" || len(spec.Hosts) > 0 {
+		var hosts strings.Builder
+		hosts.WriteString("127.0.0.1\tlocalhost " + spec.Hostname + "\n::1\tlocalhost ip6-localhost ip6-loopback\n")
+		for _, h := range spec.Hosts {
+			hosts.WriteString(h + "\n")
+		}
+		writeEtc(in("/etc/hosts"), hosts.String())
 	}
 	if err := loopbackUp(); err != nil {
 		logf("bringing up lo: %v", err)
+	}
+	if n := spec.Network; n != nil {
+		if err := configureNetwork(n); err != nil {
+			return err
+		}
+		var resolv strings.Builder
+		for _, server := range n.DNS {
+			fmt.Fprintf(&resolv, "nameserver %s\n", server)
+		}
+		writeEtc(in("/etc/resolv.conf"), resolv.String())
 	}
 	return nil
 }
@@ -156,24 +173,6 @@ func populateDev(dev string) error {
 		if err := os.Symlink(target, filepath.Join(dev, name)); err != nil {
 			return err
 		}
-	}
-	return nil
-}
-
-func loopbackUp() error {
-	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, 0)
-	if err != nil {
-		return err
-	}
-	defer syscall.Close(fd)
-	var ifr [40]byte // struct ifreq: name[16], then a union starting with short flags
-	copy(ifr[:], "lo")
-	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), syscall.SIOCGIFFLAGS, uintptr(unsafe.Pointer(&ifr[0]))); errno != 0 {
-		return errno
-	}
-	*(*uint16)(unsafe.Pointer(&ifr[16])) |= syscall.IFF_UP
-	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), syscall.SIOCSIFFLAGS, uintptr(unsafe.Pointer(&ifr[0]))); errno != 0 {
-		return errno
 	}
 	return nil
 }

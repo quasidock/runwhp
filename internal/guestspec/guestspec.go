@@ -1,10 +1,11 @@
 // Package guestspec is the contract between the runwhp host process and the
 // init program inside the guest.
 //
-// The host writes a Spec into the initramfs at SpecPath. The guest attaches
-// one read-only virtio block device per image layer, bottom layer first, each
-// with the serial LayerSerial(i), and a multiport virtio console with the
-// ports named below.
+// The host writes a Spec into the initramfs at SpecPath. The guest gets a
+// multiport virtio console with the ports named below; then, when
+// Spec.Network is set, a virtio network device with Network.MAC; then one
+// read-only virtio block device per image layer, bottom layer first, each
+// with the serial LayerSerial(i).
 //
 // The control port carries JSON lines both ways. The host sends Control
 // messages: signals for the container process and terminal sizes. When the
@@ -36,7 +37,12 @@ type Spec struct {
 	Cwd      string   `json:"cwd,omitempty"`
 	User     string   `json:"user,omitempty"` // name, uid, name:group or uid:gid; empty means root
 	Hostname string   `json:"hostname,omitempty"`
-	Layers   int      `json:"layers"`
+	// Hosts are extra /etc/hosts lines, "ADDRESS NAME".
+	Hosts  []string `json:"hosts,omitempty"`
+	Layers int      `json:"layers"`
+	// Network configures the network interface. nil means the guest has
+	// none beyond loopback.
+	Network *Network `json:"network,omitempty"`
 	// Stdin connects the process's standard input to the stdin port, which
 	// reaches end of file when the host's input does. Without it the process
 	// reads /dev/null.
@@ -48,6 +54,15 @@ type Spec struct {
 	Cols uint16 `json:"cols,omitempty"`
 	// Debug makes init describe what it does on the kernel console.
 	Debug bool `json:"debug,omitempty"`
+}
+
+// Network is the static configuration of the guest's one network interface.
+type Network struct {
+	MAC     string   `json:"mac"`     // identifies the interface, as in 02:00:00:00:00:0f
+	Address string   `json:"address"` // the guest's address and prefix, as in 10.0.2.15/24
+	Gateway string   `json:"gateway"` // the default route
+	DNS     []string `json:"dns,omitempty"`
+	MTU     int      `json:"mtu,omitempty"`
 }
 
 // Control is a message from the host to init.

@@ -126,7 +126,7 @@ func start(begin time.Time) (*outcome, error) {
 		return out, err
 	}
 	debugf("root filesystem mounted from %d layers", spec.Layers)
-	if err := prepareRoot(spec.Hostname); err != nil {
+	if err := prepareRoot(&spec); err != nil {
 		return out, err
 	}
 	out.status, err = runProcess(&spec, ports, ctl)
