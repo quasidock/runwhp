@@ -1,0 +1,2 @@
+# The kernel build runs in a Linux container, where CRLF breaks shell scripts.
+kernel/** text eol=lf

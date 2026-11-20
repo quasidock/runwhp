@@ -1,0 +1,110 @@
+# Builds runwhp's guest kernel and, on main, publishes it to ghcr.io as an OCI
+# artifact that runwhp pins by digest. See "Kernel" in README.md.
+name: kernel
+
+on:
+  push:
+    branches: [main]
+    paths: [kernel/**, internal/kernel/**, .github/workflows/kernel.yml]
+  pull_request:
+    paths: [kernel/**, internal/kernel/**, .github/workflows/kernel.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kernel-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REPOSITORY: ghcr.io/${{ github.repository_owner }}/runwhp-kernel
+
+# Naming the shell turns on pipefail, so a failed push is not hidden by tee.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # Pull requests: build, and check that the tag is free or already names an
+  # identical build. Nothing is pushed.
+  check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build
+        run: docker buildx build --target release --output type=local,dest=out/release kernel
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: go test ./internal/kernel
+      - name: Check the tag
+        run: go run ./kernel/push -dir out/release -repo "$REPOSITORY" -dry-run
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kernel
+          path: |
+            out/release/bzImage
+            out/release/config
+            out/release/build-info.json
+
+  publish:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build
+        run: docker buildx build --target release --output type=local,dest=out/release kernel
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: go test ./internal/kernel
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish
+        id: publish
+        run: go run ./kernel/push -dir out/release -repo "$REPOSITORY" | tee -a "$GITHUB_OUTPUT"
+      - name: Summary
+        env:
+          TAG: ${{ steps.publish.outputs.tag }}
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          {
+            echo "### runwhp kernel $TAG"
+            echo
+            echo "To make runwhp boot this build, set in internal/kernel/pin.go:"
+            echo
+            echo '```go'
+            echo "	Tag:        \"$TAG\","
+            echo "	Digest:     \"$DIGEST\","
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      # runwhp pulls its kernel anonymously. A package the workflow creates
+      # starts private; this fails until someone makes it public.
+      - name: Check anonymous access
+        env:
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          path=${REPOSITORY#ghcr.io/}
+          token=$(curl -fsS "https://ghcr.io/token?scope=repository:$path:pull" | jq -r .token)
+          if ! curl -fsS -o /dev/null -H "Authorization: Bearer $token" \
+              -H "Accept: application/vnd.oci.image.manifest.v1+json" \
+              "https://ghcr.io/v2/$path/manifests/$DIGEST"; then
+            echo "::error::$REPOSITORY cannot be pulled anonymously; make the package public in its settings on GitHub"
+            exit 1
+          fi
