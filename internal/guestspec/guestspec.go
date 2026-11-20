@@ -3,9 +3,14 @@
 //
 // The host writes a Spec into the initramfs at SpecPath. The guest gets a
 // multiport virtio console with the ports named below; then, when
-// Spec.Network is set, a virtio network device with Network.MAC; then one
+// Spec.Network is set, a virtio network device with Network.MAC; then, when
+// Spec.Mounts is not empty, a virtio-fs device tagged FSTag; then one
 // read-only virtio block device per image layer, bottom layer first, each
 // with the serial LayerSerial(i).
+//
+// The virtio-fs device's root holds the host's shares as entries named "0",
+// "1", and so on. Init mounts it, sets OwnerXattr on its root, and binds each
+// share onto its Mount.Target.
 //
 // The control port carries JSON lines both ways. The host sends Control
 // messages: signals for the container process and terminal sizes. When the
@@ -30,6 +35,14 @@ const (
 // LayerSerial is the virtio-blk serial of layer i (0 is the bottom layer).
 func LayerSerial(i int) string { return fmt.Sprintf("layer%d", i) }
 
+// FSTag is the mount tag of the virtio-fs device that carries the shares.
+const FSTag = "runwhp"
+
+// OwnerXattr is the extended attribute init sets on the root of the shares,
+// to "UID:GID" of the container's user, before anything else reads them.
+// Host files without an owner of their own then belong to that user.
+const OwnerXattr = "trusted.runwhp.owner"
+
 // Spec describes the container process.
 type Spec struct {
 	Args     []string `json:"args"`
@@ -43,6 +56,9 @@ type Spec struct {
 	// Network configures the network interface. nil means the guest has
 	// none beyond loopback.
 	Network *Network `json:"network,omitempty"`
+	// Mounts are the host's files and directories bound into the
+	// container, in the order to mount them.
+	Mounts []Mount `json:"mounts,omitempty"`
 	// Stdin connects the process's standard input to the stdin port, which
 	// reaches end of file when the host's input does. Without it the process
 	// reads /dev/null.
@@ -63,6 +79,14 @@ type Network struct {
 	Gateway string   `json:"gateway"` // the default route
 	DNS     []string `json:"dns,omitempty"`
 	MTU     int      `json:"mtu,omitempty"`
+}
+
+// Mount binds share Share of the virtio-fs device onto Target.
+type Mount struct {
+	Target   string `json:"target"`
+	Share    int    `json:"share"`
+	File     bool   `json:"file,omitempty"` // the share is a file, not a directory
+	ReadOnly bool   `json:"readonly,omitempty"`
 }
 
 // Control is a message from the host to init.
