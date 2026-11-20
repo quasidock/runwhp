@@ -150,6 +150,10 @@ const (
 	regQueueDriverHi = 0x094
 	regQueueDeviceLo = 0x0a0
 	regQueueDeviceHi = 0x0a4
+	regSHMLenLo      = 0x0b0
+	regSHMLenHi      = 0x0b4
+	regSHMBaseLo     = 0x0b8
+	regSHMBaseHi     = 0x0bc
 	regConfigGen     = 0x0fc
 	regConfig        = 0x100
 )
@@ -199,6 +203,11 @@ func (t *Transport) Read(off uint64, size int) uint64 {
 		return uint64(t.intStatus)
 	case regStatus:
 		return uint64(t.status)
+	case regSHMLenLo, regSHMLenHi, regSHMBaseLo, regSHMBaseHi:
+		// No device has shared memory regions. A missing region reads as
+		// length -1; with 0, a kernel built with FUSE_DAX tries to reserve
+		// it, fails, and gives up on the virtio-fs device.
+		return 0xffffffff
 	case regConfigGen:
 		return 0
 	}
