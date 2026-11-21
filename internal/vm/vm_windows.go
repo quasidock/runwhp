@@ -622,8 +622,8 @@ func (m *machine) stats() []string {
 	for i, t := range m.virtio {
 		switch d := t.Device().(type) {
 		case *virtio.Blk:
-			out = append(out, fmt.Sprintf("virtio %d: blk %q, %d requests, %d MiB read, %d MiB written",
-				i, d.Serial, d.Requests, d.BytesRead>>20, d.BytesWritten>>20))
+			out = append(out, fmt.Sprintf("virtio %d: blk %q, %d requests, %d MiB read, %d MiB written, %d flushes, %d discards, at most %d at once",
+				i, d.Serial, d.Requests.Load(), d.BytesRead.Load()>>20, d.BytesWritten.Load()>>20, d.Flushes.Load(), d.Discards.Load(), d.MaxInflight.Load()))
 		case *virtio.Console:
 			out = append(out, fmt.Sprintf("virtio %d: console, %d bytes from the guest, %d to it", i, d.BytesWritten.Load(), d.BytesRead.Load()))
 		case *virtio.Net:

@@ -26,6 +26,7 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
 	"github.com/quasidock/runwhp/internal/boot"
+	"github.com/quasidock/runwhp/internal/disk"
 	"github.com/quasidock/runwhp/internal/fuse"
 	"github.com/quasidock/runwhp/internal/guestspec"
 	"github.com/quasidock/runwhp/internal/hostfs"
@@ -371,16 +372,16 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 		devices = append(devices, &virtio.Fs{Tag: guestspec.FSTag, Handler: server})
 	}
 	for i, path := range layerFiles {
-		f, err := os.Open(path)
+		f, err := disk.Open(path, disk.ReadOnly)
 		if err != nil {
 			return fail, err
 		}
 		defer f.Close()
-		st, err := f.Stat()
+		size, err := f.Size()
 		if err != nil {
 			return fail, err
 		}
-		devices = append(devices, &virtio.Blk{File: f, Sectors: uint64(st.Size()) / 512, ReadOnly: true,
+		devices = append(devices, &virtio.Blk{File: f, Sectors: uint64(size) / 512, ReadOnly: true,
 			Serial: guestspec.LayerSerial(i)})
 	}
 
