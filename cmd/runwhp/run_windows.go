@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,6 +58,7 @@ type runOptions struct {
 	workdir     string
 	user        string
 	memory      string
+	cpus        string
 	hostname    string
 	pull        string
 	kernel      string
@@ -93,6 +95,7 @@ func runFlags(o *runOptions) *flag.FlagSet {
 	fs.StringVar(&o.user, "user", "", "")
 	fs.StringVar(&o.memory, "m", "512m", "")
 	fs.StringVar(&o.memory, "memory", "512m", "")
+	fs.StringVar(&o.cpus, "cpus", "", "")
 	fs.StringVar(&o.hostname, "hostname", "", "")
 	fs.StringVar(&o.pull, "pull", "missing", "")
 	fs.StringVar(&o.kernel, "kernel", "", "")
@@ -119,6 +122,7 @@ Flags:
   -w, --workdir DIR      working directory inside the container
   -u, --user USER[:GROUP]  user to run as: name or uid, optionally with a group
   -m, --memory SIZE      guest memory, such as 512m or 2g (default 512m)
+      --cpus N           virtual processors (default: this machine's, up to 4)
       --hostname NAME    container hostname (default: random)
       --network MODE     user (default: outbound access through this machine) or none
   -p, --publish [IP:]HOSTPORT:PORT  forward a host port to a container TCP port (repeatable);
@@ -176,6 +180,10 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 		return fail, errors.New("the input device is not a TTY; if you are using mintty, try prefixing the command with 'winpty'")
 	}
 	memory, err := parseMemory(o.memory)
+	if err != nil {
+		return fail, err
+	}
+	cpus, err := parseCPUs(o.cpus, runtime.NumCPU())
 	if err != nil {
 		return fail, err
 	}
@@ -402,6 +410,7 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 		Initrd:      boot.CPIO(files),
 		Cmdline:     cmdline,
 		Memory:      memory,
+		CPUs:        cpus,
 		Devices:     devices,
 		ConsoleLine: consoleLine,
 		Logf:        logf,
@@ -489,6 +498,37 @@ func parseMemory(s string) (uint64, error) {
 		return 0, fmt.Errorf("memory must be between 128m and %dm", vm.MaxMemory>>20)
 	}
 	return size, nil
+}
+
+// defaultCPUs caps the default vCPU count. Build tools size their work by
+// nproc, and four jobs still fit in the default 512m.
+const defaultCPUs = 4
+
+// parseCPUs reads --cpus: a whole number of vCPUs, from 1 to the host's
+// logical processors. Docker's --cpus is a CPU-time quota and takes
+// fractions; runwhp's counts processors, so a fraction is refused rather
+// than quietly meaning something else. Empty means the host's count, up to
+// defaultCPUs.
+func parseCPUs(s string, host int) (int, error) {
+	most := min(host, vm.MaxCPUs)
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return min(most, defaultCPUs), nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		if _, ferr := strconv.ParseFloat(s, 64); ferr == nil {
+			return 0, fmt.Errorf("--cpus counts vCPUs in runwhp; give a whole number, not %s", s)
+		}
+		return 0, fmt.Errorf("invalid --cpus %q", s)
+	}
+	if n < 1 || n > most {
+		if most < host {
+			return 0, fmt.Errorf("--cpus must be between 1 and %d", most)
+		}
+		return 0, fmt.Errorf("--cpus must be between 1 and %d, the logical processors on this machine", most)
+	}
+	return n, nil
 }
 
 func randomHostname() string {

@@ -9,8 +9,15 @@ HCS, and no administrator rights at run time.
 
 `runwhp` is experimental. It runs Linux containers from registry images,
 interactively or not, with a network and the host's files, on a kernel of
-its own.
+its own and on several processors.
 
+- **Iteration 6** (2026-11-21): containers get more than one vCPU: the
+  host's logical processors, up to 4, unless `--cpus` asks for more, up to
+  64. The guest sees them as cores of one processor sharing its cache, so
+  its scheduler spreads work over all of them. A cold `go build` of runwhp
+  over bind mounts takes 18 s with 16 vCPUs, as long as on Windows itself,
+  against 63 s with one, and starting 16 costs about 50 ms. See
+  [Usage](#usage) and [Iteration 6 results](#iteration-6-results).
 - **Iteration 5** (2026-11-21): `-v` and `--mount` bind host directories and
   files into the container. runwhp serves them itself over virtio-fs, and
   keeps the owners, modes, symlinks and special files the container makes in
@@ -42,8 +49,7 @@ its own.
   kernel on WHP. See [Boot spike](#boot-spike).
 - **Proposed, not yet agreed**: the rest of the architecture in
   [Proposed design](#proposed-design).
-- **Not started**: named volumes, more than one vCPU, and the runc-style
-  lifecycle commands.
+- **Not started**: named volumes and the runc-style lifecycle commands.
 
 ## Why not runhcs, HCS, or WSL
 
@@ -105,6 +111,7 @@ Get-Content data.csv | .\out\runwhp.exe run -i alpine:3.20 wc -l
 .\out\runwhp.exe run --add-host host.docker.internal:host-gateway alpine:3.20 wget -qO- http://host.docker.internal:3000/
 .\out\runwhp.exe run -v ${PWD}:/src -w /src alpine:3.20 ls -l
 .\out\runwhp.exe run --mount type=bind,source=C:\data,target=/data,readonly alpine:3.20 du -sh /data
+.\out\runwhp.exe run --cpus 8 -m 2g -v ${PWD}:/src -w /src golang:1.26 go build ./...
 .\out\runwhp.exe pull debian:12
 ```
 
@@ -117,6 +124,7 @@ Get-Content data.csv | .\out\runwhp.exe run -i alpine:3.20 wc -l
 | `-w`, `--workdir` | image's, else `/` | Working directory; created if missing |
 | `-u`, `--user` | image's, else root | `name`, `uid`, `name:group` or `uid:gid`, resolved against the image's `/etc/passwd` and `/etc/group` |
 | `-m`, `--memory` | `512m` | Guest RAM, `128m` to `3328m`. The writable layer is a tmpfs inside it |
+| `--cpus` | the host's, up to 4 | vCPUs, a whole number up to the host's logical processors, at most 64. Unlike Docker's `--cpus`, it counts processors rather than setting a quota, so `1.5` is refused. Builds size their jobs by `nproc`, so raise `-m` with it |
 | `--hostname` | random | Hostname, also written to `/etc/hostname` and `/etc/hosts` |
 | `--network`, `--net` | `user` | `user` gives the container a network through runwhp; `none` leaves it only loopback |
 | `-p`, `--publish` | | `[IP:]HOSTPORT:PORT[/tcp]`: listen on the host and forward to the container's TCP port; repeatable. IP defaults to `127.0.0.1` |
@@ -324,29 +332,37 @@ bzImage.
 2. runwhp loads its kernel from the store, fetching it first if this is the
    first run, and writes an initramfs holding `runwhp-init` and a JSON spec
    of the process.
-3. The guest gets one multiport virtio console, with ports named `stdout`,
+3. The guest gets the vCPUs `--cpus` asks for, each run by a thread of its
+   own. runwhp starts only the first. The others wait until the guest's
+   kernel starts them with INIT and SIPI, which the hypervisor's local APIC
+   emulation delivers, as it does every interrupt between processors.
+   runwhp describes the vCPUs to the guest, in ACPI's MADT and in CPUID, as
+   single-threaded cores of one package that share their last-level cache.
+   The I/O APIC sends each device's interrupt to the CPU the guest's kernel
+   chose for it.
+4. The guest gets one multiport virtio console, with ports named `stdout`,
    `stderr`, `stdin` and `control`; a virtio network device, unless
    `--network none`; a virtio-fs device, with `-v` or `--mount`; and one
    read-only virtio-blk disk per layer. Each disk's
    serial number names its layer, so init does not depend on probe order.
    Each port's output is written to the host by a goroutine of its own, and
-   input is delivered to the guest from another, so the vCPU never waits on
+   input is delivered to the guest from another, so no vCPU ever waits on
    the host's console or pipes.
-4. The network device's far end is a user-mode TCP/IP stack inside runwhp,
-   gVisor's netstack. Frames the guest sends are copied out on the vCPU
-   thread and processed on other goroutines; frames for the guest go into
-   receive buffers it has posted, or wait in a bounded backlog. The link's
-   MTU is 65520, so bulk data crosses in few, large frames. The stack takes
-   packets for any address, and for each new TCP connection or UDP flow it
-   opens a host socket to the same destination and copies between the two.
-   Published ports are host listeners whose connections the stack opens
-   towards the guest.
-5. The virtio-fs device's far end is a FUSE server inside runwhp, which
+5. The network device's far end is a user-mode TCP/IP stack inside runwhp,
+   gVisor's netstack. Frames the guest sends are copied out on the thread
+   of the vCPU that sent them and processed on other goroutines; frames for
+   the guest go into receive buffers it has posted, or wait in a bounded
+   backlog. The link's MTU is 65520, so bulk data crosses in few, large
+   frames. The stack takes packets for any address, and for each new TCP
+   connection or UDP flow it opens a host socket to the same destination
+   and copies between the two. Published ports are host listeners whose
+   connections the stack opens towards the guest.
+6. The virtio-fs device's far end is a FUSE server inside runwhp, which
    serves every mount at once: its root, which only init sees, holds them as
    entries `0`, `1`, and so on. Requests are served on goroutines, up to 16
    at a time, through Windows' native API, and complete in whatever order
    they finish. A read or write carries up to 512 KiB.
-6. `runwhp-init` mounts the layers under an overlay with a tmpfs upper layer,
+7. `runwhp-init` mounts the layers under an overlay with a tmpfs upper layer,
    adds `/proc`, `/sys`, a minimal `/dev`, a hostname and `/etc/hosts`,
    configures `eth0` and `/etc/resolv.conf` when there is a network,
    resolves the container's user, mounts the virtio-fs device, tells it who
@@ -358,7 +374,7 @@ bzImage.
    and init relays them to and from the ports. A port can be open only once
    at a time, so handing the process the ports themselves would break
    `/dev/stdout` and similar paths.
-7. The `control` port carries JSON lines both ways: signals and terminal
+8. The `control` port carries JSON lines both ways: signals and terminal
    sizes from the host, and the exit status from init. When the process
    exits, init kills whatever is left, waits for the last output to reach
    the ports, writes the status, and resets the machine, which ends the VMM.
@@ -369,7 +385,7 @@ bzImage.
 | --- | --- |
 | [`cmd/runwhp`](cmd/runwhp) | Command line |
 | [`internal/whp`](internal/whp) | Bindings for `WinHvPlatform.dll` and `WinHvEmulation.dll` |
-| [`internal/vm`](internal/vm) | Partition setup, vCPU loop, serial port, RTC stub, I/O APIC |
+| [`internal/vm`](internal/vm) | Partition setup, vCPU loops, processor topology, serial port, RTC stub, I/O APIC |
 | [`internal/boot`](internal/boot) | Kernel loader, page tables, ACPI tables, initramfs builder. Builds on any OS |
 | [`internal/virtio`](internal/virtio) | virtio-mmio transport, block device, multiport console, network device, file system device. Builds on any OS |
 | [`internal/netstack`](internal/netstack) | The host end of the container's network: gVisor's netstack, TCP and UDP forwarding, DNS, published ports. Builds on any OS |
@@ -406,6 +422,7 @@ container's supervisor, with no daemon.
 | Boot | Direct kernel boot (Linux 64-bit boot protocol), no firmware | Done |
 | Clock and timers | Hyper-V enlightenments supply TSC and APIC timer frequencies | Done |
 | Interrupts | Hypervisor's local APIC plus an emulated 64-pin I/O APIC | Done, edge-triggered only |
+| Processors | One thread per vCPU; the guest starts the others through the hypervisor's local APIC; topology described in CPUID | Done, up to 64 |
 | Device discovery | Hardware-reduced ACPI with a generated DSDT | Done |
 | Root filesystem | One read-only ext4 image per layer on virtio-blk, overlayfs in the guest, writable scratch disk | Done, but the upper layer is a tmpfs, not a scratch disk |
 | Layer conversion | `tar2ext4`, cached per layer digest | Done |
@@ -671,6 +688,70 @@ The new tests cover:
 
 The whole suite passes on runwhp's kernel and on the WSL kernel.
 
+## Iteration 6 results
+
+Measured on the test machine, which has 8 cores and 16 threads, with
+runwhp's kernel, in one session from Git Bash. Times inside the guest come
+from `/proc/uptime`.
+
+More processors cost little at start, over five runs:
+
+| Measurement | Result |
+| --- | --- |
+| `run alpine:3.20 true` with `--cpus 1` | 263-268 ms, and 327 ms once |
+| the same with `--cpus 2` | 263-281 ms |
+| the same with `--cpus 4`, the default here | 271-284 ms |
+| the same with `--cpus 8` | 290-295 ms |
+| the same with `--cpus 16` | 312-330 ms |
+
+Work that runs in parallel scales with them, over three runs each. "16
+hashes" is sixteen jobs that each hash 512 MB from `/dev/zero` through a
+pipe. The build is a cold `GOOS=windows go build ./cmd/runwhp` in
+`golang:1.26` with `-m 3g`, which reads runwhp's source and the host's Go
+module cache through read-only bind mounts and keeps its build cache on the
+overlay:
+
+| `--cpus` | 16 hashes | `go build` |
+| --- | --- | --- |
+| 1 | 65.6-65.8 s | 62.1-65.1 s |
+| 2 | 33.9-36.2 s | |
+| 4 | 18.6-19.1 s | 25.8-31.0 s |
+| 8 | 11.2-11.4 s | |
+| 16 | 10.6-10.7 s | 17.6-18.7 s |
+
+The same build takes 17.5-18.9 s on Windows itself, and 47.0-47.8 s in
+WSL2's Docker with 16 vCPUs, reading the same files through `/mnt`.
+Hashing gains little past 8 vCPUs: by then the machine's 8 cores are all
+busy, and the second thread of a core adds little.
+
+`git status` in a new container, on a tree of 10,000 files on NTFS like
+iteration 5's, checks the files from several threads. It took 1.11-1.15 s
+with 1 vCPU, 0.80-0.84 s with 4, and 0.95-0.96 s with 16.
+
+Before runwhp described the topology in CPUID, the 15 secondary CPUs of a
+16-vCPU guest took 1.24 s to come up; they now take 12 ms. See
+[Findings](#findings).
+
+The new tests cover:
+
+- the MADT for 1 to 64 processors, and the CPUID topology decoded as Linux
+  decodes it
+- the rules for stopping the guest, and the I/O APIC's routing to each
+  CPU's local APIC, from concurrent goroutines and under the race detector
+- parsing `--cpus`
+- end to end:
+  - the number of processors and the topology the guest sees, with and
+    without `--cpus`, and refused values
+  - a process on each CPU, and four busy loops spread over four CPUs
+  - an exit code from the last CPU, and a reboot asked for from another
+  - Ctrl+Break before the secondary CPUs have started
+  - a CPU taken offline and brought back
+  - four writers to a bind mount, four downloads from the host and four
+    writers to stdout, all at once
+
+The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
+the WSL kernel.
+
 ## Boot spike
 
 The spike lives in [`spike/`](spike/) and is kept as a reference; the runtime
@@ -864,6 +945,34 @@ starts, which covers decompressing the kernel and early memory setup.
 - **`NtQueryInformationByName` stats without opening.** On NTFS it is five
   times faster than an open, a query and a close. It does not follow a link,
   and with `FileStatLxInformation` it returns WSL's metadata too.
+- **WHP starts secondary processors itself.** With the local APIC emulated
+  by the hypervisor, every vCPU but the first starts out suspended: it
+  waits inside `WHvRunVirtualProcessor` until the guest sends it INIT and
+  SIPI, then starts in the guest's real-mode trampoline, all without an
+  exit to the VMM. runwhp sets `StartupSuspend` in
+  `WHvRegisterInternalActivityState` all the same, rather than rely on
+  that. Taking a CPU offline and back works the same way. Each vCPU's APIC
+  id is its index.
+- **WHP leaves the processor topology to the VMM.** It answers CPUID's
+  topology leaves (0xB, the core count in 0x80000008, and the sharing of
+  the L3 cache) as if every vCPU were a package of its own. Linux then gave
+  each CPU a last-level cache to itself, and each secondary CPU calibrated
+  its delay loop from scratch, because it had no sibling to copy it from:
+  `calibrate_delay_direct()` failed under the hypervisor, and 15 CPUs took
+  1.24 s to come up. `WHvPartitionPropertyCodeCpuidResultList2` now
+  describes one package of single-threaded cores sharing the L3; it takes
+  per-VP entries only once the VPs exist, and fails `WHvSetupPartition`
+  with `HV_STATUS_INVALID_VP_INDEX` before. 16 CPUs come up in 12 ms.
+- **Hyper-V's paravirtual TLB flushes and IPIs bring nothing measurable
+  here.** Asked for `TbFlushHypercalls`, `SyntheticClusterIpi` and
+  `ExtendedProcessorMasks`, WHP recommends them to the guest, and Linux
+  switches to hypercalls for remote TLB flushes and IPIs. But the build and
+  the hashes above ran no faster, compared run for run, so runwhp leaves
+  them off.
+- **Halted processors never exit.** With the hypervisor's local APIC,
+  `hlt` does not exit to the VMM even with interrupts disabled, so the VMM
+  cannot tell a guest that halted for good, as after `halt -f`, from an
+  idle one.
 
 ## Known gaps
 
@@ -895,10 +1004,14 @@ starts, which covers decompressing the kernel and early memory setup.
 - The cache only grows: there is no `images` or `rmi` yet.
 - Interrupts are edge-triggered only; level-triggered lines and EOI tracking
   are not implemented.
-- One vCPU. Starting further processors is untested.
-- Disk emulation blocks the vCPU. Each MMIO access also takes several round
-  trips through `WinHvEmulation.dll`; a fast path for common instructions
-  would cut the per-write output cost.
+- A guest that stops without resetting, as `halt -f` and `poweroff -f` make
+  it, runs on until Ctrl+C. The hypervisor keeps its halted processors to
+  itself, and runwhp has no ACPI power-off for it to use.
+- `--cpus` is a count, not Docker's quota, and there is no `--cpuset-cpus`.
+- Each device has one virtqueue, which every vCPU shares.
+- Disk emulation blocks the vCPU that asked for the read. Each MMIO access
+  also takes several round trips through `WinHvEmulation.dll`; a fast path
+  for common instructions would cut the per-write output cost.
 - Guest memory is committed up front and never returned to Windows.
 - The guest clock starts at whatever the RTC stub reports and is not kept in
   step with the host afterwards.
@@ -906,3 +1019,21 @@ starts, which covers decompressing the kernel and early memory setup.
 - It is unknown whether hosted Windows CI runners expose WHP, so the
   end-to-end tests run only by hand.
 
+## Open questions
+
+- Is `runwhp` a general OCI runtime that containerd or nerdctl can drive, or a
+  backend used only by Quasidock? This decides how much of the runc command
+  line is worth implementing.
+- Is a one-time administrator step acceptable on machines where the hypervisor
+  is off, or must there be a fallback that needs none?
+- virtio-mmio with generated ACPI, as spiked, or virtio over PCI with MSI-X,
+  which avoids both the I/O APIC and the bytecode but needs PCI emulation?
+  MSI-X would also give each device a queue and an interrupt per vCPU.
+- What protection does the guest kernel owe a container from itself? The VM
+  is the boundary with the host, and the container is the guest's only
+  tenant, so KASLR is off; CPU mitigations are on, at a cost to system
+  calls that has not been measured.
+- Should bind mounts use FUSE's writeback cache? The guest would gather
+  small writes into large ones before sending them to the host, but the
+  host would see writes late, and a host program changing a file the
+  container has open could have its change overwritten.

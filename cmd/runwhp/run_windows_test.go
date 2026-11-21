@@ -35,6 +35,36 @@ func TestParseMemory(t *testing.T) {
 	}
 }
 
+func TestParseCPUs(t *testing.T) {
+	for _, c := range []struct {
+		in         string
+		host, want int
+	}{
+		{"", 2, 2}, {"", 16, 4}, {"", 1, 1}, {"1", 16, 1}, {" 4 ", 16, 4}, {"16", 16, 16}, {"64", 128, 64},
+	} {
+		got, err := parseCPUs(c.in, c.host)
+		if err != nil || got != c.want {
+			t.Errorf("parseCPUs(%q, %d) = %d, %v; want %d", c.in, c.host, got, err, c.want)
+		}
+	}
+	for _, c := range []struct {
+		in, msg string
+		host    int
+	}{
+		{"0", "between 1 and 16, the logical processors", 16},
+		{"-1", "between 1 and 16", 16},
+		{"17", "between 1 and 16", 16},
+		{"65", "between 1 and 64", 128},
+		{"1.5", "whole number", 16},
+		{"2.0", "whole number", 16},
+		{"abc", "invalid --cpus", 16},
+	} {
+		if _, err := parseCPUs(c.in, c.host); err == nil || !strings.Contains(err.Error(), c.msg) {
+			t.Errorf("parseCPUs(%q, %d): %v; want an error saying %q", c.in, c.host, err, c.msg)
+		}
+	}
+}
+
 func TestStatusWriter(t *testing.T) {
 	var w statusWriter
 	if _, ok := w.get(); ok {
