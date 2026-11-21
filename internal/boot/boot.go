@@ -98,8 +98,9 @@ type Layout struct {
 
 // Load places the kernel, an optional initramfs, the command line,
 // boot_params, page tables, a GDT and the ACPI tables into guest memory,
-// which starts at guest physical address 0.
-func Load(mem []byte, k *Kernel, initrd []byte, cmdline string, devices []Device) (Layout, error) {
+// which starts at guest physical address 0. apicIDs are the local APIC ids
+// of the guest's processors, the boot processor first.
+func Load(mem []byte, k *Kernel, initrd []byte, cmdline string, devices []Device, apicIDs []uint32) (Layout, error) {
 	var l Layout
 	ram := uint64(len(mem))
 	l.KernelAt, l.InitSize = k.prefAddress, k.initSize
@@ -155,7 +156,7 @@ func Load(mem []byte, k *Kernel, initrd []byte, cmdline string, devices []Device
 	}
 	zp[0x1e8] = byte(len(entries))
 
-	rsdp, err := writeACPI(mem[acpiAddr:acpiEnd], acpiAddr, devices)
+	rsdp, err := writeACPI(mem[acpiAddr:acpiEnd], acpiAddr, devices, apicIDs)
 	if err != nil {
 		return l, err
 	}

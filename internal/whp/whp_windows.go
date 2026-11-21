@@ -48,9 +48,33 @@ const (
 const (
 	PropLocalApicEmulationMode = 0x1005
 	PropSyntheticFeaturesBanks = 0x100C
+	PropCpuidResultList2       = 0x100D
 	PropUnimplementedMsrAction = 0x1010
 	PropProcessorCount         = 0x1fff
 )
+
+// CpuidResult2 is WHV_X64_CPUID_RESULT2: where a bit of Mask is set, the
+// guest reads that bit of Output from CPUID Function (and subleaf Index, with
+// CpuidSubleafSpecific; on VpIndex only, with CpuidVpSpecific).
+type CpuidResult2 struct {
+	Function, Index, VpIndex, Flags uint32
+	Output, Mask                    [4]uint32 // eax, ebx, ecx, edx
+}
+
+const (
+	CpuidSubleafSpecific = 1
+	CpuidVpSpecific      = 2
+)
+
+// SetCpuidResults overrides CPUID results. An entry for one VP is refused,
+// with HV_STATUS_INVALID_VP_INDEX from Setup, until that VP exists, so call
+// it once the VPs are created.
+func (p *Partition) SetCpuidResults(r []CpuidResult2) error {
+	if len(r) == 0 {
+		return nil
+	}
+	return p.SetProperty(PropCpuidResultList2, unsafe.Pointer(&r[0]), uint32(len(r))*uint32(unsafe.Sizeof(r[0])))
+}
 
 const (
 	ApicModeXApic          = 1
@@ -106,7 +130,16 @@ const (
 	RegCr3    = 0x1E
 	RegCr4    = 0x1F
 	RegEfer   = 0x2001
+
+	RegApicId = 0x3002
+
+	// RegInternalActivityState is WHV_INTERNAL_ACTIVITY_REGISTER.
+	RegInternalActivityState = 0x80000005
 )
+
+// ActivityStartupSuspend is the WHV_INTERNAL_ACTIVITY_REGISTER bit that
+// keeps a processor from running until its local APIC receives a SIPI.
+const ActivityStartupSuspend = 1 << 0
 
 // RegValue is WHV_REGISTER_VALUE (a 16-byte union).
 type RegValue [2]uint64

@@ -1,13 +1,16 @@
 //go:build windows
 
-// Package vm runs one Linux guest on the Windows Hypervisor Platform: one
-// vCPU, guest RAM at address 0, a serial port for the kernel console, an
-// emulated I/O APIC, and virtio-mmio devices.
+// Package vm runs one Linux guest on the Windows Hypervisor Platform: one or
+// more vCPUs, guest RAM at address 0, a serial port for the kernel console,
+// an emulated I/O APIC, and virtio-mmio devices.
 //
-// Register accesses are served on the vCPU thread. Devices may also work from
-// goroutines of their own, through virtio.Transport.Do, and raise interrupts
-// from there: WHvRequestInterrupt wakes the vCPU even while the hypervisor
-// holds it halted, which it does without exiting to us when the guest idles.
+// Each vCPU runs on an OS thread of its own and serves the register accesses
+// it makes on that thread. The boot processor starts the others itself,
+// through the hypervisor's local APIC emulation, which also carries their
+// interprocessor interrupts. Devices may also work from goroutines of their
+// own, through virtio.Transport.Do, and raise interrupts from there:
+// WHvRequestInterrupt wakes a vCPU even while the hypervisor holds it halted,
+// which it does without exiting to us when the guest idles.
 package vm
 
 import (
@@ -16,6 +19,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -25,8 +29,6 @@ import (
 )
 
 const (
-	vp0 = 0
-
 	virtioBase = 0xd0000000 // one window per virtio device
 	virtioIRQ0 = 5
 
@@ -34,6 +36,9 @@ const (
 	MaxMemory = virtioBase
 	// MaxDevices is how many virtio devices fit on the I/O APIC.
 	MaxDevices = IOAPICPins - virtioIRQ0
+	// MaxCPUs is the most vCPUs a guest can have: runwhp's kernel is built
+	// for at most 64.
+	MaxCPUs = 64
 )
 
 // Config describes a guest.
@@ -42,6 +47,8 @@ type Config struct {
 	Initrd  []byte
 	Cmdline string
 	Memory  uint64 // guest RAM in bytes
+	// CPUs is the number of vCPUs, at most MaxCPUs. Zero means one.
+	CPUs int
 
 	// Devices are attached in order, each with its own MMIO window and
 	// interrupt line, and declared to the guest in that order.
@@ -53,7 +60,7 @@ type Config struct {
 	Logf func(format string, a ...any)
 }
 
-// drainer is implemented by devices that work outside the vCPU thread.
+// drainer is implemented by devices that work outside the vCPU threads.
 // Drain is called once the guest has stopped. It waits until the device has
 // finished with guest memory, or until ctx is done, and reports whether it
 // finished.
@@ -72,20 +79,40 @@ type Result struct {
 }
 
 type machine struct {
-	cfg      Config
-	part     *whp.Partition
-	mem      []byte
-	emu      *whp.Emulator
-	ioapic   *ioapic
+	cfg    Config
+	part   *whp.Partition
+	mem    []byte
+	ioapic *ioapic
+	virtio []*virtio.Transport
+	cpus   []*vcpu
+	stop   *stopper
+
+	// portMu serializes port I/O from all vCPUs: the serial port, the CMOS
+	// clock's index register and the reset register.
+	portMu   sync.Mutex
 	uart     *uart
 	rtcIndex byte
-	virtio   []*virtio.Transport
+}
+
+// vcpu is one virtual processor. Its counters belong to the thread that runs
+// it until its loop has returned.
+type vcpu struct {
+	m     *machine
+	index uint32
+	emu   *whp.Emulator
 
 	exits        map[uint32]int
 	ioPorts      map[uint16]int
 	mmioCount    int
 	unknownPages map[uint64]bool
-	result       Result
+}
+
+// on names the vCPU in messages when there is more than one.
+func (v *vcpu) on() string {
+	if len(v.m.cpus) == 1 {
+		return ""
+	}
+	return fmt.Sprintf(" on CPU %d", v.index)
 }
 
 func (m *machine) logf(format string, a ...any) {
@@ -95,45 +122,53 @@ func (m *machine) logf(format string, a ...any) {
 }
 
 // Run boots the guest and runs it until it resets, halts for good, faults,
-// or ctx is canceled. It occupies the calling goroutine's OS thread.
+// or ctx is canceled. The boot processor occupies the calling goroutine's OS
+// thread; the others get threads of their own.
 func Run(ctx context.Context, cfg Config) (Result, error) {
 	start := time.Now()
-	m := &machine{cfg: cfg, exits: map[uint32]int{}, ioPorts: map[uint16]int{}, unknownPages: map[uint64]bool{}}
+	var result Result
 	since := func() string { return fmt.Sprintf("%4d ms", time.Since(start).Milliseconds()) }
 
+	if cfg.CPUs == 0 {
+		cfg.CPUs = 1
+	}
+	m := &machine{cfg: cfg}
+	if cfg.CPUs < 0 || cfg.CPUs > MaxCPUs {
+		return result, fmt.Errorf("%d vCPUs requested; between 1 and %d are possible", cfg.CPUs, MaxCPUs)
+	}
 	if cfg.Memory > MaxMemory || cfg.Memory%(2<<20) != 0 {
-		return m.result, fmt.Errorf("guest memory must be a multiple of 2 MiB and at most %d MiB", MaxMemory>>20)
+		return result, fmt.Errorf("guest memory must be a multiple of 2 MiB and at most %d MiB", MaxMemory>>20)
 	}
 	if cfg.Memory < cfg.Kernel.MinMemory()+uint64(len(cfg.Initrd))+(16<<20) {
-		return m.result, fmt.Errorf("%d MiB of guest memory is too little for this kernel and initramfs", cfg.Memory>>20)
+		return result, fmt.Errorf("%d MiB of guest memory is too little for this kernel and initramfs", cfg.Memory>>20)
 	}
 	if len(cfg.Devices) > MaxDevices {
-		return m.result, fmt.Errorf("%d virtio devices requested; at most %d fit", len(cfg.Devices), MaxDevices)
+		return result, fmt.Errorf("%d virtio devices requested; at most %d fit", len(cfg.Devices), MaxDevices)
 	}
 	if !whp.Present() {
-		return m.result, fmt.Errorf("the Windows Hypervisor Platform is not available; enable the \"Windows Hypervisor Platform\" feature")
+		return result, fmt.Errorf("the Windows Hypervisor Platform is not available; enable the \"Windows Hypervisor Platform\" feature")
 	}
 	var tscHz, apicHz uint64
 	whp.Capability(whp.CapProcessorClockFreq, unsafe.Pointer(&tscHz), 8)
 	whp.Capability(whp.CapInterruptClockFreq, unsafe.Pointer(&apicHz), 8)
 
-	// The vCPU must run on one OS thread for its whole life.
+	// The boot processor must run on one OS thread for its whole life.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
 	part, err := whp.CreatePartition()
 	if err != nil {
-		return m.result, err
+		return result, err
 	}
 	defer part.Close()
 	m.part = part
 	if err := m.configure(); err != nil {
-		return m.result, err
+		return result, err
 	}
 
 	host, mem, err := whp.AllocMemory(cfg.Memory)
 	if err != nil {
-		return m.result, err
+		return result, err
 	}
 	freeMemory := true
 	defer func() {
@@ -143,7 +178,7 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 	}()
 	m.mem = mem
 	if err := part.MapGpa(host, 0, cfg.Memory, whp.MapRead|whp.MapWrite|whp.MapExecute); err != nil {
-		return m.result, err
+		return result, err
 	}
 
 	m.ioapic = newIOAPIC(part.RequestInterrupt, m.logf)
@@ -156,37 +191,60 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 			MMIOBase: virtioBase + uint32(i)*virtio.WindowSize, MMIOLen: virtio.WindowSize, GSI: irq})
 	}
 
-	layout, err := boot.Load(mem, cfg.Kernel, cfg.Initrd, cfg.Cmdline, devices)
-	if err != nil {
-		return m.result, err
-	}
-	if err := part.CreateVP(vp0); err != nil {
-		return m.result, err
-	}
-	defer part.DeleteVP(vp0)
-	if err := m.setBootRegisters(layout); err != nil {
-		return m.result, err
-	}
-	if m.emu, err = whp.NewEmulator(part, vp0, m.mmio); err != nil {
-		return m.result, err
-	}
-	defer m.emu.Close()
-	m.logf("%s  ready: %d MiB RAM, kernel %s, initramfs %d KiB, %d virtio devices, tsc %d MHz, apic %d MHz",
-		since(), cfg.Memory>>20, cfg.Kernel.Version, len(cfg.Initrd)>>10, len(cfg.Devices), tscHz/1e6, apicHz/1e6)
-
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		select {
-		case <-ctx.Done():
-			part.Cancel(vp0)
-		case <-done:
+	for i := range cfg.CPUs {
+		if err := part.CreateVP(uint32(i)); err != nil {
+			return result, err
 		}
-	}()
+		defer part.DeleteVP(uint32(i))
+		m.cpus = append(m.cpus, &vcpu{m: m, index: uint32(i),
+			exits: map[uint32]int{}, ioPorts: map[uint16]int{}, unknownPages: map[uint64]bool{}})
+	}
+	apicIDs, err := m.prepareCPUs()
+	if err != nil {
+		return result, err
+	}
+	layout, err := boot.Load(mem, cfg.Kernel, cfg.Initrd, cfg.Cmdline, devices, apicIDs)
+	if err != nil {
+		return result, err
+	}
+	if err := m.setBootRegisters(layout); err != nil {
+		return result, err
+	}
+	for _, v := range m.cpus {
+		if v.emu, err = whp.NewEmulator(part, v.index, v.mmio); err != nil {
+			return result, err
+		}
+		defer v.emu.Close()
+	}
+	m.logf("%s  ready: %d MiB RAM, %d vCPUs, kernel %s, initramfs %d KiB, %d virtio devices, tsc %d MHz, apic %d MHz",
+		since(), cfg.Memory>>20, cfg.CPUs, cfg.Kernel.Version, len(cfg.Initrd)>>10, len(cfg.Devices), tscHz/1e6, apicHz/1e6)
 
-	err = m.loop(ctx)
+	m.stop = newStopper(cfg.CPUs)
+	var loops sync.WaitGroup
+	loops.Add(len(m.cpus))
+	for _, v := range m.cpus[1:] {
+		go func() {
+			runtime.LockOSThread()
+			defer runtime.UnlockOSThread()
+			defer loops.Done()
+			v.loop()
+		}()
+	}
+	stopped := make(chan struct{})
+	go func() {
+		loops.Wait()
+		close(stopped)
+	}()
+	go m.cancelOnStop(ctx, stopped)
+	m.cpus[0].loop()
+	loops.Done()
+	<-stopped
+
+	result.Reason, result.Reset, err = m.stop.outcome()
+	m.portMu.Lock()
 	m.uart.flush()
-	m.logf("%s  stopped: %s", since(), m.result.Reason)
+	m.portMu.Unlock()
+	m.logf("%s  stopped: %s", since(), result.Reason)
 	if !m.drain(ctx) {
 		// A device is still reading guest memory, most likely blocked
 		// writing to the host. The process is about to exit; leaving the
@@ -196,11 +254,37 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 	} else {
 		m.logf("%s  devices drained", since())
 	}
-	m.result.Stats = m.stats()
-	return m.result, err
+	result.Stats = m.stats()
+	return result, err
 }
 
-// drain waits for devices working outside the vCPU thread to finish, then
+// cancelOnStop waits until the guest is to stop, because a vCPU stopped it
+// or ctx was canceled, and then makes every vCPU's Run return until all
+// their loops have, which stopped reports. It keeps canceling, because a
+// vCPU between two Run calls may miss a cancel and sleep in the next one.
+func (m *machine) cancelOnStop(ctx context.Context, stopped <-chan struct{}) {
+	select {
+	case <-ctx.Done():
+		m.stop.stop("canceled", false, nil)
+	case <-m.stop.Done():
+	case <-stopped:
+		return
+	}
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		for _, v := range m.cpus {
+			m.part.Cancel(v.index)
+		}
+		select {
+		case <-stopped:
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+// drain waits for devices working outside the vCPU threads to finish, then
 // closes every transport so nothing more reaches guest memory. It reports
 // whether the devices finished.
 func (m *machine) drain(ctx context.Context) bool {
@@ -218,7 +302,7 @@ func (m *machine) drain(ctx context.Context) bool {
 
 func (m *machine) configure() error {
 	p := m.part
-	count := uint32(1)
+	count := uint32(m.cfg.CPUs)
 	if err := p.SetProperty(whp.PropProcessorCount, unsafe.Pointer(&count), 4); err != nil {
 		return err
 	}
@@ -247,7 +331,8 @@ func (m *machine) configure() error {
 	return p.Setup()
 }
 
-// setBootRegisters sets the vCPU state the 64-bit boot protocol requires.
+// setBootRegisters sets the boot processor's state as the 64-bit boot
+// protocol requires.
 func (m *machine) setBootRegisters(l boot.Layout) error {
 	data := whp.Segment(0, 0xffffffff, boot.SelData, boot.AttrData)
 	names := []uint32{whp.RegRip, whp.RegRsi, whp.RegRflags, whp.RegCs, whp.RegDs, whp.RegEs, whp.RegSs, whp.RegFs, whp.RegGs,
@@ -261,70 +346,96 @@ func (m *machine) setBootRegisters(l boot.Layout) error {
 		whp.Reg64(boot.EFER),
 		whp.Reg64(boot.CR0),
 	}
-	return m.part.SetRegs(vp0, names, values)
+	return m.part.SetRegs(0, names, values)
 }
 
-func (m *machine) loop(ctx context.Context) error {
-	var exit whp.ExitContext
-	for {
-		if ctx.Err() != nil {
-			m.result.Reason = "canceled"
-			return nil
+// prepareCPUs describes the vCPUs' topology in CPUID, holds every
+// application processor until the boot processor starts it with INIT and
+// SIPI, and returns each vCPU's local APIC id for the MADT. WHP takes CPUID
+// results for a VP only once it exists, so this runs after CreateVP.
+func (m *machine) prepareCPUs() ([]uint32, error) {
+	var topology []whp.CpuidResult2
+	for _, r := range cpuidTopology(len(m.cpus)) {
+		topology = append(topology, whp.CpuidResult2(r))
+	}
+	if err := m.part.SetCpuidResults(topology); err != nil {
+		return nil, fmt.Errorf("describing the processor topology: %w", err)
+	}
+	var ids []uint32
+	for _, v := range m.cpus {
+		if v.index != 0 {
+			err := m.part.SetRegs(v.index, []uint32{whp.RegInternalActivityState},
+				[]whp.RegValue{whp.Reg64(whp.ActivityStartupSuspend)})
+			if err != nil {
+				return nil, fmt.Errorf("holding CPU %d until the guest starts it: %w", v.index, err)
+			}
 		}
-		if err := m.part.Run(vp0, &exit); err != nil {
-			return err
+		values := make([]whp.RegValue, 1)
+		if err := m.part.GetRegs(v.index, []uint32{whp.RegApicId}, values); err != nil {
+			return nil, fmt.Errorf("reading CPU %d's APIC id: %w", v.index, err)
+		}
+		if values[0][0] != uint64(v.index) {
+			// cpuidTopology numbers the cores by VP index.
+			return nil, fmt.Errorf("CPU %d has APIC id %d; runwhp expects APIC ids to follow processor numbers", v.index, values[0][0])
+		}
+		ids = append(ids, uint32(values[0][0]))
+	}
+	return ids, nil
+}
+
+// loop runs the vCPU until the guest is to stop.
+func (v *vcpu) loop() {
+	m := v.m
+	var exit whp.ExitContext
+	for !m.stop.isStopped() {
+		if err := m.part.Run(v.index, &exit); err != nil {
+			m.stop.stop("", false, fmt.Errorf("%w%s", err, v.on()))
+			return
 		}
 		reason := exit.Reason()
-		m.exits[reason]++
+		v.exits[reason]++
 		switch reason {
 		case whp.ExitIoPort:
-			stop, err := m.handleIO(&exit)
-			if err != nil {
-				return err
-			}
-			if stop {
-				return nil
+			if err := v.handleIO(&exit); err != nil {
+				m.stop.stop("", false, err)
 			}
 		case whp.ExitHalt:
 			if exit.Rflags()&0x200 == 0 {
-				m.result.Reason = "guest halted with interrupts disabled"
-				return nil
+				m.logf("CPU %d halted with interrupts disabled at rip %#x", v.index, exit.Rip())
+				m.stop.park(int(v.index))
 			}
 		case whp.ExitCanceled:
-			if ctx.Err() != nil {
-				m.result.Reason = "canceled"
-				return nil
-			}
 		case whp.ExitUnrecoverableException:
-			m.result.Reason = "triple fault"
-			m.dump()
-			return nil
+			v.dump()
+			m.stop.stop("triple fault"+v.on(), false, nil)
 		case whp.ExitMemoryAccess:
-			if err := m.emu.TryMmio(&exit); err != nil {
-				m.dump()
-				return err
+			if err := v.emu.TryMmio(&exit); err != nil {
+				v.dump()
+				m.stop.stop("", false, fmt.Errorf("%w%s", err, v.on()))
 			}
 		case whp.ExitApicEoi:
 			// Only level-triggered interrupts report EOI; none are used.
 		default:
-			m.dump()
-			return fmt.Errorf("unhandled exit reason %#x at rip %#x", reason, exit.Rip())
+			v.dump()
+			m.stop.stop("", false, fmt.Errorf("unhandled exit reason %#x at rip %#x%s", reason, exit.Rip(), v.on()))
 		}
 	}
 }
 
-func (m *machine) handleIO(exit *whp.ExitContext) (stop bool, err error) {
+func (v *vcpu) handleIO(exit *whp.ExitContext) error {
+	m := v.m
 	info := exit.IoInfo()
 	port := exit.IoPort()
 	size := (info >> 1) & 7
 	if info&0x10 != 0 {
-		m.dump()
-		return false, fmt.Errorf("string I/O on port %#x is not implemented (rip %#x)", port, exit.Rip())
+		v.dump()
+		return fmt.Errorf("string I/O on port %#x is not implemented (rip %#x%s)", port, exit.Rip(), v.on())
 	}
-	m.ioPorts[port]++
+	v.ioPorts[port]++
 	rax := exit.IoRax()
+	m.portMu.Lock()
 	if info&1 != 0 { // OUT
-		stop = m.portOut(port, uint32(rax))
+		m.portOut(port, uint32(rax))
 	} else { // IN
 		val := uint64(m.portIn(port))
 		switch size {
@@ -336,10 +447,11 @@ func (m *machine) handleIO(exit *whp.ExitContext) (stop bool, err error) {
 			rax = val & 0xffffffff
 		}
 	}
-	err = m.part.SetRegs(vp0, []uint32{whp.RegRip, whp.RegRax}, []whp.RegValue{whp.Reg64(exit.Rip() + exit.InstrLen()), whp.Reg64(rax)})
-	return stop, err
+	m.portMu.Unlock()
+	return m.part.SetRegs(v.index, []uint32{whp.RegRip, whp.RegRax}, []whp.RegValue{whp.Reg64(exit.Rip() + exit.InstrLen()), whp.Reg64(rax)})
 }
 
+// portIn and portOut serve port I/O with portMu held.
 func (m *machine) portIn(port uint16) uint32 {
 	switch {
 	case port >= uartBase && port < uartBase+8:
@@ -350,7 +462,7 @@ func (m *machine) portIn(port uint16) uint32 {
 	return 0xffffffff // nothing there: PIC, PIT, PCI and i8042 all read as absent
 }
 
-func (m *machine) portOut(port uint16, val uint32) (stop bool) {
+func (m *machine) portOut(port uint16, val uint32) {
 	switch {
 	case port >= uartBase && port < uartBase+8:
 		m.uart.write(port-uartBase, byte(val))
@@ -358,11 +470,8 @@ func (m *machine) portOut(port uint16, val uint32) (stop bool) {
 		m.rtcIndex = byte(val) & 0x7f
 	case port == boot.ResetPort && byte(val) == boot.ResetValue:
 		// The FADT reset register, which is also the i8042 reset pulse.
-		m.result.Reset = true
-		m.result.Reason = "guest requested reset"
-		return true
+		m.stop.stop("guest requested reset", true, nil)
 	}
-	return false
 }
 
 // rtcRead answers CMOS clock reads. Linux 6.6 reads the RTC even when the
@@ -406,8 +515,10 @@ func (m *machine) Slice(addr, n uint64) ([]byte, bool) {
 }
 
 // mmio serves one memory-mapped access decoded by the instruction emulator.
-func (m *machine) mmio(gpa uint64, data []byte, write bool) {
-	m.mmioCount++
+// The I/O APIC and each transport take their own locks.
+func (v *vcpu) mmio(gpa uint64, data []byte, write bool) {
+	m := v.m
+	v.mmioCount++
 	var val uint64
 	if write {
 		for i, b := range data {
@@ -430,9 +541,9 @@ func (m *machine) mmio(gpa uint64, data []byte, write bool) {
 			val = t.Read(off, len(data))
 		}
 	default:
-		if page := gpa &^ 0xfff; !m.unknownPages[page] {
-			m.unknownPages[page] = true
-			m.logf("access to unbacked MMIO page %#x ignored", page)
+		if page := gpa &^ 0xfff; !v.unknownPages[page] {
+			v.unknownPages[page] = true
+			m.logf("access to unbacked MMIO page %#x ignored%s", page, v.on())
 		}
 		val = ^uint64(0)
 	}
@@ -443,22 +554,36 @@ func (m *machine) mmio(gpa uint64, data []byte, write bool) {
 	}
 }
 
-func (m *machine) dump() {
+func (v *vcpu) dump() {
 	names := []uint32{whp.RegRip, whp.RegRsp, whp.RegRflags, whp.RegCr0, whp.RegCr2, whp.RegCr3, whp.RegCr4, whp.RegEfer}
 	values := make([]whp.RegValue, len(names))
-	if err := m.part.GetRegs(vp0, names, values); err != nil {
-		m.logf("register dump failed: %v", err)
+	if err := v.m.part.GetRegs(v.index, names, values); err != nil {
+		v.m.logf("register dump failed%s: %v", v.on(), err)
 		return
 	}
-	m.logf("rip=%#x rsp=%#x rflags=%#x cr0=%#x cr2=%#x cr3=%#x cr4=%#x efer=%#x",
-		values[0][0], values[1][0], values[2][0], values[3][0], values[4][0], values[5][0], values[6][0], values[7][0])
+	v.m.logf("rip=%#x rsp=%#x rflags=%#x cr0=%#x cr2=%#x cr3=%#x cr4=%#x efer=%#x%s",
+		values[0][0], values[1][0], values[2][0], values[3][0], values[4][0], values[5][0], values[6][0], values[7][0], v.on())
 }
 
 func (m *machine) stats() []string {
 	names := map[uint32]string{whp.ExitIoPort: "io", whp.ExitHalt: "halt", whp.ExitCanceled: "canceled",
 		whp.ExitMemoryAccess: "mmio", whp.ExitUnrecoverableException: "triple-fault", whp.ExitApicEoi: "eoi"}
+	exits, ioPorts, mmioCount := map[uint32]int{}, map[uint16]int{}, 0
+	var perCPU []string
+	for _, v := range m.cpus {
+		total := 0
+		for reason, n := range v.exits {
+			exits[reason] += n
+			total += n
+		}
+		for port, n := range v.ioPorts {
+			ioPorts[port] += n
+		}
+		mmioCount += v.mmioCount
+		perCPU = append(perCPU, fmt.Sprintf("%d=%d", v.index, total))
+	}
 	var parts []string
-	for reason, n := range m.exits {
+	for reason, n := range exits {
 		name := names[reason]
 		if name == "" {
 			name = fmt.Sprintf("%#x", reason)
@@ -467,13 +592,16 @@ func (m *machine) stats() []string {
 	}
 	sort.Strings(parts)
 	out := []string{"exits: " + strings.Join(parts, " ")}
+	if len(m.cpus) > 1 {
+		out = append(out, "exits per CPU: "+strings.Join(perCPU, " "))
+	}
 
 	type portCount struct {
 		port uint16
 		n    int
 	}
 	var ports []portCount
-	for p, n := range m.ioPorts {
+	for p, n := range ioPorts {
 		ports = append(ports, portCount{p, n})
 	}
 	sort.Slice(ports, func(i, j int) bool { return ports[i].n > ports[j].n })
@@ -489,7 +617,7 @@ func (m *machine) stats() []string {
 		out = append(out, fmt.Sprintf("console: %d lines, %d bytes", m.uart.lines, m.uart.bytes))
 	}
 	if m.ioapic != nil {
-		out = append(out, fmt.Sprintf("mmio accesses: %d, interrupts delivered through the I/O APIC: %d", m.mmioCount, m.ioapic.deliveredCount()))
+		out = append(out, fmt.Sprintf("mmio accesses: %d, interrupts delivered through the I/O APIC: %d", mmioCount, m.ioapic.deliveredCount()))
 	}
 	for i, t := range m.virtio {
 		switch d := t.Device().(type) {

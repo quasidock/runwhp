@@ -5,6 +5,7 @@ package whp
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"unsafe"
 )
@@ -35,21 +36,22 @@ type Emulator struct {
 // Go callbacks carry no closure, and syscall.NewCallback slots are never
 // freed, so one set of callbacks is shared by every emulator. The emulator is
 // found through the context value passed to WHvEmulatorTryMmioEmulation.
+// Every vCPU looks its emulator up several times per access, so the lookup
+// takes no lock.
 var (
 	emuOnce      sync.Once
 	emuCallbacks struct {
 		size, reserved                              uint32
 		ioPort, memory, getRegs, setRegs, translate uintptr
 	}
-	emuMu     sync.Mutex
-	emuNextID uintptr
-	emuByID   = map[uintptr]*Emulator{}
+	emuNextID atomic.Uintptr
+	emuByID   sync.Map // uintptr -> *Emulator
 )
 
 func emulatorFor(ctx uintptr) *Emulator {
-	emuMu.Lock()
-	defer emuMu.Unlock()
-	return emuByID[ctx]
+	e, _ := emuByID.Load(ctx)
+	em, _ := e.(*Emulator)
+	return em
 }
 
 func initCallbacks() {
@@ -110,18 +112,13 @@ func NewEmulator(p *Partition, vp uint32, mem MemoryHandler) (*Emulator, error) 
 	if err := check("WHvEmulatorCreateEmulator", r); err != nil {
 		return nil, err
 	}
-	emuMu.Lock()
-	emuNextID++
-	e.id = emuNextID
-	emuByID[e.id] = e
-	emuMu.Unlock()
+	e.id = emuNextID.Add(1)
+	emuByID.Store(e.id, e)
 	return e, nil
 }
 
 func (e *Emulator) Close() {
-	emuMu.Lock()
-	delete(emuByID, e.id)
-	emuMu.Unlock()
+	emuByID.Delete(e.id)
 	procEmuDestroy.Call(e.h)
 }
 

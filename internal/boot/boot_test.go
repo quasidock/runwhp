@@ -61,7 +61,7 @@ func TestLoad(t *testing.T) {
 	}
 	mem := make([]byte, 64<<20)
 	initrd := bytes.Repeat([]byte{0xab}, 10000)
-	l, err := Load(mem, k, initrd, "console=ttyS0 quiet", testDevices(3))
+	l, err := Load(mem, k, initrd, "console=ttyS0 quiet", testDevices(3), []uint32{0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,8 +89,11 @@ func TestLoad(t *testing.T) {
 	}
 
 	small := make([]byte, 16<<20)
-	if _, err := Load(small, k, nil, "", nil); err == nil {
+	if _, err := Load(small, k, nil, "", nil, []uint32{0}); err == nil {
 		t.Error("loaded a kernel into too little memory")
+	}
+	if _, err := Load(mem, k, nil, "", nil, nil); err == nil {
+		t.Error("loaded a guest without processors")
 	}
 }
 
@@ -103,11 +106,12 @@ func testDevices(virtio int) []Device {
 	return devs
 }
 
-// TestACPIChecksums walks RSDP -> XSDT -> FADT -> DSDT and the MADT and
-// checks every table's checksum and length.
-func TestACPIChecksums(t *testing.T) {
+// acpiTables writes the ACPI tables, walks RSDP -> XSDT -> FADT -> DSDT and
+// the MADT, checks every table's checksum and length, and returns the MADT.
+func acpiTables(t *testing.T, devices []Device, apicIDs []uint32) (madt []byte) {
+	t.Helper()
 	mem := make([]byte, acpiEnd)
-	rsdp, err := writeACPI(mem[acpiAddr:], acpiAddr, testDevices(4))
+	rsdp, err := writeACPI(mem[acpiAddr:], acpiAddr, devices, apicIDs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,8 +135,49 @@ func TestACPIChecksums(t *testing.T) {
 	}
 	xsdt := table(le.Uint64(mem[rsdp+24:]), "XSDT")
 	fadt := table(le.Uint64(xsdt[36:]), "FACP")
-	table(le.Uint64(xsdt[44:]), "APIC")
 	table(le.Uint64(fadt[140:]), "DSDT")
+	return table(le.Uint64(xsdt[44:]), "APIC")
+}
+
+func TestACPIChecksums(t *testing.T) {
+	acpiTables(t, testDevices(4), []uint32{0})
+	acpiTables(t, testDevices(57), sequence(64))
+}
+
+func sequence(n int) []uint32 {
+	ids := make([]uint32, n)
+	for i := range ids {
+		ids[i] = uint32(i)
+	}
+	return ids
+}
+
+// TestMADT checks the MADT's entries: one enabled local APIC per processor,
+// with UIDs in order and the APIC ids given, then the I/O APIC.
+func TestMADT(t *testing.T) {
+	for _, ids := range [][]uint32{{0}, sequence(4), {0, 2, 4, 6}} {
+		madt := acpiTables(t, testDevices(2), ids)
+		if got := le.Uint32(madt[36:]); got != LAPICBase {
+			t.Errorf("local APIC address %#x", got)
+		}
+		entries := madt[44:]
+		for i, id := range ids {
+			e := entries[8*i:]
+			if e[0] != 0 || e[1] != 8 || e[2] != byte(i) || e[3] != byte(id) || le.Uint32(e[4:]) != 1 {
+				t.Errorf("%d processors: entry %d is % x", len(ids), i, e[:8])
+			}
+		}
+		io := entries[8*len(ids):]
+		if len(io) != 12 || io[0] != 1 || io[1] != 12 || le.Uint32(io[4:]) != IOAPICBase || le.Uint32(io[8:]) != 0 {
+			t.Errorf("%d processors: I/O APIC entry is % x", len(ids), io)
+		}
+	}
+	mem := make([]byte, acpiEnd)
+	for _, ids := range [][]uint32{nil, sequence(256), {0, 255}} {
+		if _, err := writeACPI(mem[acpiAddr:], acpiAddr, testDevices(1), ids); err == nil {
+			t.Errorf("accepted APIC ids %v", ids)
+		}
+	}
 }
 
 // spikeDSDT is the encoder from spike/boot_windows.go, kept verbatim as a

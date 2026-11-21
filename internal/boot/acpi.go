@@ -21,8 +21,12 @@ type Device struct {
 // writeACPI emits RSDP -> XSDT -> {FADT -> DSDT, MADT} into dst, which sits
 // at guest address base, and returns the RSDP address. The FADT declares
 // hardware-reduced ACPI, so Linux assumes no PIC, PIT, RTC or i8042. The MADT
-// lists one local APIC and one I/O APIC; the DSDT declares the devices.
-func writeACPI(dst []byte, base uint64, devices []Device) (uint64, error) {
+// lists a local APIC for each of apicIDs, the boot processor first, and one
+// I/O APIC; the DSDT declares the devices.
+func writeACPI(dst []byte, base uint64, devices []Device, apicIDs []uint32) (uint64, error) {
+	if len(apicIDs) == 0 || len(apicIDs) > 255 {
+		return 0, fmt.Errorf("%d processors requested; between 1 and 255 fit", len(apicIDs))
+	}
 	var buf bytes.Buffer
 	place := func(tbl []byte) uint64 {
 		for buf.Len()%16 != 0 {
@@ -50,15 +54,25 @@ func writeACPI(dst []byte, base uint64, devices []Device) (uint64, error) {
 	le.PutUint64(f(140), dsdt)        // X_DSDT
 	fadtAt := place(sdt("FACP", 6, fadt))
 
-	madt := make([]byte, 8+8+12)
+	// MADT body: local APIC address and flags, then one processor local APIC
+	// entry per CPU and the I/O APIC entry. None of the processors is marked
+	// online-capable, so Linux allows exactly these and no hotplug slots.
+	madt := make([]byte, 8+8*len(apicIDs)+12)
 	le.PutUint32(madt[0:], LAPICBase)
-	madt[8], madt[9] = 0, 8 // processor local APIC entry
-	madt[10], madt[11] = 0, 0
-	le.PutUint32(madt[12:], 1) // enabled
-	madt[16], madt[17] = 1, 12 // I/O APIC entry
-	madt[18] = 1               // I/O APIC id
-	le.PutUint32(madt[20:], IOAPICBase)
-	le.PutUint32(madt[24:], 0) // first global system interrupt
+	for i, id := range apicIDs {
+		if id > 254 { // 255 is the broadcast id; larger ones need x2APIC entries
+			return 0, fmt.Errorf("local APIC id %d does not fit in an xAPIC MADT entry", id)
+		}
+		e := madt[8+8*i:]
+		e[0], e[1] = 0, 8              // processor local APIC entry
+		e[2], e[3] = byte(i), byte(id) // ACPI processor UID, APIC id
+		le.PutUint32(e[4:], 1)         // enabled
+	}
+	io := madt[8+8*len(apicIDs):]
+	io[0], io[1] = 1, 12 // I/O APIC entry
+	io[2] = 1            // I/O APIC id
+	le.PutUint32(io[4:], IOAPICBase)
+	le.PutUint32(io[8:], 0) // first global system interrupt
 	madtAt := place(sdt("APIC", 5, madt))
 
 	xsdtBody := make([]byte, 16)
