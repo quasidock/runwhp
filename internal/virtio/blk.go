@@ -55,8 +55,10 @@ type Zeroer interface {
 	Zero(off, n int64) error
 }
 
-// Blk is a virtio block device. It serves requests on goroutines of its own,
-// so the vCPU that asked never waits for the host's disk, and requests
+// Blk is a virtio block device. The vCPU that kicks it serves one request
+// itself, without holding the transport's lock, and goroutines of the
+// device's own serve any others it made available at once, so requests from
+// several vCPUs, or several at once from one, are served in parallel and
 // complete in whatever order they finish.
 type Blk struct {
 	File     BlockFile
@@ -74,6 +76,8 @@ type Blk struct {
 	Workers int
 
 	Requests, BytesRead, BytesWritten, Flushes, Discards atomic.Uint64
+	// Inline counts requests served by the vCPU that asked.
+	Inline atomic.Uint64
 	// MaxInflight is the most requests the device had at once.
 	MaxInflight atomic.Int64
 
@@ -162,15 +166,48 @@ func (d *Blk) init() {
 	})
 }
 
-// Notify checks every request the driver made available, answers the ones
-// that need no I/O, and hands the rest to the workers.
+// Notify hands every request the driver made available to the workers. The
+// transport calls NotifyDeferred instead; Notify is there for the Device
+// interface.
 func (d *Blk) Notify(t *Transport, qi int) {
+	for _, r := range d.take(t, qi) {
+		d.dispatch(r)
+	}
+}
+
+// NotifyDeferred takes every request the driver made available. The vCPU
+// that kicked serves the first itself, once the transport's lock is
+// released, and the workers serve the rest. Handing every request to a
+// worker cost more than most requests take: the vCPU halts while it waits,
+// and has to be woken by the completion, which made a single reader of
+// cached files 40% slower. Without the lock, other vCPUs submit meanwhile,
+// and serve their own requests in parallel.
+func (d *Blk) NotifyDeferred(t *Transport, qi int) func() {
+	pending := d.take(t, qi)
+	if len(pending) == 0 {
+		return nil
+	}
+	first := pending[0]
+	d.track()
+	for _, r := range pending[1:] {
+		d.dispatch(r)
+	}
+	return func() {
+		d.Inline.Add(1)
+		d.run(first)
+	}
+}
+
+// take pops every chain the driver made available, answers those that need
+// no I/O, and returns the rest. The transport's lock is held.
+func (d *Blk) take(t *Transport, qi int) []blkReq {
 	d.init()
 	q := t.Queue(qi)
 	if q == nil {
-		return
+		return nil
 	}
 	done := false
+	var pending []blkReq
 	for {
 		c, ok, err := q.Pop(t.Memory())
 		if !ok {
@@ -193,15 +230,33 @@ func (d *Blk) Notify(t *Transport, qi int) {
 			continue
 		}
 		r.t, r.gen = t, d.gen
-		d.inflight.Add(1)
-		n := d.active.Add(1)
-		for m := d.MaxInflight.Load(); n > m && !d.MaxInflight.CompareAndSwap(m, n); m = d.MaxInflight.Load() {
-		}
-		d.work <- r
+		pending = append(pending, r)
 	}
 	if done {
 		t.Interrupt(qi)
 	}
+	return pending
+}
+
+// track counts a request as in flight until complete returns it.
+func (d *Blk) track() {
+	d.inflight.Add(1)
+	n := d.active.Add(1)
+	for m := d.MaxInflight.Load(); n > m && !d.MaxInflight.CompareAndSwap(m, n); m = d.MaxInflight.Load() {
+	}
+}
+
+func (d *Blk) dispatch(r blkReq) {
+	d.track()
+	d.work <- r
+}
+
+// run serves a tracked request and returns it to the driver.
+func (d *Blk) run(r blkReq) {
+	status, written := d.serve(&r)
+	r.status[0] = status
+	d.Requests.Add(1)
+	d.complete(r, written+1)
 }
 
 // parse reads a chain's header and checks the request. ready means it has
@@ -285,10 +340,7 @@ func (d *Blk) worker() {
 	for {
 		select {
 		case r := <-d.work:
-			status, written := d.serve(&r)
-			r.status[0] = status
-			d.Requests.Add(1)
-			d.complete(r, written+1)
+			d.run(r)
 		case <-d.stop:
 			return
 		}

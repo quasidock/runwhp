@@ -62,6 +62,15 @@ type Transport struct {
 	queues        []Queue
 }
 
+// Deferrer is implemented by devices that do some of a notification's work
+// on the vCPU that sent it, but without the transport's lock, so other
+// vCPUs can use the device meanwhile. NotifyDeferred is called instead of
+// Notify, with the lock held, and the work it returns, if any, runs once
+// the lock is released. That work uses t.Do like any other goroutine.
+type Deferrer interface {
+	NotifyDeferred(t *Transport, q int) func()
+}
+
 // Attacher is implemented by devices that work on their queues from outside
 // Notify, at the host's initiative, and so need their transport before the
 // driver first kicks them.
@@ -216,6 +225,14 @@ func (t *Transport) Read(off uint64, size int) uint64 {
 
 // Write serves a guest write of size bytes at offset off in the window.
 func (t *Transport) Write(off uint64, size int, val uint64) {
+	if after := t.write(off, val); after != nil {
+		after()
+	}
+}
+
+// write serves a register write with the lock held, and returns what a
+// Deferrer left to do once it is released.
+func (t *Transport) write(off uint64, val uint64) (after func()) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	v32 := uint32(val)
@@ -246,6 +263,9 @@ func (t *Transport) Write(off uint64, size int, val uint64) {
 		}
 	case regQueueNotify:
 		if int(v32) < len(t.queues) && t.queues[v32].ready() {
+			if d, ok := t.dev.(Deferrer); ok {
+				return d.NotifyDeferred(t, int(v32))
+			}
 			t.dev.Notify(t, int(v32))
 		}
 	case regIntAck:
@@ -272,6 +292,7 @@ func (t *Transport) Write(off uint64, size int, val uint64) {
 			setHigh(p)
 		}
 	}
+	return nil
 }
 
 func (t *Transport) reset() {

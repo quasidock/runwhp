@@ -238,20 +238,46 @@ func TestResetClearsQueues(t *testing.T) {
 	}
 }
 
+// addFirst queues a read of the last sector, which the kick serves on the
+// kicking thread, so the requests queued after it go to the workers.
+func addFirst(d *driver) uint16 {
+	head, _, _ := addBlk(d, blkIn, 7, buf{d.alloc(512), 512, true})
+	return head
+}
+
+func TestBlkKickServesOne(t *testing.T) {
+	file := newMemFile(8 * 512)
+	dev := &Blk{File: file, Sectors: 8}
+	d := newDriver(t, dev)
+	blkRequest(d, blkIn, 0, buf{d.alloc(512), 512, true})
+	if dev.Inline.Load() != 1 {
+		t.Errorf("a lone request: %d served by the kicking thread, want 1", dev.Inline.Load())
+	}
+	for range 3 {
+		addBlk(d, blkIn, 1, buf{d.alloc(512), 512, true})
+	}
+	d.kick(0)
+	d.collectN(0, 3)
+	if dev.Inline.Load() != 2 {
+		t.Errorf("three requests in one kick: %d served by kicking threads in all, want 2", dev.Inline.Load())
+	}
+}
+
 func TestBlkOutOfOrder(t *testing.T) {
 	file := newMemFile(8 * 512)
 	file.block, file.blockAt = make(chan struct{}), 0
 	d := newDriver(t, &Blk{File: file, Sectors: 8})
-	a, b := d.alloc(512), d.alloc(512)
-	slow, _, _ := addBlk(d, blkIn, 0, buf{a, 512, true})
-	fast, _, _ := addBlk(d, blkIn, 4, buf{b, 512, true})
-	d.kick(0) // returns at once: the vCPU never waits for the slow read
-	if u := d.collectN(0, 1); u[0].head != fast {
-		t.Fatalf("first completion = %+v, want the fast read %d", u, fast)
+	first := addFirst(d)
+	slow, _, _ := addBlk(d, blkIn, 0, buf{d.alloc(512), 512, true})
+	fast, _, _ := addBlk(d, blkIn, 4, buf{d.alloc(512), 512, true})
+	d.kick(0) // returns once the first is served: the slow read is a worker's
+	u := d.collectN(0, 2)
+	if heads := []uint16{u[0].head, u[1].head}; !(heads[0] == first && heads[1] == fast || heads[0] == fast && heads[1] == first) {
+		t.Fatalf("first completions = %+v, want the first and the fast read, %d and %d", u, first, fast)
 	}
 	close(file.block)
 	if u := d.collectN(0, 1); u[0].head != slow {
-		t.Fatalf("second completion = %+v, want the slow read %d", u, slow)
+		t.Fatalf("last completion = %+v, want the slow read %d", u, slow)
 	}
 }
 
@@ -260,8 +286,10 @@ func TestBlkResetWithRequestsInFlight(t *testing.T) {
 	file.block, file.blockAt = make(chan struct{}), 0
 	dev := &Blk{File: file, Sectors: 8}
 	d := newDriver(t, dev)
+	addFirst(d)
 	addBlk(d, blkIn, 0, buf{d.alloc(512), 512, true})
 	d.kick(0)
+	d.collectN(0, 1)
 	d.tr.Write(regStatus, 4, 0) // reset while the read waits
 	d.setupQueue(0, 16)
 	close(file.block)
@@ -280,6 +308,7 @@ func TestBlkDrain(t *testing.T) {
 	file.block, file.blockAt = make(chan struct{}), 0
 	dev := &Blk{File: file, Sectors: 8}
 	d := newDriver(t, dev)
+	addFirst(d)
 	addBlk(d, blkIn, 0, buf{d.alloc(512), 512, true})
 	d.kick(0)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
@@ -293,7 +322,7 @@ func TestBlkDrain(t *testing.T) {
 	if !dev.Drain(ctx) {
 		t.Error("Drain gave up after the read finished")
 	}
-	if got := dev.MaxInflight.Load(); got != 1 {
+	if got := dev.MaxInflight.Load(); got != 2 {
 		t.Errorf("MaxInflight = %d", got)
 	}
 }
@@ -306,12 +335,13 @@ func TestBlkHeaderCopied(t *testing.T) {
 	file.block, file.blockAt = make(chan struct{}), 2*512
 	file.writeSeen = make(chan int64, 4)
 	d := newDriver(t, &Blk{File: file, Sectors: 8})
+	addFirst(d)
 	data := d.alloc(512)
 	_, hdr, st := addBlk(d, blkOut, 2, buf{data, 512, false})
 	d.kick(0)
 	le.PutUint64(d.mem[hdr+8:], 1<<40) // far outside the disk
 	close(file.block)
-	d.collectN(0, 1)
+	d.collectN(0, 2)
 	if off := <-file.writeSeen; off != 2*512 || d.mem[st] != blkOK {
 		t.Errorf("write went to offset %d with status %d, want 1024, OK", off, d.mem[st])
 	}
