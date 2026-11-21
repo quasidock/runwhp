@@ -33,6 +33,9 @@ func mountShares(mounts []guestspec.Mount, user passwd.User) error {
 	if err := syscall.Mount(guestspec.FSTag, sharesDir, "virtiofs", 0, ""); err != nil {
 		return fmt.Errorf("mounting the host's files: %w", err)
 	}
+	if fd, err := syscall.Open(sharesDir, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0); err == nil {
+		storage.shares = fd
+	}
 	owner := fmt.Sprintf("%d:%d", user.UID, user.GID)
 	if err := syscall.Setxattr(sharesDir, guestspec.OwnerXattr, []byte(owner), 0); err != nil {
 		return fmt.Errorf("setting the owner of the host's files: %w", err)

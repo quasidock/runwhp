@@ -123,7 +123,7 @@ Get-Content data.csv | .\out\runwhp.exe run -i alpine:3.20 wc -l
 | `-e`, `--env` | | `KEY=VALUE`, or `KEY` to copy it from the host; repeatable |
 | `-w`, `--workdir` | image's, else `/` | Working directory; created if missing |
 | `-u`, `--user` | image's, else root | `name`, `uid`, `name:group` or `uid:gid`, resolved against the image's `/etc/passwd` and `/etc/group` |
-| `-m`, `--memory` | `512m` | Guest RAM, `128m` to `3328m`. The writable layer is a tmpfs inside it |
+| `-m`, `--memory` | `512m` | Guest RAM, `128m` to `3328m` |
 | `--cpus` | the host's, up to 4 | vCPUs, a whole number up to the host's logical processors, at most 64. Unlike Docker's `--cpus`, it counts processors rather than setting a quota, so `1.5` is refused. Builds size their jobs by `nproc`, so raise `-m` with it |
 | `--hostname` | random | Hostname, also written to `/etc/hostname` and `/etc/hosts` |
 | `--network`, `--net` | `user` | `user` gives the container a network through runwhp; `none` leaves it only loopback |
@@ -131,6 +131,7 @@ Get-Content data.csv | .\out\runwhp.exe run -i alpine:3.20 wc -l
 | `--add-host` | | `NAME:IP` or `NAME=IP`, added to `/etc/hosts`; repeatable. `NAME:host-gateway` also lets the container reach the host's `127.0.0.1` at that name |
 | `-v`, `--volume` | | `HOSTPATH:PATH[:ro]`: bind a host directory or file at `PATH`; repeatable. A missing `HOSTPATH` is made as a directory. See [Host files](#host-files) |
 | `--mount` | | `type=bind,source=HOSTPATH,target=PATH[,readonly]`: the same, in Docker's long form; `HOSTPATH` must exist |
+| `--storage-opt` | `size=64g` | `size=SIZE`: how large the container's writable layer may grow, `1g` to `16t`. See [Storage](#storage) |
 | `--pull` | `missing` | When to pull the image: `missing`, `always` or `never`. `never` also keeps runwhp from fetching its kernel |
 | `--kernel` | runwhp's own | bzImage to boot instead; see [Kernel](#kernel) |
 | `--debug` | off | Kernel console, init's steps and VMM statistics on stderr |
@@ -254,6 +255,27 @@ Removing a file that is open works as on Linux: the name goes at once and
 the open file stays readable. A rename replaces the target, even a read-only
 one. File locks are kept in the guest and are invisible to host programs.
 
+### Storage
+
+Whatever the container writes outside its mounts goes to its writable layer,
+which lives on a scratch disk: a sparse file in the store's `scratch`
+directory holding an ext4 file system that runwhp makes for the run and
+deletes when the run ends. Windows deletes it even when runwhp is killed,
+and the next run removes one the machine stopped under.
+
+- The writable layer is limited by the scratch disk's size, 64 GiB unless
+  `--storage-opt size=` says otherwise, and by the host's free space, not by
+  `--memory`. A full host disk shows in the container as I/O errors.
+- The file takes only what is written. Space the container frees goes back
+  to the host during the run: the guest discards the blocks, and runwhp
+  punches them out of the file. NTFS does this in 64 KiB units, ReFS in
+  clusters.
+- `fsync` in the writable layer returns without waiting for the host's
+  disk, since nothing there outlives the run. Formatting the disk takes
+  about 3 ms, while the kernel loads, and deleting it about 4 ms at exit.
+- On a store whose volume has no sparse files, such as FAT or exFAT, runwhp
+  says so and keeps the writable layer in guest memory.
+
 ### Kernel
 
 runwhp boots unmodified upstream Linux, currently 6.18.64 (a longterm
@@ -331,7 +353,9 @@ bzImage.
    are cached by diffID and verified against it; empty layers are skipped.
 2. runwhp loads its kernel from the store, fetching it first if this is the
    first run, and writes an initramfs holding `runwhp-init` and a JSON spec
-   of the process.
+   of the process. Meanwhile it makes the run's scratch disk: a sparse file
+   in the store, formatted as an empty ext4 file system by runwhp itself,
+   which writes a few hundred KiB of it.
 3. The guest gets the vCPUs `--cpus` asks for, each run by a thread of its
    own. runwhp starts only the first. The others wait until the guest's
    kernel starts them with INIT and SIPI, which the hypervisor's local APIC
@@ -342,9 +366,11 @@ bzImage.
    chose for it.
 4. The guest gets one multiport virtio console, with ports named `stdout`,
    `stderr`, `stdin` and `control`; a virtio network device, unless
-   `--network none`; a virtio-fs device, with `-v` or `--mount`; and one
-   read-only virtio-blk disk per layer. Each disk's
-   serial number names its layer, so init does not depend on probe order.
+   `--network none`; a virtio-fs device, with `-v` or `--mount`; one
+   read-only virtio-blk disk per layer; and the scratch disk. Each disk's
+   serial number names it, so init does not depend on probe order. Disk
+   requests are served on goroutines, up to 16 at a time per disk, through
+   overlapped I/O, and complete in whatever order they finish.
    Each port's output is written to the host by a goroutine of its own, and
    input is delivered to the guest from another, so no vCPU ever waits on
    the host's console or pipes.
@@ -362,7 +388,8 @@ bzImage.
    entries `0`, `1`, and so on. Requests are served on goroutines, up to 16
    at a time, through Windows' native API, and complete in whatever order
    they finish. A read or write carries up to 512 KiB.
-7. `runwhp-init` mounts the layers under an overlay with a tmpfs upper layer,
+7. `runwhp-init` mounts the layers under an overlay whose upper layer is on
+   the scratch disk,
    adds `/proc`, `/sys`, a minimal `/dev`, a hostname and `/etc/hosts`,
    configures `eth0` and `/etc/resolv.conf` when there is a network,
    resolves the container's user, mounts the virtio-fs device, tells it who
@@ -378,6 +405,8 @@ bzImage.
    sizes from the host, and the exit status from init. When the process
    exits, init kills whatever is left, waits for the last output to reach
    the ports, writes the status, and resets the machine, which ends the VMM.
+   It writes back the bind mounts' file system first, but not the scratch
+   disk's, which is about to be thrown away.
 
 ### Code layout
 
@@ -390,6 +419,8 @@ bzImage.
 | [`internal/virtio`](internal/virtio) | virtio-mmio transport, block device, multiport console, network device, file system device. Builds on any OS |
 | [`internal/netstack`](internal/netstack) | The host end of the container's network: gVisor's netstack, TCP and UDP forwarding, DNS, published ports. Builds on any OS |
 | [`internal/fuse`](internal/fuse) | The FUSE protocol as virtio-fs speaks it, served from a file system interface. Builds on any OS |
+| [`internal/disk`](internal/disk) | The files behind virtual disks: overlapped I/O from many goroutines, sparse files, freeing ranges, exclusive and delete-on-close opens |
+| [`internal/ext4`](internal/ext4) | Makes empty ext4 file systems as mke2fs would, and reads back whether one was left clean. Builds on any OS |
 | [`internal/hostfs`](internal/hostfs) | The host end of bind mounts: Windows files served as that file system, with WSL's metadata |
 | [`internal/image`](internal/image), [`internal/layer`](internal/layer) | Registry pulls, image records, layer conversion and cache |
 | [`internal/kernel`](internal/kernel) | The kernel artifact's format, the pinned build, and fetching it into the store |
@@ -424,7 +455,7 @@ container's supervisor, with no daemon.
 | Interrupts | Hypervisor's local APIC plus an emulated 64-pin I/O APIC | Done, edge-triggered only |
 | Processors | One thread per vCPU; the guest starts the others through the hypervisor's local APIC; topology described in CPUID | Done, up to 64 |
 | Device discovery | Hardware-reduced ACPI with a generated DSDT | Done |
-| Root filesystem | One read-only ext4 image per layer on virtio-blk, overlayfs in the guest, writable scratch disk | Done, but the upper layer is a tmpfs, not a scratch disk |
+| Root filesystem | One read-only ext4 image per layer on virtio-blk, overlayfs in the guest, writable scratch disk | Done; the scratch disk is a sparse file, formatted for each run |
 | Layer conversion | `tar2ext4`, cached per layer digest | Done |
 | Container I/O | Multiport virtio console with named ports for stdout, stderr, stdin and control; pipes or a pty in the guest | Done, including `-i`, `-t`, resize and signals |
 | Guest agent | Tiny init as PID 1 that mounts the overlay and execs the process, instead of hcsshim's GCS plus runc | Done (`runwhp-init`) |
@@ -978,8 +1009,8 @@ starts, which covers decompressing the kernel and early memory setup.
 
 - There is no detaching or reattaching, and no way to send signals other
   than SIGINT and SIGTERM.
-- The writable layer is a tmpfs in guest RAM. Writes are limited by `--memory`,
-  and nothing written outside a bind mount survives the run.
+- Nothing written outside a bind mount survives the run: the scratch disk
+  is deleted when it ends.
 - There are no named volumes and no `--tmpfs`.
 - Every `write()` to a bind mount is a request to the host, about 130 µs each
   on the test machine, so a program writing in small pieces is slow there;
@@ -992,9 +1023,9 @@ starts, which covers decompressing the kernel and early memory setup.
   kernel build reaches runwhp only when someone moves the pin in
   `internal/kernel/pin.go`, and the pinned digest is the only check on it:
   builds are not signed.
-- An image can have at most 57 non-empty layers, one more with
-  `--network none`, and one fewer with bind mounts: each device takes an
-  I/O APIC line.
+- An image can have at most 56 non-empty layers, one more with
+  `--network none`, and one fewer with bind mounts: each device, the
+  scratch disk included, takes an I/O APIC line.
 - The network is IPv4 only and carries no ICMP. Only TCP ports can be
   published, each with an explicit host port, and there is no `-P`, `--dns`
   or `--dns-search`.
@@ -1009,9 +1040,8 @@ starts, which covers decompressing the kernel and early memory setup.
   itself, and runwhp has no ACPI power-off for it to use.
 - `--cpus` is a count, not Docker's quota, and there is no `--cpuset-cpus`.
 - Each device has one virtqueue, which every vCPU shares.
-- Disk emulation blocks the vCPU that asked for the read. Each MMIO access
-  also takes several round trips through `WinHvEmulation.dll`; a fast path
-  for common instructions would cut the per-write output cost.
+- Each MMIO access takes several round trips through `WinHvEmulation.dll`;
+  a fast path for common instructions would cut the per-write output cost.
 - Guest memory is committed up front and never returned to Windows.
 - The guest clock starts at whatever the RTC stub reports and is not kept in
   step with the host afterwards.

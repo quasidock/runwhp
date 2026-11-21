@@ -4,9 +4,15 @@
 // The host writes a Spec into the initramfs at SpecPath. The guest gets a
 // multiport virtio console with the ports named below; then, when
 // Spec.Network is set, a virtio network device with Network.MAC; then, when
-// Spec.Mounts is not empty, a virtio-fs device tagged FSTag; then one
+// any Mount binds a share, a virtio-fs device tagged FSTag; then one
 // read-only virtio block device per image layer, bottom layer first, each
-// with the serial LayerSerial(i).
+// with the serial LayerSerial(i); then, when Spec.Scratch is set, the
+// writable scratch disk, with the serial ScratchSerial. Init finds disks by
+// serial, not by the order they appear in.
+//
+// The scratch disk holds an empty ext4 file system, made for this run and
+// thrown away after it, on which init puts the overlay's upper and work
+// directories. Without it, they go on a tmpfs.
 //
 // The virtio-fs device's root holds the host's shares as entries named "0",
 // "1", and so on. Init mounts it, sets OwnerXattr on its root, and binds each
@@ -35,6 +41,9 @@ const (
 // LayerSerial is the virtio-blk serial of layer i (0 is the bottom layer).
 func LayerSerial(i int) string { return fmt.Sprintf("layer%d", i) }
 
+// ScratchSerial is the virtio-blk serial of the scratch disk.
+const ScratchSerial = "scratch"
+
 // FSTag is the mount tag of the virtio-fs device that carries the shares.
 const FSTag = "runwhp"
 
@@ -53,6 +62,8 @@ type Spec struct {
 	// Hosts are extra /etc/hosts lines, "ADDRESS NAME".
 	Hosts  []string `json:"hosts,omitempty"`
 	Layers int      `json:"layers"`
+	// Scratch says the writable layer goes on the scratch disk.
+	Scratch bool `json:"scratch,omitempty"`
 	// Network configures the network interface. nil means the guest has
 	// none beyond loopback.
 	Network *Network `json:"network,omitempty"`

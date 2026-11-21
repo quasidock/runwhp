@@ -122,7 +122,7 @@ func start(begin time.Time) (*outcome, error) {
 	}
 	debugf("console ports open")
 
-	if err := mountRoot(spec.Layers); err != nil {
+	if err := mountRoot(&spec); err != nil {
 		return out, err
 	}
 	debugf("root filesystem mounted from %d layers", spec.Layers)
@@ -146,7 +146,7 @@ func start(begin time.Time) (*outcome, error) {
 }
 
 func shutdown() {
-	syscall.Sync()
+	stopStorage()
 	err := syscall.Reboot(syscall.LINUX_REBOOT_CMD_RESTART)
 	logf("reboot failed: %v", err)
 	for {

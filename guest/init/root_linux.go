@@ -45,25 +45,18 @@ func within(p string) bool {
 	return p == root || strings.HasPrefix(p, strings.TrimSuffix(root, "/")+"/")
 }
 
-// mountRoot mounts each layer read-only and stacks them under an overlay
-// whose writable upper layer is a tmpfs.
-func mountRoot(layers int) error {
+// waitDisks waits until a virtio disk with each of the serials has
+// appeared, and returns their device paths by serial.
+func waitDisks(serials []string) (map[string]string, error) {
 	devices := map[string]string{} // serial -> /dev/vdX
-	want := make([]string, layers)
-	for i := range want {
-		want[i] = guestspec.LayerSerial(i)
-	}
 	complete := func() bool {
 		blocks, _ := filepath.Glob("/sys/block/vd*")
 		for _, b := range blocks {
-			if _, known := devices[readTrimmed(b+"/serial")]; known {
-				continue
-			}
-			if serial := readTrimmed(b + "/serial"); serial != "" {
+			if serial := readTrimmed(b + "/serial"); serial != "" && devices[serial] == "" {
 				devices[serial] = "/dev/" + filepath.Base(b)
 			}
 		}
-		for _, s := range want {
+		for _, s := range serials {
 			if devices[s] == "" {
 				return false
 			}
@@ -71,11 +64,34 @@ func mountRoot(layers int) error {
 		return true
 	}
 	if !poll(5*time.Second, complete) {
-		return fmt.Errorf("layer disks did not appear: want %d, found %v", layers, devices)
+		var missing []string
+		for _, s := range serials {
+			if devices[s] == "" {
+				missing = append(missing, s)
+			}
+		}
+		return nil, fmt.Errorf("disks did not appear: %s missing, found %v", strings.Join(missing, ", "), devices)
+	}
+	return devices, nil
+}
+
+// mountRoot mounts each layer read-only and stacks them under an overlay
+// whose writable upper layer is the scratch disk, or a tmpfs without one.
+func mountRoot(spec *guestspec.Spec) error {
+	serials := make([]string, spec.Layers)
+	for i := range serials {
+		serials[i] = guestspec.LayerSerial(i)
+	}
+	if spec.Scratch {
+		serials = append(serials, guestspec.ScratchSerial)
+	}
+	devices, err := waitDisks(serials)
+	if err != nil {
+		return err
 	}
 
-	lower := make([]string, 0, layers)
-	for i := layers - 1; i >= 0; i-- {
+	lower := make([]string, 0, spec.Layers)
+	for i := spec.Layers - 1; i >= 0; i-- {
 		dir := fmt.Sprintf("/layers/%d", i)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
@@ -96,17 +112,35 @@ func mountRoot(layers int) error {
 			return err
 		}
 	}
-	if err := syscall.Mount("tmpfs", "/rw", "tmpfs", 0, "mode=755"); err != nil {
+	opts := "lowerdir=" + strings.Join(lower, ":") + ",upperdir=/rw/upper,workdir=/rw/work"
+	if spec.Scratch {
+		dev := devices[guestspec.ScratchSerial]
+		if err := syscall.Mount(dev, "/rw", "ext4", 0, scratchMountOpts); err != nil {
+			return fmt.Errorf("mounting the scratch disk (%s): %w", dev, err)
+		}
+		// The scratch disk is thrown away after the run, so syncs on the
+		// container's root need not reach it.
+		opts += overlayScratchOpts
+		debugf("writable layer on the scratch disk, %s", dev)
+	} else if err := syscall.Mount("tmpfs", "/rw", "tmpfs", 0, "mode=755"); err != nil {
 		return fmt.Errorf("mounting tmpfs for the writable layer: %w", err)
 	}
 	os.Mkdir("/rw/upper", 0o755)
 	os.Mkdir("/rw/work", 0o755)
-	opts := "lowerdir=" + strings.Join(lower, ":") + ",upperdir=/rw/upper,workdir=/rw/work"
 	if err := syscall.Mount("overlay", root, "overlay", 0, opts); err != nil {
 		return fmt.Errorf("mounting overlay: %w", err)
 	}
 	return nil
 }
+
+// Mount options for the scratch disk's ext4 and the overlay above it.
+// discard gives the host back the space of what the container deletes
+// during the run. volatile drops the overlay's syncs, which the scratch
+// disk does not need.
+const (
+	scratchMountOpts   = "discard"
+	overlayScratchOpts = ",volatile"
+)
 
 // prepareRoot gives the container the usual kernel filesystems, a minimal
 // /dev, a hostname, /etc/hosts, a loopback interface and, if the spec asks

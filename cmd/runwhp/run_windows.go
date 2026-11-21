@@ -69,6 +69,7 @@ type runOptions struct {
 	addHosts    listFlag
 	volumes     listFlag
 	mounts      listFlag
+	storageOpts listFlag
 
 	// Development flags, left out of the usage text.
 	init    string
@@ -109,6 +110,7 @@ func runFlags(o *runOptions) *flag.FlagSet {
 	fs.Var(&o.volumes, "v", "")
 	fs.Var(&o.volumes, "volume", "")
 	fs.Var(&o.mounts, "mount", "")
+	fs.Var(&o.storageOpts, "storage-opt", "")
 	fs.StringVar(&o.init, "init", "", "")
 	fs.Var(&o.layers, "layer", "")
 	fs.Var(&o.modules, "module", "")
@@ -133,6 +135,7 @@ Flags:
   -v, --volume HOSTPATH:PATH[:ro]  bind a host directory or file into the container (repeatable);
                          HOSTPATH is absolute or starts with a dot, and is created if missing
       --mount type=bind,source=HOSTPATH,target=PATH[,readonly]  the same, Docker's long form
+      --storage-opt size=SIZE  how large the container's writable layer may grow (default 64g)
       --pull POLICY      when to pull the image: missing, always or never (default missing);
                          never also keeps runwhp from fetching its own kernel
       --kernel PATH      Linux bzImage to boot instead of runwhp's own kernel
@@ -196,6 +199,10 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 	if err != nil {
 		return fail, err
 	}
+	scratchSize, err := parseStorageOpts(o.storageOpts)
+	if err != nil {
+		return fail, err
+	}
 	root, err := storeRoot()
 	if err != nil {
 		return fail, err
@@ -209,6 +216,11 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 		return fail, err
 	}
 	start := time.Now()
+
+	// The scratch disk is made while the image and kernel are read.
+	sweepStore(root, logf)
+	scratch := startScratch(root, scratchSize)
+	defer scratch.close()
 
 	// The process and its layers, from an image or (for development)
 	// from ext4 files given with --layer.
@@ -254,16 +266,23 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 			layerFiles = append(layerFiles, p)
 		}
 	}
-	others := 1 // the console
+	// Each device takes an interrupt line: the console, the scratch disk,
+	// and the others named here.
+	others, users := 2, []string{}
 	if network.enabled {
 		others++
+		users = append(users, "the network")
 	}
 	if len(shares) > 0 {
 		others++
+		users = append(users, "bind mounts")
 	}
 	if others+len(layerFiles) > vm.MaxDevices {
-		return fail, fmt.Errorf("the image has %d layers; runwhp supports at most %d here (%d with --network none and no -v)",
-			len(layerFiles), vm.MaxDevices-others, vm.MaxDevices-1)
+		with := ""
+		if len(users) > 0 {
+			with = " with " + strings.Join(users, " and ")
+		}
+		return fail, fmt.Errorf("the image has %d layers; runwhp has room for %d%s", len(layerFiles), vm.MaxDevices-others, with)
 	}
 	logf("%4d ms  image ready: %d layers", time.Since(start).Milliseconds(), len(layerFiles))
 
@@ -296,14 +315,22 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 		return fail, fmt.Errorf("reading the guest init program: %w", err)
 	}
 
+	sr := scratch.get()
+	if sr.err != nil {
+		return fail, sr.err
+	}
+	if sr.file != nil {
+		logf("%4d ms  scratch disk ready: %d GiB, formatted in %d ms", time.Since(start).Milliseconds(), scratchSize>>30, sr.took.Milliseconds())
+	}
+
 	hostname := o.hostname
 	if hostname == "" {
 		hostname = randomHostname()
 	}
 	spec := guestspec.Spec{
 		Args: config.Args, Env: config.Env, Cwd: config.Cwd, User: config.User,
-		Hostname: hostname, Hosts: network.hosts, Layers: len(layerFiles), Debug: o.debug,
-		Stdin: o.interactive, TTY: o.tty, Network: network.spec(), Mounts: mounts,
+		Hostname: hostname, Hosts: network.hosts, Layers: len(layerFiles), Scratch: sr.file != nil,
+		Debug: o.debug, Stdin: o.interactive, TTY: o.tty, Network: network.spec(), Mounts: mounts,
 	}
 	if o.tty {
 		spec.Rows, spec.Cols, _ = terminalSize(os.Stdout)
@@ -323,7 +350,8 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 	files = append(files, modules...)
 
 	// Devices: the console first, then the network device and the shares'
-	// file system if any, then one disk per layer, bottom first.
+	// file system if any, then one disk per layer, bottom first, then the
+	// scratch disk.
 	var stdin io.Reader
 	if o.interactive {
 		stdin = os.Stdin
@@ -383,6 +411,12 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 		}
 		devices = append(devices, &virtio.Blk{File: f, Sectors: uint64(size) / 512, ReadOnly: true,
 			Serial: guestspec.LayerSerial(i)})
+	}
+	if sr.file != nil {
+		// No FLUSH: the disk is thrown away after the run, so the guest
+		// need never wait for the host's disk.
+		devices = append(devices, &virtio.Blk{File: sr.file, Sectors: uint64(scratchSize) / 512, Discard: true,
+			Serial: guestspec.ScratchSerial})
 	}
 
 	cmdline := baseCmdline + " quiet loglevel=3"
@@ -478,23 +512,11 @@ func readModules(paths []string) ([]boot.File, error) {
 // parseMemory reads a size the way docker run -m does (b, k, m or g suffix,
 // bytes without one) and rounds it up to 2 MiB.
 func parseMemory(s string) (uint64, error) {
-	s = strings.ToLower(strings.TrimSpace(s))
-	mult := uint64(1)
-	switch {
-	case strings.HasSuffix(s, "g"):
-		mult, s = 1<<30, s[:len(s)-1]
-	case strings.HasSuffix(s, "m"):
-		mult, s = 1<<20, s[:len(s)-1]
-	case strings.HasSuffix(s, "k"):
-		mult, s = 1<<10, s[:len(s)-1]
-	case strings.HasSuffix(s, "b"):
-		s = s[:len(s)-1]
-	}
-	n, err := strconv.ParseFloat(s, 64)
-	if err != nil || n <= 0 {
+	n, err := parseSize(s)
+	if err != nil {
 		return 0, fmt.Errorf("invalid memory size %q", s)
 	}
-	size := (uint64(n*float64(mult)) + (2<<20 - 1)) &^ (2<<20 - 1)
+	size := (n + (2<<20 - 1)) &^ (2<<20 - 1)
 	if size < 128<<20 || size > vm.MaxMemory {
 		return 0, fmt.Errorf("memory must be between 128m and %dm", vm.MaxMemory>>20)
 	}
