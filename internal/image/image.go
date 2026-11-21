@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
@@ -165,7 +164,7 @@ func (s *Store) Pull(ctx context.Context, ref string) (*Image, error) {
 	}
 	opts := append([]remote.Option{
 		remote.WithContext(ctx),
-		remote.WithAuthFromKeychain(authn.DefaultKeychain),
+		remote.WithAuthFromKeychain(Keychain),
 		remote.WithPlatform(Platform),
 	}, s.RemoteOptions...)
 	s.progressf("pulling %s", r.Name())

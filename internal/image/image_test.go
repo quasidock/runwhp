@@ -4,18 +4,23 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/Microsoft/hcsshim/ext4/tar2ext4"
+	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -228,5 +233,154 @@ func TestBuildProcess(t *testing.T) {
 	}
 	if p, _ := BuildProcess(v1.Config{Cmd: []string{"sh"}}, Overrides{}); p.Cwd != "/" {
 		t.Errorf("default cwd = %q", p.Cwd)
+	}
+}
+
+func TestMain(m *testing.M) {
+	if len(os.Args) == 2 && os.Args[1] == "get" {
+		server, _ := io.ReadAll(os.Stdin)
+		switch strings.TrimSpace(string(server)) {
+		case authn.DefaultAuthKey:
+			io.WriteString(os.Stdout, `{"Username":"hubuser","Secret":"hubpass"}`)
+			os.Exit(0)
+		case "helper.example.io":
+			io.WriteString(os.Stdout, `{"Username":"<token>","Secret":"idtok"}`)
+			os.Exit(0)
+		}
+		io.WriteString(os.Stdout, "credentials not found in native keychain\n")
+		os.Exit(1)
+	}
+	os.Exit(m.Run())
+}
+
+func TestPullWithMissingCredentialHelper(t *testing.T) {
+	reg := registry.New(registry.Logger(log.New(io.Discard, "", 0)))
+	var requireAuth atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth.Load() {
+			u, p, ok := r.BasicAuth()
+			if !ok || u != "alice" || p != "secret" {
+				w.Header().Set("WWW-Authenticate", `Basic realm="test"`)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
+		reg.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	host := strings.Replace(strings.TrimPrefix(srv.URL, "http://"), "127.0.0.1", "localhost", 1)
+	ref := host + "/test/cred:1"
+	push(t, ref, "amd64", tarLayer(t, entry{name: "a", body: "x"}))
+
+	cfgDir := t.TempDir()
+	t.Setenv("DOCKER_CONFIG", cfgDir)
+	t.Setenv("PATH", t.TempDir())
+
+	// A missing credsStore binary (such as docker-credential-wincred on a
+	// machine without Docker) must not break anonymous pulls.
+	writeDockerConfig(t, cfgDir, `{"credsStore":"wincred"}`)
+	if _, err := Open(t.TempDir()).Pull(context.Background(), ref); err != nil {
+		t.Fatalf("anonymous pull with missing credsStore failed: %v", err)
+	}
+
+	// When the helper is absent or has no entry, inline auths in config.json
+	// still authenticate the pull.
+	requireAuth.Store(true)
+	auth := base64.StdEncoding.EncodeToString([]byte("alice:secret"))
+	writeDockerConfig(t, cfgDir, fmt.Sprintf(`{"credsStore":"wincred","auths":{%q:{"auth":%q}}}`, host, auth))
+	if _, err := Open(t.TempDir()).Pull(context.Background(), ref); err != nil {
+		t.Fatalf("authenticated pull with missing credsStore failed: %v", err)
+	}
+}
+
+func TestKeychain(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("DOCKER_CONFIG", cfgDir)
+	t.Setenv("REGISTRY_AUTH_FILE", "")
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	helperPath := filepath.Join(binDir, "docker-credential-testwhp")
+	if runtime.GOOS == "windows" {
+		helperPath += ".exe"
+	}
+	data, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(helperPath, data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+
+	b64 := func(u, p string) string {
+		return base64.StdEncoding.EncodeToString([]byte(u + ":" + p))
+	}
+	resolve := func(t *testing.T, ref string) (authn.Authenticator, *authn.AuthConfig) {
+		t.Helper()
+		r, err := name.ParseReference(ref)
+		if err != nil {
+			t.Fatal(err)
+		}
+		auth, err := Keychain.Resolve(r.Context())
+		if err != nil {
+			t.Fatalf("Resolve(%s): %v", ref, err)
+		}
+		ac, err := auth.Authorization()
+		if err != nil {
+			t.Fatalf("Authorization(%s): %v", ref, err)
+		}
+		return auth, ac
+	}
+
+	// No config.json -> anonymous.
+	if auth, _ := resolve(t, "alpine:3.20"); auth != authn.Anonymous {
+		t.Errorf("without config.json: got %v, want Anonymous", auth)
+	}
+
+	// Working credsStore and credHelpers, plus fallback to inline auths when
+	// the helper has no credentials for a registry.
+	writeDockerConfig(t, cfgDir, fmt.Sprintf(`{
+		"credsStore": "testwhp",
+		"credHelpers": {
+			"https://helper.example.io/v2/": "testwhp",
+			"missing.example.io": "no-such-helper"
+		},
+		"auths": {
+			"test.io/repo-a": {"auth": %q},
+			"http://test.io/v2/": {"auth": %q},
+			"missing.example.io": {"auth": %q}
+		}
+	}`, b64("repo-user", "repo-pass"), b64("reg-user", "reg-pass"), b64("fb-user", "fb-pass")))
+
+	if _, ac := resolve(t, "alpine:3.20"); ac.Username != "hubuser" || ac.Password != "hubpass" {
+		t.Errorf("Docker Hub from credsStore: got %+v", ac)
+	}
+	if _, ac := resolve(t, "helper.example.io/app:1"); ac.Username != "<token>" || ac.IdentityToken != "idtok" {
+		t.Errorf("credHelpers identity token: got %+v", ac)
+	}
+	if _, ac := resolve(t, "missing.example.io/app:1"); ac.Username != "fb-user" || ac.Password != "fb-pass" {
+		t.Errorf("fallback when credHelper binary is missing: got %+v", ac)
+	}
+	if _, ac := resolve(t, "test.io/repo-a:1"); ac.Username != "repo-user" || ac.Password != "repo-pass" {
+		t.Errorf("repo-specific auth: got %+v", ac)
+	}
+	if _, ac := resolve(t, "test.io/repo-b:1"); ac.Username != "reg-user" || ac.Password != "reg-pass" {
+		t.Errorf("registry URL auth fallback: got %+v", ac)
+	}
+	if auth, _ := resolve(t, "unknown.example.io/app:1"); auth != authn.Anonymous {
+		t.Errorf("unconfigured registry: got %v, want Anonymous", auth)
+	}
+}
+
+func writeDockerConfig(t *testing.T, dir, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -5,10 +5,6 @@ edition, including Home. It drives the Windows Hypervisor Platform (WHP)
 directly from an ordinary user process, so it needs no Hyper-V role, no WSL, no
 HCS, and no administrator rights at run time.
 
-Quasidock itself runs native Windows programs and does not run Linux
-containers. `runwhp` is a separate subproject for software that has no Windows
-build.
-
 ## Status
 
 `runwhp` is experimental. It runs Linux containers from registry images,
@@ -402,8 +398,7 @@ WSL kernel; tests of runwhp's own kernel are then skipped.
 ## Proposed design
 
 One small virtual machine per container, with the VMM process acting as the
-container's supervisor. This matches Quasidock's existing model of one
-supervisor process and one Job Object per container, with no daemon.
+container's supervisor, with no daemon.
 
 | Concern | Approach | State |
 | --- | --- | --- |
@@ -420,13 +415,6 @@ supervisor process and one Job Object per container, with no daemon.
 | Networking | User-mode network stack in the VMM (gVisor netstack); published ports are loopback listeners | Done, IPv4 only, TCP ports only |
 | Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | `run` and `pull` only |
 | Kernel | Our own build with virtio drivers built in, shipped as a signed OCI artifact | Done: Linux 6.18 LTS on ghcr.io, pinned by digest rather than signed |
-
-### Relationship to Quasidock
-
-`runwhp` is meant to stand alone, with no dependency on Quasidock's store or
-recipes. Quasidock could later call it for images that have no native Windows
-build, or when [`quasidock convert`](dockerfile-conversion.md) rejects a
-Dockerfile. Whether Quasidock should do that is undecided.
 
 ### Out of scope for now
 
@@ -918,20 +906,3 @@ starts, which covers decompressing the kernel and early memory setup.
 - It is unknown whether hosted Windows CI runners expose WHP, so the
   end-to-end tests run only by hand.
 
-## Open questions
-
-- Is `runwhp` a general OCI runtime that containerd or nerdctl can drive, or a
-  backend used only by Quasidock? This decides how much of the runc command
-  line is worth implementing.
-- Is a one-time administrator step acceptable on machines where the hypervisor
-  is off, or must there be a fallback that needs none?
-- virtio-mmio with generated ACPI, as spiked, or virtio over PCI with MSI-X,
-  which avoids both the I/O APIC and the bytecode but needs PCI emulation?
-- Should bind mounts use FUSE's writeback cache? It would gather small
-  writes into large ones, but Linux then trusts its own idea of a file's size
-  and modification time, so a host program changing a file in place could go
-  unseen in the container. See [Iteration 5 results](#iteration-5-results).
-- What protection does the guest kernel owe a container from itself? The VM
-  is the boundary with the host, and the container is the guest's only
-  tenant, so KASLR is off; CPU mitigations are on, at a cost to system
-  calls that has not been measured.
