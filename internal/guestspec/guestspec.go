@@ -7,8 +7,9 @@
 // any Mount binds a share, a virtio-fs device tagged FSTag; then one
 // read-only virtio block device per image layer, bottom layer first, each
 // with the serial LayerSerial(i); then, when Spec.Scratch is set, the
-// writable scratch disk, with the serial ScratchSerial. Init finds disks by
-// serial, not by the order they appear in.
+// writable scratch disk, with the serial ScratchSerial; then one writable
+// disk per named volume, with the serial VolumeSerial(i). Init finds disks
+// by serial, not by the order they appear in.
 //
 // The scratch disk holds an empty ext4 file system, made for this run and
 // thrown away after it, on which init puts the overlay's upper and work
@@ -17,6 +18,11 @@
 // The virtio-fs device's root holds the host's shares as entries named "0",
 // "1", and so on. Init mounts it, sets OwnerXattr on its root, and binds each
 // share onto its Mount.Target.
+//
+// A volume's disk holds a journaled ext4 file system, whose directory _data
+// is what the container sees. Init fills an empty _data from the image
+// before mounting anything, as Docker does, and freezes each volume's file
+// system before resetting the machine, which leaves it clean.
 //
 // The control port carries JSON lines both ways. The host sends Control
 // messages: signals for the container process and terminal sizes. When the
@@ -44,6 +50,13 @@ func LayerSerial(i int) string { return fmt.Sprintf("layer%d", i) }
 // ScratchSerial is the virtio-blk serial of the scratch disk.
 const ScratchSerial = "scratch"
 
+// VolumeSerial is the virtio-blk serial of volume disk i.
+func VolumeSerial(i int) string { return fmt.Sprintf("vol%d", i) }
+
+// VolumeData is the directory of a volume's file system that is mounted
+// into the container.
+const VolumeData = "_data"
+
 // FSTag is the mount tag of the virtio-fs device that carries the shares.
 const FSTag = "runwhp"
 
@@ -64,11 +77,13 @@ type Spec struct {
 	Layers int      `json:"layers"`
 	// Scratch says the writable layer goes on the scratch disk.
 	Scratch bool `json:"scratch,omitempty"`
+	// Volumes is how many volume disks there are.
+	Volumes int `json:"volumes,omitempty"`
 	// Network configures the network interface. nil means the guest has
 	// none beyond loopback.
 	Network *Network `json:"network,omitempty"`
-	// Mounts are the host's files and directories bound into the
-	// container, in the order to mount them.
+	// Mounts are the bind mounts, volumes and tmpfs mounts, in the order to
+	// mount them: parents before what is mounted inside them.
 	Mounts []Mount `json:"mounts,omitempty"`
 	// Stdin connects the process's standard input to the stdin port, which
 	// reaches end of file when the host's input does. Without it the process
@@ -92,12 +107,29 @@ type Network struct {
 	MTU     int      `json:"mtu,omitempty"`
 }
 
-// Mount binds share Share of the virtio-fs device onto Target.
+// Mount kinds.
+const (
+	MountBind   = ""       // share Share of the virtio-fs device
+	MountVolume = "volume" // the _data directory of volume disk Volume
+	MountAnon   = "anon"   // an anonymous volume: a directory of this run's own
+	MountTmpfs  = "tmpfs"  // a new tmpfs, mounted with Options
+)
+
+// Mount is one mount in the container, at Target.
 type Mount struct {
+	Kind     string `json:"kind,omitempty"`
 	Target   string `json:"target"`
 	Share    int    `json:"share"`
+	Volume   int    `json:"volume,omitempty"`
+	Name     string `json:"name,omitempty"` // the volume's name, for messages
 	File     bool   `json:"file,omitempty"` // the share is a file, not a directory
 	ReadOnly bool   `json:"readonly,omitempty"`
+	// NoCopy leaves a new volume empty, instead of filling it with what the
+	// image has at Target.
+	NoCopy bool `json:"nocopy,omitempty"`
+	// Options are a tmpfs's mount options: noexec, nosuid, nodev, ro, and
+	// size, mode, uid, gid and nr_inodes as tmpfs takes them.
+	Options string `json:"options,omitempty"`
 }
 
 // Control is a message from the host to init.

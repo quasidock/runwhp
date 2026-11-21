@@ -8,9 +8,18 @@ HCS, and no administrator rights at run time.
 ## Status
 
 `runwhp` is experimental. It runs Linux containers from registry images,
-interactively or not, with a network and the host's files, on a kernel of
-its own and on several processors.
+interactively or not, with a network, the host's files and volumes of their
+own, on a kernel of its own and on several processors.
 
+- **Iteration 7** (2026-11-21): containers write to disk. The writable
+  layer lives on a sparse ext4 scratch disk made for each run instead of in
+  guest RAM, so a 256 MiB guest writes gigabytes. Named volumes
+  (`-v NAME:PATH`, `runwhp volume`) keep data between runs in journaled
+  ext4 disk images, filled from the image as Docker fills them, and
+  anonymous volumes and `--tmpfs` work too. A Go build cache in a volume
+  takes a build of runwhp from 21 s to 3 s, and a run costs about 15 ms
+  more, plus 10-20 ms per volume. See [Storage](#storage),
+  [Volumes](#volumes) and [Iteration 7 results](#iteration-7-results).
 - **Iteration 6** (2026-11-21): containers get more than one vCPU: the
   host's logical processors, up to 4, unless `--cpus` asks for more, up to
   64. The guest sees them as cores of one processor sharing its cache, so
@@ -49,7 +58,7 @@ its own and on several processors.
   kernel on WHP. See [Boot spike](#boot-spike).
 - **Proposed, not yet agreed**: the rest of the architecture in
   [Proposed design](#proposed-design).
-- **Not started**: named volumes and the runc-style lifecycle commands.
+- **Not started**: the runc-style lifecycle commands.
 
 ## Why not runhcs, HCS, or WSL
 
@@ -112,6 +121,10 @@ Get-Content data.csv | .\out\runwhp.exe run -i alpine:3.20 wc -l
 .\out\runwhp.exe run -v ${PWD}:/src -w /src alpine:3.20 ls -l
 .\out\runwhp.exe run --mount type=bind,source=C:\data,target=/data,readonly alpine:3.20 du -sh /data
 .\out\runwhp.exe run --cpus 8 -m 2g -v ${PWD}:/src -w /src golang:1.26 go build ./...
+.\out\runwhp.exe run -v pgdata:/var/lib/postgresql/data -e POSTGRES_PASSWORD=pw -p 5432:5432 postgres:17
+.\out\runwhp.exe run -v ${PWD}:/app -v /app/node_modules -w /app node:22 npm ci
+.\out\runwhp.exe run --tmpfs /run --storage-opt size=200g debian:12 sh -c 'apt-get update && apt-get install -y build-essential'
+.\out\runwhp.exe volume ls
 .\out\runwhp.exe pull debian:12
 ```
 
@@ -129,8 +142,9 @@ Get-Content data.csv | .\out\runwhp.exe run -i alpine:3.20 wc -l
 | `--network`, `--net` | `user` | `user` gives the container a network through runwhp; `none` leaves it only loopback |
 | `-p`, `--publish` | | `[IP:]HOSTPORT:PORT[/tcp]`: listen on the host and forward to the container's TCP port; repeatable. IP defaults to `127.0.0.1` |
 | `--add-host` | | `NAME:IP` or `NAME=IP`, added to `/etc/hosts`; repeatable. `NAME:host-gateway` also lets the container reach the host's `127.0.0.1` at that name |
-| `-v`, `--volume` | | `HOSTPATH:PATH[:ro]`: bind a host directory or file at `PATH`; repeatable. A missing `HOSTPATH` is made as a directory. See [Host files](#host-files) |
-| `--mount` | | `type=bind,source=HOSTPATH,target=PATH[,readonly]`: the same, in Docker's long form; `HOSTPATH` must exist |
+| `-v`, `--volume` | | `HOSTPATH:PATH[:ro]`: bind a host directory or file at `PATH`; a missing `HOSTPATH` is made as a directory. `NAME:PATH[:ro][,nocopy]`: mount the named volume `NAME`, made if missing. `PATH` alone: an anonymous volume, gone after the run. Repeatable. See [Host files](#host-files) and [Volumes](#volumes) |
+| `--mount` | | Docker's long form of `-v` and `--tmpfs`: `type=bind,source=HOSTPATH,target=PATH[,readonly]`, where `HOSTPATH` must exist; `type=volume[,source=NAME],target=PATH[,readonly][,volume-nocopy][,volume-opt=size=SIZE]`; `type=tmpfs,target=PATH[,tmpfs-size=SIZE][,tmpfs-mode=MODE]` |
+| `--tmpfs` | | `PATH[:OPTIONS]`: mount a tmpfs, `noexec`, `nosuid` and `nodev` unless the options say `exec`, `suid` or `dev`; repeatable. See [Volumes](#volumes) |
 | `--storage-opt` | `size=64g` | `size=SIZE`: how large the container's writable layer may grow, `1g` to `16t`. See [Storage](#storage) |
 | `--pull` | `missing` | When to pull the image: `missing`, `always` or `never`. `never` also keeps runwhp from fetching its kernel |
 | `--kernel` | runwhp's own | bzImage to boot instead; see [Kernel](#kernel) |
@@ -208,8 +222,7 @@ container. Changes either side makes show on the other.
 - `HOSTPATH` is an absolute Windows path (`C:\src`, `C:/src`,
   `\\server\share\dir`), a path starting with a dot (`.`, `.\src`), which is
   relative to the current directory, or Git Bash's `/c/src`. A name without
-  a path, such as `data`, would be a named volume, which runwhp does not have
-  yet.
+  a path, such as `data`, names a volume; see [Volumes](#volumes).
 - `-v` makes a missing `HOSTPATH` as a directory, as Docker does; `--mount`
   requires it to exist.
 - `PATH` must be absolute, and cannot be `/` or lie under `/proc` or `/sys`.
@@ -275,6 +288,57 @@ and the next run removes one the machine stopped under.
   about 3 ms, while the kernel loads, and deleting it about 4 ms at exit.
 - On a store whose volume has no sparse files, such as FAT or exFAT, runwhp
   says so and keeps the writable layer in guest memory.
+
+### Volumes
+
+`-v NAME:PATH` mounts the named volume `NAME`, making it if there is none.
+`runwhp volume create NAME` makes one ahead of time, of another size than
+the default 64 GiB with `--opt size=`. A volume is a directory in the
+store's `volumes` directory holding a sparse ext4 disk image, `disk.ext4`,
+which the container gets as a disk of its own.
+
+- **Filled from the image.** A new volume mounted where the image has files
+  gets a copy of them, as with Docker: owners, modes, times, links, device
+  nodes and extended attributes, and the directory's own owner and mode. The
+  copy is made while the volume is empty, from the image alone, before
+  anything is mounted. `nocopy` (`-v NAME:PATH:nocopy`, or `volume-nocopy`
+  with `--mount`) leaves it empty. The container sees the file system's
+  `_data` directory, so `lost+found` never shows.
+- **One container at a time.** runwhp opens a volume's disk image
+  exclusively, so a second container asking for it fails with "volume NAME
+  is in use", as does `runwhp volume rm`. One container can mount a volume
+  at several paths.
+- **Kept safe.** The file system has a journal. When the container ends,
+  init freezes it, which writes everything back and leaves it clean, before
+  the VM resets. A VM stopped at once, by a second Ctrl+C, the 10-second
+  timeout or a killed runwhp, leaves its journal to be replayed on the next
+  mount, and what the container had synced is there. `fsync` in a volume
+  waits for the host's disk.
+- **Space.** The image takes what is written, about 3 MiB when new on NTFS,
+  which allocates sparse files 64 KiB at a time, and gives back what the
+  container deletes. Its size is a limit, and cannot be changed yet.
+- **From Windows** a volume is a disk image, not a folder. WSL can read one
+  that no container is using: `wsl -u root mount -o loop,ro,noload` its
+  `disk.ext4` on a directory.
+
+`-v PATH` alone, or `--mount type=volume` without a source, makes an
+anonymous volume: a directory of the run's own, filled from the image in the
+same way, gone when the run ends. Under a bind mount, as in
+`-v .:/app -v /app/node_modules`, it keeps that directory in the container
+rather than on the host.
+
+`--tmpfs PATH[:OPTIONS]` mounts a tmpfs with mode 1777, `noexec`, `nosuid`
+and `nodev`, unless the options say otherwise with `mode=`, `exec`, `suid`
+or `dev`. `ro`, `size`, `uid`, `gid` and `nr_inodes` are taken as tmpfs
+takes them. What it holds counts against `--memory`.
+
+| `runwhp volume` | |
+| --- | --- |
+| `create [--opt size=SIZE] [NAME]` | Make a volume, from `1g` to `16t`; without a name, a random one |
+| `ls [-q]` | List volumes with their size and what they take on disk |
+| `inspect NAME...` | Describe volumes as JSON, saying whether a container is using them |
+| `rm NAME...` | Remove volumes and all they hold |
+| `prune -a [-f]` | Remove every volume no running container uses, after asking unless `-f`. Without `-a` it removes nothing: runwhp keeps no anonymous volumes |
 
 ### Kernel
 
@@ -366,11 +430,14 @@ bzImage.
    chose for it.
 4. The guest gets one multiport virtio console, with ports named `stdout`,
    `stderr`, `stdin` and `control`; a virtio network device, unless
-   `--network none`; a virtio-fs device, with `-v` or `--mount`; one
-   read-only virtio-blk disk per layer; and the scratch disk. Each disk's
-   serial number names it, so init does not depend on probe order. Disk
-   requests are served on goroutines, up to 16 at a time per disk, through
-   overlapped I/O, and complete in whatever order they finish.
+   `--network none`; a virtio-fs device, with bind mounts; one read-only
+   virtio-blk disk per layer; the scratch disk; and one disk per named
+   volume. Each disk's
+   serial number names it, so init does not depend on probe order. The vCPU
+   that submits disk requests serves the first itself, without holding the
+   device, and goroutines serve any others, up to 16 at a time per disk,
+   all through overlapped I/O; requests complete in whatever order they
+   finish.
    Each port's output is written to the host by a goroutine of its own, and
    input is delivered to the guest from another, so no vCPU ever waits on
    the host's console or pipes.
@@ -393,10 +460,13 @@ bzImage.
    adds `/proc`, `/sys`, a minimal `/dev`, a hostname and `/etc/hosts`,
    configures `eth0` and `/etc/resolv.conf` when there is a network,
    resolves the container's user, mounts the virtio-fs device, tells it who
-   owns host files without an owner, and binds each mount onto its target.
-   It then moves the overlay over the initramfs as the root, as `switch_root`
-   does, which leaves the virtio-fs root out of the container's reach, and
-   runs the process in it. The process's stdin, stdout and stderr are
+   owns host files without an owner, mounts each volume's file system, and
+   fills new volumes from the image. Then, parents first, it binds each
+   share, each volume's `_data` and each anonymous volume onto its target,
+   and mounts each tmpfs. It moves the overlay over the initramfs as the
+   root, as `switch_root` does, which leaves the virtio-fs root and the
+   volumes' file systems out of the container's reach, and runs the process
+   in it. The process's stdin, stdout and stderr are
    pipes, or with `-t` a pseudo-terminal from the container's own devpts,
    and init relays them to and from the ports. A port can be open only once
    at a time, so handing the process the ports themselves would break
@@ -405,8 +475,9 @@ bzImage.
    sizes from the host, and the exit status from init. When the process
    exits, init kills whatever is left, waits for the last output to reach
    the ports, writes the status, and resets the machine, which ends the VMM.
-   It writes back the bind mounts' file system first, but not the scratch
-   disk's, which is about to be thrown away.
+   First it freezes each volume's file system, which writes it back and
+   empties its journal, and writes back the bind mounts' file system, but not
+   the scratch disk's, which is about to be thrown away.
 
 ### Code layout
 
@@ -421,6 +492,7 @@ bzImage.
 | [`internal/fuse`](internal/fuse) | The FUSE protocol as virtio-fs speaks it, served from a file system interface. Builds on any OS |
 | [`internal/disk`](internal/disk) | The files behind virtual disks: overlapped I/O from many goroutines, sparse files, freeing ranges, exclusive and delete-on-close opens |
 | [`internal/ext4`](internal/ext4) | Makes empty ext4 file systems as mke2fs would, and reads back whether one was left clean. Builds on any OS |
+| [`internal/volume`](internal/volume) | Named volumes in the store: names, making, listing and removing them |
 | [`internal/hostfs`](internal/hostfs) | The host end of bind mounts: Windows files served as that file system, with WSL's metadata |
 | [`internal/image`](internal/image), [`internal/layer`](internal/layer) | Registry pulls, image records, layer conversion and cache |
 | [`internal/kernel`](internal/kernel) | The kernel artifact's format, the pinned build, and fetching it into the store |
@@ -459,7 +531,7 @@ container's supervisor, with no daemon.
 | Layer conversion | `tar2ext4`, cached per layer digest | Done |
 | Container I/O | Multiport virtio console with named ports for stdout, stderr, stdin and control; pipes or a pty in the guest | Done, including `-i`, `-t`, resize and signals |
 | Guest agent | Tiny init as PID 1 that mounts the overlay and execs the process, instead of hcsshim's GCS plus runc | Done (`runwhp-init`) |
-| Bind mounts and volumes | virtio-fs, with a FUSE server in Go serving Windows files and keeping Unix metadata as WSL does | Bind mounts done; named volumes not started |
+| Bind mounts and volumes | virtio-fs, with a FUSE server in Go serving Windows files and keeping Unix metadata as WSL does; volumes as journaled ext4 disk images on virtio-blk | Done; a volume is used by one container at a time |
 | Networking | User-mode network stack in the VMM (gVisor netstack); published ports are loopback listeners | Done, IPv4 only, TCP ports only |
 | Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | `run` and `pull` only |
 | Kernel | Our own build with virtio drivers built in, shipped as a signed OCI artifact | Done: Linux 6.18 LTS on ghcr.io, pinned by digest rather than signed |
@@ -783,6 +855,127 @@ The new tests cover:
 The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
 the WSL kernel.
 
+## Iteration 7 results
+
+Measured on the test machine with runwhp's kernel, from Git Bash, with the
+store on NTFS (`C:`). "Iteration 6" is that iteration's build, run in turn
+with this one.
+
+Disks cost a little at start, over four or five runs:
+
+| Measurement | Result |
+| --- | --- |
+| `run alpine:3.20 true`, iteration 6 | 244-255 ms, and 307 ms once |
+| the same, iteration 7 | 262-271 ms |
+| with one volume | 285-295 ms |
+| with five volumes | 316-342 ms |
+
+Of the scratch disk's cost, deleting it takes about 4 ms; it is formatted in
+3 ms while the kernel loads. A volume costs mounting a journaled file system
+and freezing it at the end.
+
+Moving 200 MB, timed inside the guest with `-m 1g` as in iteration 5, over
+three runs. Reads follow a `drop_caches`, which empties the guest's cache
+but not a tmpfs:
+
+| Measurement | Writable layer | Volume | Iteration 6's tmpfs |
+| --- | --- | --- | --- |
+| `dd` in 1 MiB blocks, then `fsync` | 0.53-0.54 s | 0.69-0.71 s | 0.47-0.48 s |
+| `dd` reading it back | 0.08-0.09 s | 0.08-0.09 s | 0.02 s |
+| `head -c`, about 820 bytes a write, then `sync` | 1.29-1.32 s | 1.39-1.42 s | 1.22-1.27 s |
+
+A bind mount took 0.96-1.09 s, 0.18-0.21 s and 34.7 s for the same in
+iteration 5.
+
+The tree of 10,000 small files in 100 directories from iteration 5, in
+`golang:1.26` with `--cpus 4`, two runs each:
+
+| Measurement | Writable layer | Volume | Iteration 6's tmpfs |
+| --- | --- | --- | --- |
+| `tar -x` | 0.33 s | 0.24-0.25 s | 0.24-0.25 s |
+| `find` | 0.01 s | 0.01 s | 0.01 s |
+| `ls -lR` | 0.03 s | 0.02 s | 0.03 s |
+| `git add -A` and `git commit` | 0.87-0.96 s | 0.69-0.73 s | 0.71-0.74 s |
+| `git status`, twice | 0.01-0.02 s | 0.01-0.02 s | 0.01-0.02 s |
+
+The writable layer is overlayfs over ext4, which makes files more slowly
+than overlayfs over tmpfs; a volume is plain ext4. A bind mount took 36-41 s
+to extract the same tree in iteration 5.
+
+Reading the Go toolchain, about 16,000 files and 270 MB, out of
+`golang:1.26`'s layers with caches dropped and `--cpus 4`, six runs each:
+
+| Readers | Iteration 6 | Iteration 7 |
+| --- | --- | --- |
+| one | 3.45-4.12 s | 3.82-4.11 s, and 4.75 s once |
+| four | 1.40-1.53 s | 1.33-1.39 s |
+
+Handing every request to a worker thread, as this iteration's first version
+did, took 5.0-5.3 s for one reader; see [Findings](#findings).
+
+A cold `GOOS=windows go build ./cmd/runwhp` in `golang:1.26` with `-m 3g`,
+as in iteration 6, reading the source and module cache through read-only
+bind mounts, two runs each:
+
+| `--cpus` | Iteration 6 | Iteration 7 |
+| --- | --- | --- |
+| 4 | 27.1-27.4 s | 27.9-28.8 s |
+| 16 | 19.8 s | 20.8-21.4 s |
+
+The build cache is now on the scratch disk instead of in RAM, which costs
+3-7%. In a volume it outlives the run: the next build took 3.1-3.2 s.
+
+Also measured:
+
+- Installing `python3` with `apt-get` in `debian:12`, its packages already
+  downloaded, took 4.90-5.14 s on the writable layer, 5.15-5.25 s without
+  `volatile` and 4.78-4.80 s on iteration 6's tmpfs.
+- Truncating a 1 GiB file in the writable layer gave the host its space
+  back within 3 s. Without `discard`, the host kept it until the run ended.
+- A run that leaves 1 GiB of the writable layer unwritten when it ends no
+  longer writes it out first. It was worth only 50-90 ms here, since the
+  guest had written most of it back by then.
+- `postgres:17` initialized its database on a new volume, which it refuses
+  to do in a directory holding `lost+found`, and found it again on the next
+  run.
+
+The new tests cover:
+
+- the disk files, on NTFS and, through `RUNWHP_TEST_DIR`, on ReFS: sparse
+  creation, concurrent reads and writes, freeing ranges, exclusive and
+  shared opens, and scratch disks deleted on close and when their process
+  is killed
+- the block device against a simulated driver: requests served by the
+  kicking thread and by workers, out of order, past and across the end of
+  the disk, read errors, a header changed after it was checked, reset with
+  requests in flight, draining, discard and write-zeroes, and the features
+  and configuration of each kind of disk
+- the formatter, from 64 MiB to 1 TiB with and without a journal: every
+  structure read back as the kernel would, the checksums, the bitmaps of
+  uninitialized groups, and `e2fsck -fn` where it is installed
+- copying a directory into a volume, as root in a Linux container: owners,
+  modes, times, set-user-ID bits, symlinks, hard links, FIFOs, device nodes
+  and extended attributes, and sockets skipped
+- volume names, making a volume from several processes at once, and
+  removing one in use
+- parsing `-v`, `--mount`, `--tmpfs` and `--storage-opt`
+- end to end:
+  - 1 GiB written and read back in a 256 MiB guest, the writable layer's
+    size, ENOSPC past it, and fsync not reaching the host
+  - scratch disks gone after a run, a second Ctrl+Break and a killed
+    runwhp, and one left behind swept away
+  - data kept across runs, a volume filled from an image with every kind
+    of file, `nocopy`, a volume under a bind mount filled from the image,
+    `:ro`, one volume at two paths
+  - a volume in use refused to a second container and to `volume rm`
+  - a volume clean after a run, and after a second Ctrl+C in the middle of
+    writes, replayed and clean after the next
+  - anonymous volumes, under a bind mount and from the image
+  - tmpfs mounts: `noexec`, `size`, `exec` and `tmpfs-mode`
+  - all four kinds of mount nested
+  - too many volumes for the I/O APIC
+  - `volume create`, `ls`, `inspect`, `rm` and `prune`
+
 ## Boot spike
 
 The spike lives in [`spike/`](spike/) and is kept as a reference; the runtime
@@ -1004,14 +1197,73 @@ starts, which covers decompressing the kernel and early memory setup.
   `hlt` does not exit to the VMM even with interrupts disabled, so the VMM
   cannot tell a guest that halted for good, as after `halt -f`, from an
   idle one.
+- **hcsshim's `tar2ext4` cannot make a writable disk.** Every file system it
+  writes is marked read-only (`RO_COMPAT_READONLY`), has no journal, uses
+  `sparse_super2`, which online resize refuses, and holds only as many
+  inodes as its content needs: 16 per group when empty. runwhp formats its
+  writable disks itself, as mke2fs would, and `e2fsck -fn` passes them.
+- **A new ext4 file system is mostly holes.** With group descriptor
+  checksums, groups can be marked as having uninitialized bitmaps and
+  zeroed inode tables, and the kernel works them out instead of reading
+  them; since holes in a sparse file read as zeros, that is true of every
+  inode table. Formatting 64 GiB writes 373 KiB. Without the zeroed flag the
+  kernel's lazy init would write 1 GiB of inode tables.
+- **`os.File` runs positional I/O one request at a time on Windows.** Its
+  `ReadAt` and `WriteAt` hold a lock for the whole call, and a handle opened
+  for synchronous I/O makes Windows serialize requests on it as well. With
+  an overlapped handle and an event per request, four goroutines read
+  cached 4 KiB blocks 1.5 times as fast as one, where `os.File` gets
+  1.6 times slower.
+- **NTFS gives a sparse file's space back in 64 KiB units, ReFS per
+  cluster.** `FSCTL_SET_ZERO_DATA` on a 4 KiB range of a sparse file on NTFS
+  frees nothing; on ReFS, with 4 KiB clusters, it frees the range. NTFS also
+  allocates 64 KiB at a time, so a new 64 GiB volume, whose metadata is
+  scattered over a few dozen places, takes about 3 MiB there. runwhp asks
+  the guest to discard in 64 KiB units.
+- **Deleting a sparse file takes about 4 ms** on both NTFS and ReFS, even
+  when little of it was written: most of what the scratch disk adds to a
+  run.
+- **Windows deletes a delete-on-close file when the process holding it is
+  killed**, and will not rename a directory holding a file open without
+  `FILE_SHARE_DELETE`. The first makes a killed runwhp leave no scratch
+  disk behind, the second lets `volume rm` move a volume aside whole or
+  find it in use, with no lock files.
+- **Freezing a journaled ext4 file system leaves it clean** without
+  unmounting it: `FIFREEZE` writes back its data, empties its journal and
+  clears `needs_recovery`, whoever still has it mounted. Unmounting cannot
+  be counted on in a container, which may have copied its mounts into
+  namespaces of its own.
+- **Handing every disk request to another thread made a single reader 40%
+  slower.** The vCPU halts while it waits, and waking it for the
+  completion, as well as the thread that does the I/O, cost about 86 µs
+  per request: reading the Go toolchain out of an image took 5.0-5.3 s
+  instead of 3.4-3.9 s. Workers spinning for the next request made it
+  worse. Serving the first request of each notification on the vCPU that
+  sent it, after letting go of the device's lock, brought one reader back
+  to 3.8-4.1 s and made four readers faster than either.
+- **A freeze waits for three RCU grace periods**, one per level it freezes,
+  and in an idle guest each takes tens of milliseconds: a volume added
+  about 60 ms to a run. Init asks for expedited grace periods just before
+  freezing, once the container is gone, and a volume adds 10-20 ms.
+- **Debian's images already skip most fsyncs.** Their dpkg is configured
+  with `force-unsafe-io`, so overlayfs's `volatile`, which drops the
+  writable layer's syncs, gains only about 5% on `apt-get install`.
 
 ## Known gaps
 
 - There is no detaching or reattaching, and no way to send signals other
   than SIGINT and SIGTERM.
-- Nothing written outside a bind mount survives the run: the scratch disk
-  is deleted when it ends.
-- There are no named volumes and no `--tmpfs`.
+- Nothing written outside a bind mount or volume survives the run: the
+  scratch disk is deleted when it ends.
+- Volumes cannot be resized, nor shared by containers running at once, even
+  read-only. `runwhp volume` cannot copy files in or out, and reading one
+  from Windows needs WSL.
+- Image `VOLUME` declarations are ignored: those paths stay in the writable
+  layer, as they would with `docker run --rm`.
+- A volume mounted on `/etc` keeps, after its first run, its own `hosts`,
+  `hostname` and `resolv.conf`, rather than those runwhp writes.
+- A full host disk shows in the container as I/O errors on the scratch disk
+  or a volume.
 - Every `write()` to a bind mount is a request to the host, about 130 µs each
   on the test machine, so a program writing in small pieces is slow there;
   see [Iteration 5 results](#iteration-5-results). Making files is slow too,
@@ -1024,8 +1276,8 @@ starts, which covers decompressing the kernel and early memory setup.
   `internal/kernel/pin.go`, and the pinned digest is the only check on it:
   builds are not signed.
 - An image can have at most 56 non-empty layers, one more with
-  `--network none`, and one fewer with bind mounts: each device, the
-  scratch disk included, takes an I/O APIC line.
+  `--network none`, one fewer with bind mounts, and one fewer for each
+  volume: each device, the scratch disk included, takes an I/O APIC line.
 - The network is IPv4 only and carries no ICMP. Only TCP ports can be
   published, each with an explicit host port, and there is no `-P`, `--dns`
   or `--dns-search`.

@@ -1,0 +1,229 @@
+//go:build windows
+
+// Package volume keeps runwhp's named volumes: each one a directory in the
+// store's volumes directory holding a sparse ext4 disk image, disk.ext4, and
+// a record of it, volume.json.
+//
+// A volume's disk is attached to a container as a block device, so only one
+// running container can use a volume at a time: its runwhp opens the disk
+// exclusively, and a second one gets disk.ErrInUse.
+package volume
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/quasidock/runwhp/internal/disk"
+	"github.com/quasidock/runwhp/internal/ext4"
+)
+
+var (
+	ErrNotFound = errors.New("no such volume")
+	ErrExists   = errors.New("volume already exists")
+	ErrInUse    = errors.New("volume is in use by a running container")
+)
+
+// Volume is one named volume.
+type Volume struct {
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"createdAt"`
+	Size      int64     `json:"size"` // the file system's size; the disk takes only what is written
+
+	dir string
+}
+
+// Disk is the path of the volume's disk image.
+func (v *Volume) Disk() string { return filepath.Join(v.dir, "disk.ext4") }
+
+// OnDisk returns how many bytes of the host's disk the volume takes.
+func (v *Volume) OnDisk() (int64, error) { return disk.Allocated(v.Disk()) }
+
+// InUse reports whether a running container is using the volume.
+func (v *Volume) InUse() (bool, error) { return disk.InUse(v.Disk()) }
+
+// Store is the volumes in one runwhp store.
+type Store struct {
+	root string // the store's root
+}
+
+func Open(root string) *Store { return &Store{root: root} }
+
+func (s *Store) dir(name string) string { return filepath.Join(s.root, "volumes", name) }
+
+var validName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]+$`)
+
+// reservedNames are device names Windows will not have as file names, with
+// or without an extension.
+var reservedNames = map[string]bool{"con": true, "prn": true, "aux": true, "nul": true}
+
+func init() {
+	for i := 1; i <= 9; i++ {
+		reservedNames[fmt.Sprintf("com%d", i)] = true
+		reservedNames[fmt.Sprintf("lpt%d", i)] = true
+	}
+}
+
+// CheckName checks a volume name: Docker's rules, two or more letters,
+// digits, underscores, dots and dashes starting with a letter or digit, and
+// what Windows needs of a directory name.
+func CheckName(name string) error {
+	switch {
+	case !validName.MatchString(name):
+		return fmt.Errorf("invalid volume name %q: use two or more letters, digits, _ . or -, starting with a letter or digit", name)
+	case len(name) > 128:
+		return fmt.Errorf("invalid volume name %q: at most 128 characters", name)
+	case strings.HasSuffix(name, "."):
+		return fmt.Errorf("invalid volume name %q: Windows drops a trailing dot", name)
+	}
+	base, _, _ := strings.Cut(name, ".")
+	if reservedNames[strings.ToLower(base)] {
+		return fmt.Errorf("invalid volume name %q: Windows reserves %s for a device", name, base)
+	}
+	return nil
+}
+
+// Get returns the volume called name. Names are case-insensitive, as the
+// host's file names are; the volume keeps the case it was created with.
+func (s *Store) Get(name string) (*Volume, error) {
+	if err := CheckName(name); err != nil {
+		return nil, err
+	}
+	dir := s.dir(name)
+	data, err := os.ReadFile(filepath.Join(dir, "volume.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("%s: %w", name, ErrNotFound)
+	}
+	if err != nil {
+		return nil, err
+	}
+	v := &Volume{dir: dir}
+	if err := json.Unmarshal(data, v); err != nil {
+		return nil, fmt.Errorf("volume %s: %w", name, err)
+	}
+	return v, nil
+}
+
+// Create makes a new volume with a file system of size bytes. A volume
+// is made in the store's tmp directory and moved into place whole, so a
+// volume is either there and complete or not there at all.
+func (s *Store) Create(name string, size int64) (*Volume, error) {
+	if err := CheckName(name); err != nil {
+		return nil, err
+	}
+	if _, err := s.Get(name); err == nil {
+		return nil, fmt.Errorf("%s: %w", name, ErrExists)
+	}
+	tmp := filepath.Join(s.root, "tmp")
+	if err := os.MkdirAll(tmp, 0o755); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Join(s.root, "volumes"), 0o755); err != nil {
+		return nil, err
+	}
+	work, err := os.MkdirTemp(tmp, "volume-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(work)
+	v := &Volume{Name: name, CreatedAt: time.Now().UTC().Truncate(time.Second), Size: size, dir: work}
+	f, err := disk.Create(v.Disk(), size, disk.Exclusive)
+	if err != nil {
+		return nil, fmt.Errorf("creating volume %s: %w", name, err)
+	}
+	label := name
+	if len(label) > 16 {
+		label = label[:16]
+	}
+	err = ext4.Format(f, size, ext4.Options{Journal: true, Label: label})
+	if err == nil {
+		err = f.Sync()
+	}
+	f.Close()
+	if err != nil {
+		return nil, fmt.Errorf("formatting volume %s: %w", name, err)
+	}
+	data, _ := json.MarshalIndent(v, "", "  ")
+	if err := os.WriteFile(filepath.Join(work, "volume.json"), append(data, '\n'), 0o644); err != nil {
+		return nil, err
+	}
+	v.dir = s.dir(name)
+	if err := os.Rename(work, v.dir); err != nil {
+		if _, gerr := s.Get(name); gerr == nil {
+			return nil, fmt.Errorf("%s: %w", name, ErrExists)
+		}
+		return nil, fmt.Errorf("creating volume %s: %w", name, err)
+	}
+	return v, nil
+}
+
+// Ensure returns the volume called name, creating it with a file system of
+// size bytes if there is none, and reports whether it did.
+func (s *Store) Ensure(name string, size int64) (*Volume, bool, error) {
+	v, err := s.Get(name)
+	if err == nil || !errors.Is(err, ErrNotFound) {
+		return v, false, err
+	}
+	v, err = s.Create(name, size)
+	if errors.Is(err, ErrExists) {
+		// Another runwhp made it first.
+		v, err = s.Get(name)
+		return v, false, err
+	}
+	return v, err == nil, err
+}
+
+// List returns every volume, sorted by name.
+func (s *Store) List() ([]*Volume, error) {
+	entries, err := os.ReadDir(filepath.Join(s.root, "volumes"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []*Volume
+	for _, e := range entries {
+		if !e.IsDir() || CheckName(e.Name()) != nil {
+			continue
+		}
+		v, err := s.Get(e.Name())
+		if err != nil {
+			continue // a volume being removed
+		}
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool { return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name) })
+	return out, nil
+}
+
+// Remove deletes the volume called name and everything in it, unless a
+// running container is using it.
+func (s *Store) Remove(name string) error {
+	v, err := s.Get(name)
+	if err != nil {
+		return err
+	}
+	// Move it aside first, so that it is gone or complete, never half
+	// removed. Windows will not rename a directory holding a file that
+	// is open without FILE_SHARE_DELETE, as a volume in use is.
+	var b [8]byte
+	rand.Read(b[:])
+	trash := filepath.Join(s.root, "tmp", "removed-"+hex.EncodeToString(b[:]))
+	os.MkdirAll(filepath.Dir(trash), 0o755)
+	if err := os.Rename(v.dir, trash); err != nil {
+		if busy, _ := v.InUse(); busy {
+			return fmt.Errorf("%s: %w", v.Name, ErrInUse)
+		}
+		return fmt.Errorf("removing volume %s: %w", v.Name, err)
+	}
+	return os.RemoveAll(trash)
+}

@@ -378,3 +378,22 @@ func Allocated(path string) (int64, error) {
 	}
 	return int64(high)<<32 | int64(uint32(low)), nil
 }
+
+// InUse reports whether another process has the file at path open in a way
+// that keeps others from reading it, as an Exclusive or Scratch File does.
+func InUse(path string) (bool, error) {
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return false, err
+	}
+	h, err := windows.CreateFile(p, windows.GENERIC_READ,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, 0, 0)
+	if errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+		return true, nil
+	}
+	if err != nil {
+		return false, &fs.PathError{Op: "open", Path: path, Err: err}
+	}
+	windows.CloseHandle(h)
+	return false, nil
+}

@@ -35,6 +35,7 @@ import (
 	"github.com/quasidock/runwhp/internal/netstack"
 	"github.com/quasidock/runwhp/internal/virtio"
 	"github.com/quasidock/runwhp/internal/vm"
+	"github.com/quasidock/runwhp/internal/volume"
 )
 
 const (
@@ -69,6 +70,7 @@ type runOptions struct {
 	addHosts    listFlag
 	volumes     listFlag
 	mounts      listFlag
+	tmpfs       listFlag
 	storageOpts listFlag
 
 	// Development flags, left out of the usage text.
@@ -110,6 +112,7 @@ func runFlags(o *runOptions) *flag.FlagSet {
 	fs.Var(&o.volumes, "v", "")
 	fs.Var(&o.volumes, "volume", "")
 	fs.Var(&o.mounts, "mount", "")
+	fs.Var(&o.tmpfs, "tmpfs", "")
 	fs.Var(&o.storageOpts, "storage-opt", "")
 	fs.StringVar(&o.init, "init", "", "")
 	fs.Var(&o.layers, "layer", "")
@@ -134,7 +137,10 @@ Flags:
                          this machine's 127.0.0.1
   -v, --volume HOSTPATH:PATH[:ro]  bind a host directory or file into the container (repeatable);
                          HOSTPATH is absolute or starts with a dot, and is created if missing
-      --mount type=bind,source=HOSTPATH,target=PATH[,readonly]  the same, Docker's long form
+  -v, --volume NAME:PATH[:ro]  mount a named volume, created if missing; PATH alone makes an
+                         anonymous volume, gone after the run
+      --mount type=bind|volume|tmpfs,source=...,target=PATH[,readonly]  the same, Docker's long form
+      --tmpfs PATH[:OPTIONS]  mount a tmpfs, by default noexec,nosuid,nodev (repeatable)
       --storage-opt size=SIZE  how large the container's writable layer may grow (default 64g)
       --pull POLICY      when to pull the image: missing, always or never (default missing);
                          never also keeps runwhp from fetching its own kernel
@@ -195,7 +201,7 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 	if err != nil {
 		return fail, err
 	}
-	shares, mounts, err := parseBinds(o.volumes, o.mounts)
+	plan, err := parseMounts(o.volumes, o.mounts, o.tmpfs)
 	if err != nil {
 		return fail, err
 	}
@@ -273,18 +279,55 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 		others++
 		users = append(users, "the network")
 	}
-	if len(shares) > 0 {
+	if len(plan.shares) > 0 {
 		others++
 		users = append(users, "bind mounts")
 	}
-	if others+len(layerFiles) > vm.MaxDevices {
-		with := ""
+	if n := len(plan.volumes); n > 0 {
+		others += n
+		users = append(users, fmt.Sprintf("%d volumes", n))
+	}
+	if n := others + len(layerFiles); n > vm.MaxDevices {
+		what := fmt.Sprintf("the image's %d layers", len(layerFiles))
 		if len(users) > 0 {
-			with = " with " + strings.Join(users, " and ")
+			what += ", " + strings.Join(users, ", ")
 		}
-		return fail, fmt.Errorf("the image has %d layers; runwhp has room for %d%s", len(layerFiles), vm.MaxDevices-others, with)
+		return fail, fmt.Errorf("too many devices: %s, the console and the scratch disk make %d, and runwhp has room for %d", what, n, vm.MaxDevices)
 	}
 	logf("%4d ms  image ready: %d layers", time.Since(start).Milliseconds(), len(layerFiles))
+
+	// Volumes, opened exclusively: a volume is in one container at a time.
+	var volumeDevices []virtio.Device
+	volumes := volume.Open(root)
+	for i, u := range plan.volumes {
+		size := int64(defaultDiskSize)
+		if u.size != "" {
+			if size, err = parseDiskSize(u.size); err != nil {
+				return fail, err
+			}
+		}
+		v, created, err := volumes.Ensure(u.name, size)
+		if err != nil {
+			return fail, err
+		}
+		f, err := disk.Open(v.Disk(), disk.Exclusive)
+		if errors.Is(err, disk.ErrInUse) {
+			return fail, fmt.Errorf("volume %s is in use by another container", v.Name)
+		}
+		if err != nil {
+			return fail, fmt.Errorf("volume %s: %w", v.Name, err)
+		}
+		defer f.Close()
+		fsize, err := f.Size()
+		if err != nil {
+			return fail, err
+		}
+		if created {
+			logf("%4d ms  created volume %s", time.Since(start).Milliseconds(), v.Name)
+		}
+		volumeDevices = append(volumeDevices, &virtio.Blk{File: f, Sectors: uint64(fsize) / 512, Flush: true, Discard: true,
+			Serial: guestspec.VolumeSerial(i)})
+	}
 
 	kernelPath, err := resolveKernel(ctx, root, o, policy)
 	if err != nil {
@@ -330,7 +373,8 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 	spec := guestspec.Spec{
 		Args: config.Args, Env: config.Env, Cwd: config.Cwd, User: config.User,
 		Hostname: hostname, Hosts: network.hosts, Layers: len(layerFiles), Scratch: sr.file != nil,
-		Debug: o.debug, Stdin: o.interactive, TTY: o.tty, Network: network.spec(), Mounts: mounts,
+		Volumes: len(volumeDevices), Debug: o.debug, Stdin: o.interactive, TTY: o.tty, Network: network.spec(),
+		Mounts: plan.mounts,
 	}
 	if o.tty {
 		spec.Rows, spec.Cols, _ = terminalSize(os.Stdout)
@@ -351,7 +395,7 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 
 	// Devices: the console first, then the network device and the shares'
 	// file system if any, then one disk per layer, bottom first, then the
-	// scratch disk.
+	// scratch disk, then the volumes.
 	var stdin io.Reader
 	if o.interactive {
 		stdin = os.Stdin
@@ -389,8 +433,8 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 		nic.Recv = stack.Inject
 		devices = append(devices, nic)
 	}
-	if len(shares) > 0 {
-		fsys, err := hostfs.New(shares, logf)
+	if len(plan.shares) > 0 {
+		fsys, err := hostfs.New(plan.shares, logf)
 		if err != nil {
 			return fail, err
 		}
@@ -418,6 +462,7 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 		devices = append(devices, &virtio.Blk{File: sr.file, Sectors: uint64(scratchSize) / 512, Discard: true,
 			Serial: guestspec.ScratchSerial})
 	}
+	devices = append(devices, volumeDevices...)
 
 	cmdline := baseCmdline + " quiet loglevel=3"
 	if o.debug {

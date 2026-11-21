@@ -174,15 +174,24 @@ func TestExclusive(t *testing.T) {
 	if _, err := Allocated(f.Name()); err != nil {
 		t.Errorf("Allocated while the file is open exclusively: %v", err)
 	}
+	if busy, err := InUse(f.Name()); err != nil || !busy {
+		t.Errorf("InUse of a file open exclusively = %v, %v", busy, err)
+	}
 	if err := os.Remove(f.Name()); err == nil {
 		t.Error("removed a file open exclusively")
 	}
 	f.Close()
+	if busy, err := InUse(f.Name()); err != nil || busy {
+		t.Errorf("InUse of a closed file = %v, %v", busy, err)
+	}
 	g, err := Open(f.Name(), Exclusive)
 	if err != nil {
 		t.Fatalf("reopening after Close: %v", err)
 	}
 	g.Close()
+	if _, err := InUse(f.Name() + ".missing"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("InUse of a missing file: %v", err)
+	}
 }
 
 func TestReadOnlyShared(t *testing.T) {

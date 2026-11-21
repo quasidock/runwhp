@@ -219,9 +219,9 @@ func TestBindSources(t *testing.T) {
 	if !strings.Contains(r.stderr, "does not exist") {
 		t.Errorf("stderr %q", r.stderr)
 	}
-	r = run(t, "-v", "data:/m", alpine, "true")
+	r = run(t, "-v", "C:data:/m", alpine, "true")
 	expect(t, r, "", 125)
-	if !strings.Contains(r.stderr, "named volumes") {
+	if !strings.Contains(r.stderr, "not an absolute Windows path") {
 		t.Errorf("stderr %q", r.stderr)
 	}
 }

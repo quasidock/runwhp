@@ -13,8 +13,10 @@ import (
 const usage = `Usage:
   runwhp run [flags] IMAGE [COMMAND [ARG...]]   run a command in a new container
   runwhp pull IMAGE                             pull an image, and runwhp's kernel, into the local store
+  runwhp volume COMMAND                         create, list, inspect and remove volumes
 
-Run 'runwhp run -h' for the run flags.
+Run 'runwhp run -h' for the run flags, and 'runwhp volume' for the volume
+commands.
 
 The local store is in %LOCALAPPDATA%\runwhp unless RUNWHP_ROOT is set. The
 first run or pull fetches runwhp's kernel into it.
@@ -32,6 +34,8 @@ func realMain(args []string) int {
 		return cmdRun(args[1:])
 	case "pull":
 		return cmdPull(args[1:])
+	case "volume":
+		return cmdVolume(args[1:], os.Stdin, os.Stdout)
 	case "help", "-h", "-help", "--help":
 		fmt.Print(usage)
 		return 0

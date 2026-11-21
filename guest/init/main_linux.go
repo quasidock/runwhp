@@ -135,7 +135,7 @@ func start(begin time.Time) (*outcome, error) {
 	}
 	// After prepareRoot, so the user's own /etc/hosts, say, wins over the
 	// one runwhp writes, and runwhp never writes into a host file.
-	if err := mountShares(spec.Mounts, user); err != nil {
+	if err := mountAll(&spec, user); err != nil {
 		return out, err
 	}
 	if err := enterRoot(); err != nil {
