@@ -310,7 +310,13 @@ func TestReopenStdio(t *testing.T) {
 // delivers as os.Interrupt like Ctrl+C.
 func interruptible(t *testing.T, stdout *syncBuffer, stderr *bytes.Buffer, args ...string) (*exec.Cmd, func()) {
 	t.Helper()
-	cmd := exec.Command(runwhp(t), runArgs(args...)...)
+	return interruptibleArgv(t, stdout, stderr, runArgs(args...))
+}
+
+// interruptibleArgv is interruptible for runwhp with exactly argv.
+func interruptibleArgv(t *testing.T, stdout *syncBuffer, stderr *bytes.Buffer, argv []string) (*exec.Cmd, func()) {
+	t.Helper()
+	cmd := exec.Command(runwhp(t), argv...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	if err := cmd.Start(); err != nil {

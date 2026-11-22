@@ -7,6 +7,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -23,9 +24,16 @@ type pty struct {
 	proc   windows.Handle
 	output syncBuffer
 	done   chan struct{} // closed when the console's output ends
+	closed sync.Once
 }
 
 func startPTY(t *testing.T, rows, cols int16, args ...string) *pty {
+	t.Helper()
+	return startPTYArgv(t, rows, cols, runArgs(args...))
+}
+
+// startPTYArgv runs runwhp with exactly argv on a pseudo console.
+func startPTYArgv(t *testing.T, rows, cols int16, argv []string) *pty {
 	t.Helper()
 	exe := runwhp(t)
 	// A process started in the background often has Ctrl+C turned off, and
@@ -66,7 +74,7 @@ func startPTY(t *testing.T, rows, cols int16, args ...string) *pty {
 	// than the pipes go test gave us.
 	si.Flags = windows.STARTF_USESTDHANDLES
 	cmdline := syscall.EscapeArg(exe)
-	for _, a := range runArgs(args...) {
+	for _, a := range argv {
 		cmdline += " " + syscall.EscapeArg(a)
 	}
 	var pi windows.ProcessInformation
@@ -112,13 +120,17 @@ func (p *pty) wait() int {
 	return int(code)
 }
 
+// close may be called more than once: a second ClosePseudoConsole of the
+// same console corrupts the heap.
 func (p *pty) close() {
-	windows.TerminateProcess(p.proc, 1)
-	p.keys.Close()
-	// ClosePseudoConsole waits until its output has been read.
-	windows.ClosePseudoConsole(p.hpc)
-	<-p.done
-	windows.CloseHandle(p.proc)
+	p.closed.Do(func() {
+		windows.TerminateProcess(p.proc, 1)
+		p.keys.Close()
+		// ClosePseudoConsole waits until its output has been read.
+		windows.ClosePseudoConsole(p.hpc)
+		<-p.done
+		windows.CloseHandle(p.proc)
+	})
 }
 
 func TestTTY(t *testing.T) {

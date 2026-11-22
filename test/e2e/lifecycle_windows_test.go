@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/quasidock/runwhp/internal/ext4"
 )
@@ -23,7 +24,11 @@ func newName(t *testing.T) string {
 	var b [6]byte
 	rand.Read(b[:])
 	name := "e2e-" + hex.EncodeToString(b[:])
-	t.Cleanup(func() { cli(t, "delete", "-f", name) })
+	t.Cleanup(func() {
+		if r := cli(t, "delete", "-f", name); r.code != 0 && !strings.Contains(r.stderr, "no such container") {
+			t.Errorf("deleting %s after the test: %+v", name, r)
+		}
+	})
 	return name
 }
 
@@ -69,7 +74,15 @@ func stateOf(t *testing.T, ref string) stateJSON {
 // layerState reads the ext4 state of a stopped container's writable layer.
 func layerState(t *testing.T, s stateJSON) ext4.State {
 	t.Helper()
-	f, err := os.Open(filepath.Join(s.Bundle, "rw.ext4"))
+	// A runwhp that was killed closes its handles in no set order: its lock
+	// may be free while it still holds the disk, for a moment.
+	var f *os.File
+	var err error
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if f, err = os.Open(filepath.Join(s.Bundle, "rw.ext4")); err == nil || time.Now().After(deadline) {
+			break
+		}
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

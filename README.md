@@ -9,7 +9,9 @@ HCS, and no administrator rights at run time.
 
 `runwhp` is experimental. It runs Linux containers from registry images,
 interactively or not, with a network, the host's files and volumes of their
-own, on a kernel of its own and on several processors.
+own, on a kernel of its own and on several processors. Containers are kept
+after they stop, can run in the background, and can be started again,
+stopped, signalled and run more commands in.
 
 See [status](docs/status.md) for details.
 
@@ -81,8 +83,24 @@ Get-Content data.csv | .\out\runwhp.exe run -i alpine:3.20 wc -l
 .\out\runwhp.exe pull debian:12
 ```
 
+Containers that outlive the command, in the background:
+
+```powershell
+.\out\runwhp.exe run -d --name web -p 8080:80 nginx:alpine
+.\out\runwhp.exe logs -f web
+.\out\runwhp.exe exec -it web sh
+.\out\runwhp.exe stop web
+.\out\runwhp.exe start web
+.\out\runwhp.exe list
+.\out\runwhp.exe delete -f web
+.\out\runwhp.exe run --rm alpine:3.20 echo gone afterwards
+```
+
 | Flag | Default | Meaning |
 | --- | --- | --- |
+| `-d`, `--detach` | off | Run the container in the background and print its ID; see [Containers](#containers) |
+| `--rm` | off | Remove the container when it stops. Without it, the container is kept, with its writable layer, until `runwhp delete` |
+| `--name` | none | Name the container, as well as its 64-digit ID. Names are case-insensitive |
 | `-i`, `--interactive` | off | Pass stdin to the container. Without it, the container reads `/dev/null` |
 | `-t`, `--tty` | off | Run the container on a pseudo-terminal of the console's size, with stderr merged into stdout. With `-i`, stdin must be a console, and keys go to the container raw. `-it` works as a shorthand |
 | `--entrypoint` | image's | Replace the entrypoint; `""` removes it. Also drops the image's command, as in Docker |
@@ -91,11 +109,11 @@ Get-Content data.csv | .\out\runwhp.exe run -i alpine:3.20 wc -l
 | `-u`, `--user` | image's, else root | `name`, `uid`, `name:group` or `uid:gid`, resolved against the image's `/etc/passwd` and `/etc/group` |
 | `-m`, `--memory` | `512m` | Guest RAM, `128m` to `3328m` |
 | `--cpus` | the host's, up to 4 | vCPUs, a whole number up to the host's logical processors, at most 64. Unlike Docker's `--cpus`, it counts processors rather than setting a quota, so `1.5` is refused. Builds size their jobs by `nproc`, so raise `-m` with it |
-| `--hostname` | random | Hostname, also written to `/etc/hostname` and `/etc/hosts` |
+| `--hostname` | the ID's first 12 digits | Hostname, also in `/etc/hostname` and `/etc/hosts` |
 | `--network`, `--net` | `user` | `user` gives the container a network through runwhp; `none` leaves it only loopback |
 | `-p`, `--publish` | | `[IP:]HOSTPORT:PORT[/tcp]`: listen on the host and forward to the container's TCP port; repeatable. IP defaults to `127.0.0.1` |
 | `--add-host` | | `NAME:IP` or `NAME=IP`, added to `/etc/hosts`; repeatable. `NAME:host-gateway` also lets the container reach the host's `127.0.0.1` at that name |
-| `-v`, `--volume` | | `HOSTPATH:PATH[:ro]`: bind a host directory or file at `PATH`; a missing `HOSTPATH` is made as a directory. `NAME:PATH[:ro][,nocopy]`: mount the named volume `NAME`, made if missing. `PATH` alone: an anonymous volume, gone after the run. Repeatable. See [Host files](#host-files) and [Volumes](#volumes) |
+| `-v`, `--volume` | | `HOSTPATH:PATH[:ro]`: bind a host directory or file at `PATH`; a missing `HOSTPATH` is made as a directory. `NAME:PATH[:ro][,nocopy]`: mount the named volume `NAME`, made if missing. `PATH` alone: an anonymous volume, removed with the container. Repeatable. See [Host files](#host-files) and [Volumes](#volumes) |
 | `--mount` | | Docker's long form of `-v` and `--tmpfs`: `type=bind,source=HOSTPATH,target=PATH[,readonly]`, where `HOSTPATH` must exist; `type=volume[,source=NAME],target=PATH[,readonly][,volume-nocopy][,volume-opt=size=SIZE]`; `type=tmpfs,target=PATH[,tmpfs-size=SIZE][,tmpfs-mode=MODE]` |
 | `--tmpfs` | | `PATH[:OPTIONS]`: mount a tmpfs, `noexec`, `nosuid` and `nodev` unless the options say `exec`, `suid` or `dev`; repeatable. See [Volumes](#volumes) |
 | `--storage-opt` | `size=64g` | `size=SIZE`: how large the container's writable layer may grow, `1g` to `16t`. See [Storage](#storage) |
@@ -133,6 +151,82 @@ default Git Bash window, stdin is a pipe rather than a console, so `-it`
 fails with "the input device is not a TTY"; prefix the command with
 `winpty`. Pipes from MSYS programs into native ones are slow (about 8 MB/s
 on the test machine), and stdin through `-i` is no exception.
+
+### Containers
+
+Every `runwhp run` makes a container: a record in the store's `containers`
+directory holding its configuration, resolved when it was made, its state,
+its name if it has one, and its writable layer. A container is named by
+its ID, its name, or any unique prefix of its ID.
+
+| Command | |
+| --- | --- |
+| `create [run flags] IMAGE [COMMAND...]` | Make a container and boot it, but hold its process until `start`; prints its ID |
+| `start CONTAINER...` | Start a created container's process, or a stopped container again, in a new VM on the writable layer it left. A running one is left as it is |
+| `stop [-t SECONDS] CONTAINER...` | Send the image's stop signal, SIGTERM unless it names another, then SIGKILL after the timeout, 10 s by default |
+| `restart [-t SECONDS] CONTAINER...` | `stop`, then `start` |
+| `kill [-a] CONTAINER [SIGNAL]` | Send a signal, by name or number, to the container's process, or with `-a` to every process in it. The default is SIGTERM, as with runc; Docker's `kill` sends SIGKILL. A created container ends without starting |
+| `exec [-i] [-t] [-d] [-e] [-w] [-u] CONTAINER COMMAND...` | Run another command in a running container |
+| `logs [-f] CONTAINER` | Print the output of a container in the background |
+| `list [-q] [--format table\|json]` | List containers, newest first |
+| `state CONTAINER` | Describe a container as JSON: runc's fields (`ociVersion`, `id`, `status`, `pid`, `bundle`), then runwhp's own |
+| `delete [-f] CONTAINER...` | Remove containers, with their writable layers, logs and anonymous volumes. A running one needs `-f`, which kills it first |
+| `rename CONTAINER NAME` | Rename a container |
+
+States are runc's: `creating`, `created`, `running` and `stopped`. Unlike
+with runc, a stopped container can be started again.
+
+**Who runs a container.** A container has a VM only while a runwhp process
+runs it, holding the record's `lock` file exclusively; whether that file is
+held is how other runwhps tell whether it runs. A foreground `run` runs its
+own container, which ends with its terminal, as before. `create`, `run -d`
+and `start` hand the container to a runwhp of its own, started detached
+from the console, in a process group of its own and, where the caller's
+job object allows, out of that job, so closing the terminal or the IDE
+leaves it running. A session whose job does not let its processes leave
+it, as some ssh servers and CI runners make, gets a warning, and its
+containers end with it. No container outlives the logon session: logging
+off ends them as killing their runwhp would. A container whose runwhp died
+is recorded as stopped, with exit code 255, by whoever looks next; its
+writable layer replays its journal when it starts again, keeping what the
+container had synced. The runwhp running a container, in the foreground or
+not, serves a named pipe, for this user only, on which `start`, `stop`,
+`kill` and `exec` reach it.
+
+**Output.** A container in the background writes its output to the files
+the command that started it had for stdout and stderr, if they are files
+(`runwhp run -d ... > out.log`), and otherwise to its log, which `logs`
+prints, stdout to stdout and stderr to stderr. Pipes are not handed over:
+capturing one, as `id=$(runwhp run -d ...)` does, would then wait for the
+container to end. With `-i`, its stdin is the caller's if that is a file
+or a pipe; a console is refused, since runwhp cannot attach one yet. With
+`-t` and no console, its terminal is 24 by 80. A log grows until the
+container is deleted. runwhp's own messages about a container in the
+background go to `runwhp.log` beside the log.
+
+**What start uses.** A container's configuration is resolved when it is
+made: the image's layers, the command and environment, `-e KEY` values,
+bind sources as absolute paths, volumes, ports, the hostname, and a kernel
+named with `--kernel` or `RUNWHP_KERNEL`. `start` uses that, not the
+caller's directory or environment, and never pulls: a layer missing from
+the store fails it. It binds the published ports again, failing if one is
+taken, and makes missing bind directories again, as `-v` did. runwhp's own
+kernel and `runwhp-init` are those of the runwhp that starts it. A created
+container holds its RAM, volumes and ports until it is started or deleted.
+
+**exec.** `runwhp exec` runs a command in a running container, with the
+container's environment, working directory and user unless `-e`, `-w` or
+`-u` say otherwise; the working directory must exist. `-i`, `-t` and Ctrl+C
+work as with `run`, and a second Ctrl+C kills the command; `-d` starts it
+and returns. The command reaches a server in `runwhp-init` over a virtio
+socket device, which nothing inside the container can connect to. When the
+container's process exits, everything exec started is killed, and `exec`
+exits with 137.
+
+**Removing.** `--rm` removes a container when it stops, however it stops,
+and such a container cannot be started again. Other containers stay until
+`delete`; in Git Bash, `runwhp delete $(runwhp list -q)` removes every one
+that is not running.
 
 ### Networking
 
@@ -223,24 +317,34 @@ one. File locks are kept in the guest and are invisible to host programs.
 
 ### Storage
 
-Whatever the container writes outside its mounts goes to its writable layer,
-which lives on a scratch disk: a sparse file in the store's `scratch`
-directory holding an ext4 file system that runwhp makes for the run and
-deletes when the run ends. Windows deletes it even when runwhp is killed,
-and the next run removes one the machine stopped under.
+Whatever the container writes outside its mounts goes to its writable layer:
+a sparse file holding an ext4 file system, `rw.ext4` in the container's
+directory, made when the container first boots and kept until it is
+deleted. With `--rm` it is a scratch disk instead, in the store's `scratch`
+directory, made for the run and deleted when it ends; Windows deletes it
+even when runwhp is killed, and the next run removes one the machine
+stopped under.
 
-- The writable layer is limited by the scratch disk's size, 64 GiB unless
+- The writable layer is limited by its disk's size, 64 GiB unless
   `--storage-opt size=` says otherwise, and by the host's free space, not by
   `--memory`. A full host disk shows in the container as I/O errors.
 - The file takes only what is written. Space the container frees goes back
   to the host during the run: the guest discards the blocks, and runwhp
   punches them out of the file. NTFS does this in 64 KiB units, ReFS in
   clusters.
-- `fsync` in the writable layer returns without waiting for the host's
-  disk, since nothing there outlives the run. Formatting the disk takes
-  about 3 ms, while the kernel loads, and deleting it about 4 ms at exit.
+- A kept writable layer has a journal, and `fsync` in it waits for the
+  host's disk, as it would under Docker. Before the VM resets, init freezes
+  it, as it does each volume, which leaves it clean. A scratch disk has no
+  journal, and `fsync` there returns without waiting for the host's disk,
+  since nothing there outlives the run. Either is formatted in a few ms
+  while the kernel loads; deleting a scratch disk takes about 4 ms at exit.
+- runwhp binds `/etc/hostname`, `/etc/hosts` and `/etc/resolv.conf` over
+  the image's, as Docker does, so they are no part of a container's
+  changes. They can be edited in place, but not replaced: `sed -i` on them
+  fails. A mount of the user's own at one of those paths wins.
 - On a store whose volume has no sparse files, such as FAT or exFAT, runwhp
-  says so and keeps the writable layer in guest memory.
+  says so and keeps the writable layer in guest memory, so a stopped
+  container loses its changes.
 
 ### Volumes
 
@@ -260,7 +364,8 @@ which the container gets as a disk of its own.
 - **One container at a time.** runwhp opens a volume's disk image
   exclusively, so a second container asking for it fails with "volume NAME
   is in use", as does `runwhp volume rm`. One container can mount a volume
-  at several paths.
+  at several paths. `volume rm` and `volume prune` also leave alone a
+  volume that a stopped container mounts, as Docker does.
 - **Kept safe.** The file system has a journal. When the container ends,
   init freezes it, which writes everything back and leaves it clean, before
   the VM resets. A VM stopped at once, by a second Ctrl+C, the 10-second
@@ -275,8 +380,9 @@ which the container gets as a disk of its own.
   `disk.ext4` on a directory.
 
 `-v PATH` alone, or `--mount type=volume` without a source, makes an
-anonymous volume: a directory of the run's own, filled from the image in the
-same way, gone when the run ends. Under a bind mount, as in
+anonymous volume: a directory of the container's own, in its writable
+layer, filled from the image in the same way, and removed with the
+container. Under a bind mount, as in
 `-v .:/app -v /app/node_modules`, it keeps that directory in the container
 rather than on the host.
 
@@ -291,7 +397,7 @@ takes them. What it holds counts against `--memory`.
 | `ls [-q]` | List volumes with their size and what they take on disk |
 | `inspect NAME...` | Describe volumes as JSON, saying whether a container is using them |
 | `rm NAME...` | Remove volumes and all they hold |
-| `prune -a [-f]` | Remove every volume no running container uses, after asking unless `-f`. Without `-a` it removes nothing: runwhp keeps no anonymous volumes |
+| `prune -a [-f]` | Remove every volume no container uses, after asking unless `-f`. Without `-a` it removes nothing: anonymous volumes go with their containers |
 
 ### Kernel
 
@@ -305,7 +411,7 @@ configuration, [`kernel/runwhp.config`](kernel/runwhp.config), applies over
 | Booting on runwhp's VMM | Hyper-V clock and APIC enlightenments without VMBus, ACPI (which needs PCI support, though runwhp boots with `pci=off`), virtio-mmio, the COM1 console, an uncompressed initramfs |
 | runwhp-init | ext4, overlayfs, tmpfs with xattrs, devtmpfs, virtio block, console and network devices, IPv4 and Unix sockets |
 | Containers | Namespaces, cgroup v2 controllers, seccomp, BPF, IPv6, 32-bit binaries, `binfmt_misc`, FUSE, TUN, veth, bridges, nftables and iptables (both over nftables and legacy) |
-| Later work | Host file sharing: virtio-fs, which bind mounts now use, and vsock and 9p, which nothing uses yet; the virtio balloon with free page reporting |
+| Later work | Host file sharing: virtio-fs, which bind mounts now use, and 9p, which nothing uses yet; vsock, which `runwhp exec` uses; the virtio balloon with free page reporting |
 
 CPU vulnerability mitigations stay at upstream's defaults. The kernel is
 LZ4-compressed, which decompresses fastest.
@@ -329,6 +435,11 @@ distro and pass it with the development flag `--module`:
 wsl -e sh -c 'cp /lib/modules/$(uname -r)/kernel/drivers/block/virtio_blk.ko /mnt/c/temp/'
 .\out\runwhp.exe run --kernel 'C:\Program Files\WSL\tools\kernel' --module C:\temp\virtio_blk.ko alpine:3.20 uname -r
 ```
+
+`runwhp exec` needs vsock too, which the WSL kernel also builds as
+modules: pass `vmw_vsock_virtio_transport_common.ko` and
+`vmw_vsock_virtio_transport.ko`, from its `kernel/net/vmw_vsock`, the same
+way.
 
 **Building it.** [`kernel/Dockerfile`](kernel/Dockerfile) builds the kernel
 from kernel.org's tarball, checked against the checksum in kernel.org's
@@ -368,11 +479,15 @@ bzImage.
 1. The image's layers are pulled and each one is converted to an ext4 image
    with `tar2ext4`, with OCI whiteouts turned into overlayfs whiteouts. Layers
    are cached by diffID and verified against it; empty layers are skipped.
-2. runwhp loads its kernel from the store, fetching it first if this is the
-   first run, and writes an initramfs holding `runwhp-init` and a JSON spec
-   of the process. Meanwhile it makes the run's scratch disk: a sparse file
-   in the store, formatted as an empty ext4 file system by runwhp itself,
-   which writes a few hundred KiB of it.
+2. runwhp records the container in the store, takes its lock and serves
+   its pipe; for `create`, `run -d` and `start`, a runwhp of its own does
+   this and what follows, detached from the caller. It loads its kernel from
+   the store, fetching it first if this is the first run, and writes an
+   initramfs holding `runwhp-init` and a JSON spec of the process.
+   Meanwhile it opens the writable layer: the container's `rw.ext4`, made
+   the first time with a journal, or with `--rm` a scratch disk made for
+   the run. Either is a sparse file holding an ext4 file system runwhp
+   formats itself, writing a few hundred KiB of it.
 3. The guest gets the vCPUs `--cpus` asks for, each run by a thread of its
    own. runwhp starts only the first. The others wait until the guest's
    kernel starts them with INIT and SIPI, which the hypervisor's local APIC
@@ -382,10 +497,10 @@ bzImage.
    The I/O APIC sends each device's interrupt to the CPU the guest's kernel
    chose for it.
 4. The guest gets one multiport virtio console, with ports named `stdout`,
-   `stderr`, `stdin` and `control`; a virtio network device, unless
-   `--network none`; a virtio-fs device, with bind mounts; one read-only
-   virtio-blk disk per layer; the scratch disk; and one disk per named
-   volume. Each disk's
+   `stderr`, `stdin` and `control`; a virtio socket device; a virtio
+   network device, unless `--network none`; a virtio-fs device, with bind
+   mounts; one read-only virtio-blk disk per layer; the writable layer; and
+   one disk per named volume. Each disk's
    serial number names it, so init does not depend on probe order. The vCPU
    that submits disk requests serves the first itself, without holding the
    device, and goroutines serve any others, up to 16 at a time per disk,
@@ -409,28 +524,41 @@ bzImage.
    at a time, through Windows' native API, and complete in whatever order
    they finish. A read or write carries up to 512 KiB.
 7. `runwhp-init` mounts the layers under an overlay whose upper layer is on
-   the scratch disk,
-   adds `/proc`, `/sys`, a minimal `/dev`, a hostname and `/etc/hosts`,
-   configures `eth0` and `/etc/resolv.conf` when there is a network,
-   resolves the container's user, mounts the virtio-fs device, tells it who
-   owns host files without an owner, mounts each volume's file system, and
-   fills new volumes from the image. Then, parents first, it binds each
-   share, each volume's `_data` and each anonymous volume onto its target,
-   and mounts each tmpfs. It moves the overlay over the initramfs as the
-   root, as `switch_root` does, which leaves the virtio-fs root and the
-   volumes' file systems out of the container's reach, and runs the process
-   in it. The process's stdin, stdout and stderr are
+   the writable layer, adds `/proc`, `/sys`, a minimal `/dev` and a
+   hostname, configures `eth0` when there is a network, resolves the
+   container's user, mounts the virtio-fs device, tells it who owns host
+   files without an owner, mounts each volume's file system, and fills new
+   volumes from the image. Then, parents first, it binds each share, each
+   volume's `_data` and each anonymous volume onto its target, mounts each
+   tmpfs, and binds its own `/etc/hostname`, `/etc/hosts` and, with a
+   network, `/etc/resolv.conf` over the image's. It moves the overlay over
+   the initramfs as the root, as `switch_root` does, which leaves the
+   virtio-fs root and the volumes' file systems out of the container's
+   reach. For `create` it then says it is ready and waits to be started.
+   It runs the process in the root, and starts serving `runwhp exec`. The process's stdin, stdout and stderr are
    pipes, or with `-t` a pseudo-terminal from the container's own devpts,
    and init relays them to and from the ports. A port can be open only once
    at a time, so handing the process the ports themselves would break
    `/dev/stdout` and similar paths.
-8. The `control` port carries JSON lines both ways: signals and terminal
-   sizes from the host, and the exit status from init. When the process
-   exits, init kills whatever is left, waits for the last output to reach
-   the ports, writes the status, and resets the machine, which ends the VMM.
-   First it freezes each volume's file system, which writes it back and
-   empties its journal, and writes back the bind mounts' file system, but not
-   the scratch disk's, which is about to be thrown away.
+8. The `control` port carries JSON lines both ways: signals, terminal sizes
+   and the order to start from the host; from init, when the container is
+   ready, when the process has started and how it ended. When the process
+   exits, init kills whatever is left, `runwhp exec`'s processes included,
+   waits for the last output to reach the ports, reports how it ended, and
+   resets the machine, which ends the VMM. First it freezes each volume's
+   file system, and a kept writable layer's, which writes it back and
+   empties its journal, and writes back the bind mounts' file system, but
+   not a scratch disk's, which is about to be thrown away.
+9. `runwhp exec` asks the container's runwhp, on its pipe, to connect it
+   to init's exec server, on vsock port 1024; runwhp dials it over the
+   virtio socket device and passes bytes both ways without reading them.
+   One connection carries the request, signals, terminal sizes and how the
+   command ended, and one more each stream: stdin, stdout and stderr, or
+   stdout alone with a terminal. Each connection has its own flow control,
+   so a slow reader holds up only its own stream. Init runs the command
+   with the container's environment, working directory and user unless
+   told otherwise; a reaper of its own hands every exit status to whoever
+   started the process.
 
 ### Code layout
 
@@ -440,12 +568,13 @@ bzImage.
 | [`internal/whp`](internal/whp) | Bindings for `WinHvPlatform.dll` and `WinHvEmulation.dll` |
 | [`internal/vm`](internal/vm) | Partition setup, vCPU loops, processor topology, serial port, RTC stub, I/O APIC |
 | [`internal/boot`](internal/boot) | Kernel loader, page tables, ACPI tables, initramfs builder. Builds on any OS |
-| [`internal/virtio`](internal/virtio) | virtio-mmio transport, block device, multiport console, network device, file system device. Builds on any OS |
+| [`internal/virtio`](internal/virtio) | virtio-mmio transport, block device, multiport console, network device, file system device, socket device. Builds on any OS |
 | [`internal/netstack`](internal/netstack) | The host end of the container's network: gVisor's netstack, TCP and UDP forwarding, DNS, published ports. Builds on any OS |
 | [`internal/fuse`](internal/fuse) | The FUSE protocol as virtio-fs speaks it, served from a file system interface. Builds on any OS |
 | [`internal/disk`](internal/disk) | The files behind virtual disks: overlapped I/O from many goroutines, sparse files, freeing ranges, exclusive and delete-on-close opens |
 | [`internal/ext4`](internal/ext4) | Makes empty ext4 file systems as mke2fs would, and reads back whether one was left clean. Builds on any OS |
 | [`internal/volume`](internal/volume) | Named volumes in the store: names, making, listing and removing them |
+| [`internal/container`](internal/container) | Containers in the store: records, names, locks, state, logs, and the pipe of the runwhp running one |
 | [`internal/hostfs`](internal/hostfs) | The host end of bind mounts: Windows files served as that file system, with WSL's metadata |
 | [`internal/image`](internal/image), [`internal/layer`](internal/layer) | Registry pulls, image records, layer conversion and cache |
 | [`internal/kernel`](internal/kernel) | The kernel artifact's format, the pinned build, and fetching it into the store |
@@ -480,13 +609,14 @@ container's supervisor, with no daemon.
 | Interrupts | Hypervisor's local APIC plus an emulated 64-pin I/O APIC | Done, edge-triggered only |
 | Processors | One thread per vCPU; the guest starts the others through the hypervisor's local APIC; topology described in CPUID | Done, up to 64 |
 | Device discovery | Hardware-reduced ACPI with a generated DSDT | Done |
-| Root filesystem | One read-only ext4 image per layer on virtio-blk, overlayfs in the guest, writable scratch disk | Done; the scratch disk is a sparse file, formatted for each run |
+| Root filesystem | One read-only ext4 image per layer on virtio-blk, overlayfs in the guest, writable layer on a disk of its own | Done; the writable layer is a sparse file, kept with the container, or with `--rm` formatted for each run |
 | Layer conversion | `tar2ext4`, cached per layer digest | Done |
 | Container I/O | Multiport virtio console with named ports for stdout, stderr, stdin and control; pipes or a pty in the guest | Done, including `-i`, `-t`, resize and signals |
-| Guest agent | Tiny init as PID 1 that mounts the overlay and execs the process, instead of hcsshim's GCS plus runc | Done (`runwhp-init`) |
+| Guest agent | Tiny init as PID 1 that mounts the overlay and execs the process, instead of hcsshim's GCS plus runc | Done (`runwhp-init`), with an exec server |
+| Host to guest | Console ports for the main process; a virtio socket device for further connections | Done: `runwhp exec` uses vsock |
 | Bind mounts and volumes | virtio-fs, with a FUSE server in Go serving Windows files and keeping Unix metadata as WSL does; volumes as journaled ext4 disk images on virtio-blk | Done; a volume is used by one container at a time |
 | Networking | User-mode network stack in the VMM (gVisor netstack); published ports are loopback listeners | Done, IPv4 only, TCP ports only |
-| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | `run` and `pull` only |
+| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | Done over runwhp's own images, plus `run`, `list`, `stop`, `restart`, `rename` and `logs`; no OCI bundles |
 | Kernel | Our own build with virtio drivers built in, shipped as a signed OCI artifact | Done: Linux 6.18 LTS on ghcr.io, pinned by digest rather than signed |
 
 ### Out of scope for now
@@ -630,8 +760,9 @@ starts, which covers decompressing the kernel and early memory setup.
 ## Open questions
 
 - Is `runwhp` a general OCI runtime that containerd or nerdctl can drive, or a
-  backend used only by Quasidock? This decides how much of the runc command
-  line is worth implementing.
+  backend used only by Quasidock? runwhp has runc's verbs now, over its own
+  images; whether it should also take OCI bundles, a `config.json` and a
+  root file system on Windows, as a shim would hand it, is still open.
 - Is a one-time administrator step acceptable on machines where the hypervisor
   is off, or must there be a fallback that needs none?
 - virtio-mmio with generated ACPI, as spiked, or virtio over PCI with MSI-X,

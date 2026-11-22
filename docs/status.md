@@ -1,5 +1,15 @@
 # Status
 
+- **Iteration 8** (2026-11-22): containers outlive the command that made
+  them. Every run keeps its container, with its writable layer, unless
+  `--rm`; `run -d` and `create` run one in the background, in a runwhp of
+  its own that survives closing the terminal; and runc's verbs, `start`,
+  `kill`, `state`, `list`, `delete` and `exec`, with `stop`, `restart`,
+  `rename` and `logs`, work on them by ID, prefix or name. A stopped
+  container starts again in a new VM on its journaled writable layer.
+  `exec` runs further commands over a new virtio socket device. See
+  [Containers](../README.md#containers) and
+  [Iteration 8 results](#iteration-8-results).
 - **Iteration 7** (2026-11-21): containers write to disk. The writable
   layer lives on a sparse ext4 scratch disk made for each run instead of in
   guest RAM, so a 256 MiB guest writes gigabytes. Named volumes
@@ -7,157 +17,48 @@
   ext4 disk images, filled from the image as Docker fills them, and
   anonymous volumes and `--tmpfs` work too. A Go build cache in a volume
   takes a build of runwhp from 21 s to 3 s, and a run costs about 15 ms
-  more, plus 10-20 ms per volume. See [Storage](#storage),
-  [Volumes](#volumes) and [Iteration 7 results](#iteration-7-results).
+  more, plus 10-20 ms per volume. See [Storage](../README.md#storage),
+  [Volumes](../README.md#volumes) and [Iteration 7 results](#iteration-7-results).
 - **Iteration 6** (2026-11-21): containers get more than one vCPU: the
   host's logical processors, up to 4, unless `--cpus` asks for more, up to
   64. The guest sees them as cores of one processor sharing its cache, so
   its scheduler spreads work over all of them. A cold `go build` of runwhp
   over bind mounts takes 18 s with 16 vCPUs, as long as on Windows itself,
   against 63 s with one, and starting 16 costs about 50 ms. See
-  [Usage](#usage) and [Iteration 6 results](#iteration-6-results).
+  [Usage](../README.md#usage) and [Iteration 6 results](#iteration-6-results).
 - **Iteration 5** (2026-11-21): `-v` and `--mount` bind host directories and
   files into the container. runwhp serves them itself over virtio-fs, and
   keeps the owners, modes, symlinks and special files the container makes in
   the format WSL uses, so WSL sees them the same way. See
-  [Host files](#host-files) and [Iteration 5 results](#iteration-5-results).
+  [Host files](../README.md#host-files) and [Iteration 5 results](#iteration-5-results).
 - **Iteration 4** (2026-11-20): runwhp boots its own kernel, Linux 6.18 with
   everything it needs built in, fetched once from ghcr.io and pinned by
   digest. WSL is no longer needed, nor is copying a driver out of it, and
   `run alpine:3.20 true` takes under 300 ms instead of over 700. See
-  [Kernel](#kernel) and [Iteration 4 results](#iteration-4-results).
+  [Kernel](../README.md#kernel) and [Iteration 4 results](#iteration-4-results).
 - **Iteration 3** (2026-11-20): containers have a network. Outbound TCP and
   UDP leave through the host's own sockets, names resolve through the host's
   resolver, `-p` publishes container ports on the host, and
   `--add-host NAME:host-gateway` reaches services on the host's loopback. It
-  needs no elevation and no new kernel module. See [Networking](#networking)
+  needs no elevation and no new kernel module. See [Networking](../README.md#networking)
   and [Iteration 3 results](#iteration-3-results).
 - **Iteration 2** (2026-11-20): `-i` passes stdin to the container with a real
   end of file, `-t` gives it a pseudo-terminal that follows the console's size,
   and Ctrl+C reaches the container as SIGINT instead of killing the VM.
   Container output no longer runs on the vCPU thread, so a slow reader stalls
-  only its own stream. See [Usage](#usage) and
+  only its own stream. See [Usage](../README.md#usage) and
   [Iteration 2 results](#iteration-2-results).
 - **Iteration 1** (2026-11-20): `runwhp run IMAGE [COMMAND...]` pulls an image,
   converts its layers to ext4, boots one VM, runs the entrypoint and command
   with the image's environment, working directory and user, sends stdout and
   stderr to the host separately, and exits with the container's exit code.
-  See [Usage](#usage) and [Iteration 1 results](#iteration-1-results).
+  See [Usage](../README.md#usage) and [Iteration 1 results](#iteration-1-results).
 - **Proven by a spike** (2026-11-17): an unelevated Go program boots a Linux
-  kernel on WHP. See [Boot spike](#boot-spike).
+  kernel on WHP. See [Boot spike](../README.md#boot-spike).
 - **Proposed, not yet agreed**: the rest of the architecture in
-  [Proposed design](#proposed-design).
-- **Not started**: the runc-style lifecycle commands.
-
- **On AMD Zen, 6.18 reads the FCH at `0xfed80000`** to report why the
-  machine last reset. The VMM ignores the unbacked page and the kernel
-  carries on.
-- **A chrooted process cannot create user namespaces.** The kernel refuses
-  `unshare(CLONE_NEWUSER)` when the caller's root is not its mount
-  namespace's root, and `pivot_root` fails the same way, so container tools
-  inside the container broke. runwhp-init now makes the overlay the real
-  root, as `switch_root` does, instead of starting the process in a chroot.
-- **LZ4 boots fastest**, even though it makes the largest kernel; see
-  [Iteration 4 results](#iteration-4-results).
-- **A missing virtio shared memory region must read as length -1.** The WSL
-  kernel, built with FUSE DAX, asks a virtio-fs device for its DAX window.
-  The transport answered 0, so the kernel tried to reserve an empty region at
-  address 0, failed with EBUSY, and dropped the device. runwhp's kernel has
-  no DAX and never asked.
-- **NT checks the alignment of what it fills in.** A Go byte array has none,
-  and `NtQueryInformationFile` then fails with
-  `STATUS_DATATYPE_MISALIGNMENT`, which at first looked like a file system
-  without WSL's metadata. Every buffer runwhp hands to NT is now 8-byte
-  aligned.
-- **ReFS file ids are 128 bits.** The 64-bit id a stat reports is a packed
-  form, which matches what `FILE_ID_BOTH_DIR_INFO` listings report, but not
-  the 128-bit ids of `FILE_ID_EXTD_DIR_INFO` listings, whose low halves are
-  small and repeat across directories.
-- **An unelevated process can do what WSL does.** It can set WSL's reparse
-  points and extended attributes, and delete and rename with POSIX
-  semantics, on NTFS and on ReFS alike.
-- **`NtQueryInformationByName` stats without opening.** On NTFS it is five
-  times faster than an open, a query and a close. It does not follow a link,
-  and with `FileStatLxInformation` it returns WSL's metadata too.
-- **WHP starts secondary processors itself.** With the local APIC emulated
-  by the hypervisor, every vCPU but the first starts out suspended: it
-  waits inside `WHvRunVirtualProcessor` until the guest sends it INIT and
-  SIPI, then starts in the guest's real-mode trampoline, all without an
-  exit to the VMM. runwhp sets `StartupSuspend` in
-  `WHvRegisterInternalActivityState` all the same, rather than rely on
-  that. Taking a CPU offline and back works the same way. Each vCPU's APIC
-  id is its index.
-- **WHP leaves the processor topology to the VMM.** It answers CPUID's
-  topology leaves (0xB, the core count in 0x80000008, and the sharing of
-  the L3 cache) as if every vCPU were a package of its own. Linux then gave
-  each CPU a last-level cache to itself, and each secondary CPU calibrated
-  its delay loop from scratch, because it had no sibling to copy it from:
-  `calibrate_delay_direct()` failed under the hypervisor, and 15 CPUs took
-  1.24 s to come up. `WHvPartitionPropertyCodeCpuidResultList2` now
-  describes one package of single-threaded cores sharing the L3; it takes
-  per-VP entries only once the VPs exist, and fails `WHvSetupPartition`
-  with `HV_STATUS_INVALID_VP_INDEX` before. 16 CPUs come up in 12 ms.
-- **Hyper-V's paravirtual TLB flushes and IPIs bring nothing measurable
-  here.** Asked for `TbFlushHypercalls`, `SyntheticClusterIpi` and
-  `ExtendedProcessorMasks`, WHP recommends them to the guest, and Linux
-  switches to hypercalls for remote TLB flushes and IPIs. But the build and
-  the hashes above ran no faster, compared run for run, so runwhp leaves
-  them off.
-- **Halted processors never exit.** With the hypervisor's local APIC,
-  `hlt` does not exit to the VMM even with interrupts disabled, so the VMM
-  cannot tell a guest that halted for good, as after `halt -f`, from an
-  idle one.
-- **hcsshim's `tar2ext4` cannot make a writable disk.** Every file system it
-  writes is marked read-only (`RO_COMPAT_READONLY`), has no journal, uses
-  `sparse_super2`, which online resize refuses, and holds only as many
-  inodes as its content needs: 16 per group when empty. runwhp formats its
-  writable disks itself, as mke2fs would, and `e2fsck -fn` passes them.
-- **A new ext4 file system is mostly holes.** With group descriptor
-  checksums, groups can be marked as having uninitialized bitmaps and
-  zeroed inode tables, and the kernel works them out instead of reading
-  them; since holes in a sparse file read as zeros, that is true of every
-  inode table. Formatting 64 GiB writes 373 KiB. Without the zeroed flag the
-  kernel's lazy init would write 1 GiB of inode tables.
-- **`os.File` runs positional I/O one request at a time on Windows.** Its
-  `ReadAt` and `WriteAt` hold a lock for the whole call, and a handle opened
-  for synchronous I/O makes Windows serialize requests on it as well. With
-  an overlapped handle and an event per request, four goroutines read
-  cached 4 KiB blocks 1.5 times as fast as one, where `os.File` gets
-  1.6 times slower.
-- **NTFS gives a sparse file's space back in 64 KiB units, ReFS per
-  cluster.** `FSCTL_SET_ZERO_DATA` on a 4 KiB range of a sparse file on NTFS
-  frees nothing; on ReFS, with 4 KiB clusters, it frees the range. NTFS also
-  allocates 64 KiB at a time, so a new 64 GiB volume, whose metadata is
-  scattered over a few dozen places, takes about 3 MiB there. runwhp asks
-  the guest to discard in 64 KiB units.
-- **Deleting a sparse file takes about 4 ms** on both NTFS and ReFS, even
-  when little of it was written: most of what the scratch disk adds to a
-  run.
-- **Windows deletes a delete-on-close file when the process holding it is
-  killed**, and will not rename a directory holding a file open without
-  `FILE_SHARE_DELETE`. The first makes a killed runwhp leave no scratch
-  disk behind, the second lets `volume rm` move a volume aside whole or
-  find it in use, with no lock files.
-- **Freezing a journaled ext4 file system leaves it clean** without
-  unmounting it: `FIFREEZE` writes back its data, empties its journal and
-  clears `needs_recovery`, whoever still has it mounted. Unmounting cannot
-  be counted on in a container, which may have copied its mounts into
-  namespaces of its own.
-- **Handing every disk request to another thread made a single reader 40%
-  slower.** The vCPU halts while it waits, and waking it for the
-  completion, as well as the thread that does the I/O, cost about 86 µs
-  per request: reading the Go toolchain out of an image took 5.0-5.3 s
-  instead of 3.4-3.9 s. Workers spinning for the next request made it
-  worse. Serving the first request of each notification on the vCPU that
-  sent it, after letting go of the device's lock, brought one reader back
-  to 3.8-4.1 s and made four readers faster than either.
-- **A freeze waits for three RCU grace periods**, one per level it freezes,
-  and in an idle guest each takes tens of milliseconds: a volume added
-  about 60 ms to a run. Init asks for expedited grace periods just before
-  freezing, once the container is gone, and a volume adds 10-20 ms.
-- **Debian's images already skip most fsyncs.** Their dpkg is configured
-  with `force-unsafe-io`, so overlayfs's `volatile`, which drops the
-  writable layer's syncs, gains only about 5% on `apt-get install`.
+  [Proposed design](../README.md#proposed-design).
+- **Not started**: OCI bundles, for containerd or nerdctl to drive runwhp
+  with; see [Open questions](../README.md#open-questions).
 
 ## Iteration 1 results
 
@@ -342,10 +243,10 @@ guest RAM, is there for scale:
 Large reads and writes go at 200 MB/s to 1 GB/s. Small writes are slow
 because each `write()` is a request to the host, and a request costs about
 100-150 µs: three or four VM exits for the notification and the interrupt,
-which the MMIO fast path in [Known gaps](#known-gaps) would cut, and the
+which the MMIO fast path in [Known gaps](gaps.md) would cut, and the
 Windows call. Writing 20 MB from `dd` took 0.12 s in 64 KiB blocks and
 0.8 s in 4 KiB blocks. FUSE's writeback cache would gather small writes
-together, but at a cost to host edits; see [Open questions](#open-questions).
+together, but at a cost to host edits; see [Open questions](../README.md#open-questions).
 
 A tree of 10,000 small files in 100 directories, one run each. "New
 container" is the first run of a command after a fresh boot, "again" the
@@ -451,7 +352,7 @@ with 1 vCPU, 0.80-0.84 s with 4, and 0.95-0.96 s with 16.
 
 Before runwhp described the topology in CPUID, the 15 secondary CPUs of a
 16-vCPU guest took 1.24 s to come up; they now take 12 ms. See
-[Findings](#findings).
+[Findings](findings.md).
 
 The new tests cover:
 
@@ -529,7 +430,7 @@ Reading the Go toolchain, about 16,000 files and 270 MB, out of
 | four | 1.40-1.53 s | 1.33-1.39 s |
 
 Handing every request to a worker thread, as this iteration's first version
-did, took 5.0-5.3 s for one reader; see [Findings](#findings).
+did, took 5.0-5.3 s for one reader; see [Findings](findings.md).
 
 A cold `GOOS=windows go build ./cmd/runwhp` in `golang:1.26` with `-m 3g`,
 as in iteration 6, reading the source and module cache through read-only
@@ -593,3 +494,95 @@ The new tests cover:
   - all four kinds of mount nested
   - too many volumes for the I/O APIC
   - `volume create`, `ls`, `inspect`, `rm` and `prune`
+
+## Iteration 8 results
+
+Measured on the test machine with runwhp's kernel, from Git Bash, with the
+store on NTFS (`C:`). "Iteration 7" is that iteration's build, run in turn
+with this one.
+
+Keeping a record costs a little at start, over six runs:
+
+| Measurement | Result |
+| --- | --- |
+| `run alpine:3.20 true`, iteration 7 | 262-279 ms |
+| the same with `--rm` | 275-290 ms |
+| the same, kept | 301-315 ms |
+
+Making a record, taking its lock, serving its pipe and writing its state
+take 5-10 ms on NTFS, and the vsock device about 5 ms to boot. A kept
+container also freezes its writable layer before the VM resets, as a volume
+is frozen, which is most of the rest.
+
+The lifecycle commands, over five runs, or three for the slower ones:
+
+| Measurement | Result |
+| --- | --- |
+| `create` | 270-277 ms |
+| `start` of a created container | 43-49 ms |
+| `run -d`, until it returns | 271-285 ms |
+| `stop` of a container that heeds SIGTERM | 131-138 ms |
+| `stop -t 1` of one that ignores it | 1.085-1.090 s |
+| `start` of a stopped container | 261-275 ms |
+| `restart` | 353-380 ms |
+| `delete -f` of a running container | 162-261 ms |
+| `start` after its runwhp was killed, replaying the journal | 348-375 ms, against 258-269 ms after a clean stop |
+| `list` with 100 containers | 58-68 ms |
+
+`exec`, over eight runs for the first and three for the others:
+
+| Measurement | Result |
+| --- | --- |
+| `exec ID true` | 43-47 ms |
+| `exec` writing 200 MB to stdout, sent to the null device | 0.91-1.53 s |
+| `exec -i` reading 200 MB from a file | 1.71-1.76 s |
+| a foreground `run --rm` writing 200 MB to stdout, to a file, boot included | 1.15-2.23 s |
+| a container in the background writing 200 MB to its log, until it has stopped | 1.29-1.82 s |
+
+Output from `exec` goes about as fast as a foreground run's, through the
+vsock device instead of a console port.
+
+The new tests cover:
+
+- the container records, on NTFS and, through `RUNWHP_TEST_DIR`, on ReFS:
+  - making one, finding one by ID, name or prefix, and prefixes that match
+    more than one
+  - names, case-insensitive, taken from goroutines at once, renamed, and
+    left behind by a container that is gone
+  - the state replaced while it is being read
+  - the lock held by another process, and a container whose runwhp died
+  - `list` removing what dead runwhps left, and the volumes containers use
+- the log's framing, frames cut short, and a damaged log
+- signals by name and number
+- the vsock device against a simulated driver, under the race detector:
+  connecting, refused and unanswered; data both ways; flow control both
+  ways, asking for credit, and a guest sending past its credit; small
+  receive buffers; stray packets; closing; connections taking turns; reset
+  and draining
+- init's reaper, in WSL Docker under the race detector: processes that
+  exit at once, killed ones, and sixteen at once
+- the writable layer: a scratch one, a kept one, and a kept one opened again
+- end to end:
+  - kept containers: `list`, `state`, `delete`, names, renames, prefixes,
+    a writable layer clean after a run, and fsync reaching the host only
+    for a kept one
+  - `/etc/hostname`, `/etc/hosts` and `/etc/resolv.conf` bound: edited in
+    place but not replaced, over a volume on `/etc`, and a mount of the
+    user's own winning
+  - `volume rm` refusing a volume a stopped container uses
+  - `--rm` leaving nothing after a run, a hard stop or a killed runwhp
+  - `run -d` with output to the log, to a file after the ID, with `-t`,
+    and with piped stdin; `logs -f`
+  - `create`, `start`, `kill` of a created container, signals by name and
+    number, `kill --all`, `stop` with SIGTERM heeded and ignored, `restart`
+    on the same layer and hostname, `delete -f`, a killed runwhp recorded
+    with 255 and its journal replayed, three `start`s at once, `kill` of a
+    foreground run, a container in the background outliving the pseudo
+    console its `run -d` ran in, and published ports bound again on restart
+  - `exec`: streams, exit codes, `-e`, `-w` and `-u`, missing directories
+    and users, refused in a created or stopped container, 10 MB of stdin,
+    `-d`, four at once with 20 MB each, killed with the container, into a
+    foreground run, Ctrl+Break, and `-it` on a pseudo console with a resize
+
+The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
+the WSL kernel with its vsock modules passed with `--module`.

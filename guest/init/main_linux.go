@@ -146,23 +146,44 @@ func shutdown() {
 
 // loadModules loads the kernel modules the host put in the initramfs.
 func loadModules() {
-	paths, _ := filepath.Glob("/modules/*.ko")
-	for _, path := range paths {
-		f, err := os.Open(path)
-		if err != nil {
-			logf("module %s: %v", path, err)
-			continue
+	pending, _ := filepath.Glob("/modules/*.ko")
+	// A module that needs another fails until that one is loaded, and
+	// names do not sort by dependency, so the failures are tried again
+	// for as long as something loads.
+	for len(pending) > 0 {
+		var failed []string
+		errs := map[string]error{}
+		for _, path := range pending {
+			if err := loadModule(path); err != nil {
+				failed = append(failed, path)
+				errs[path] = err
+			} else {
+				debugf("loaded module %s", filepath.Base(path))
+			}
 		}
-		const sysFinitModule = 313
-		var noParams [1]byte
-		_, _, errno := syscall.Syscall(sysFinitModule, f.Fd(), uintptr(unsafe.Pointer(&noParams[0])), 0)
-		f.Close()
-		if errno != 0 && errno != syscall.EEXIST {
-			logf("module %s: %v", filepath.Base(path), errno)
-		} else {
-			debugf("loaded module %s", filepath.Base(path))
+		if len(failed) == len(pending) {
+			for _, path := range failed {
+				logf("module %s: %v", filepath.Base(path), errs[path])
+			}
+			return
 		}
+		pending = failed
 	}
+}
+
+func loadModule(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	const sysFinitModule = 313
+	var noParams [1]byte
+	_, _, errno := syscall.Syscall(sysFinitModule, f.Fd(), uintptr(unsafe.Pointer(&noParams[0])), 0)
+	if errno != 0 && errno != syscall.EEXIST {
+		return errno
+	}
+	return nil
 }
 
 func readTrimmed(path string) string {

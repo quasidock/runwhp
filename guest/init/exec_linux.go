@@ -4,7 +4,6 @@ package main
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"path"
 	"path/filepath"
@@ -46,19 +45,7 @@ func runProcess(spec *guestspec.Spec, user passwd.User, ports map[string]*os.Fil
 		}
 	}
 
-	env := append([]string(nil), spec.Env...)
-	if lookupEnv(env, "PATH") == "" {
-		env = append(env, "PATH="+defaultPath)
-	}
-	if lookupEnv(env, "HOSTNAME") == "" && spec.Hostname != "" {
-		env = append(env, "HOSTNAME="+spec.Hostname)
-	}
-	if lookupEnv(env, "HOME") == "" {
-		env = append(env, "HOME="+user.Home)
-	}
-	if spec.TTY && lookupEnv(env, "TERM") == "" {
-		env = append(env, "TERM=xterm")
-	}
+	env := processEnv(spec.Env, spec.Hostname, user, spec.TTY)
 
 	cwd := spec.Cwd
 	if cwd == "" {
@@ -93,21 +80,43 @@ func runProcess(spec *guestspec.Spec, user passwd.User, ports map[string]*os.Fil
 		},
 	}
 	debugf("exec %q as %d:%d in %s (stdin %v, tty %v)", spec.Args, user.UID, user.GID, cwd, spec.Stdin, spec.TTY)
-	pid, err := syscall.ForkExec(exe, spec.Args, attr)
+	pid, done, err := children.start(func() (int, error) { return syscall.ForkExec(exe, spec.Args, attr) })
 	streams.started()
 	if err != nil {
 		return guestspec.Status{}, execFailure(spec.Args[0], err)
 	}
 	ctl.start(pid)
 	ctl.send(guestspec.Event{Started: true, Pid: pid})
+	execs := startExecServer(spec)
 
-	status := reap(pid)
+	status := guestspec.Status{Exit: exitCode(<-done)}
+	debugf("process exited with %d", status.Exit)
 	ctl.exited()
 	cleanUp()
+	execs.wait(2 * time.Second)
 	if !streams.wait(2 * time.Second) {
 		logf("output still pending 2 s after the processes ended; reporting without it")
 	}
 	return status, nil
+}
+
+// processEnv is a process's environment: env, with PATH, HOSTNAME, HOME
+// and, with a terminal, TERM set where env does not set them.
+func processEnv(env []string, hostname string, user passwd.User, tty bool) []string {
+	env = append([]string(nil), env...)
+	if lookupEnv(env, "PATH") == "" {
+		env = append(env, "PATH="+defaultPath)
+	}
+	if lookupEnv(env, "HOSTNAME") == "" && hostname != "" {
+		env = append(env, "HOSTNAME="+hostname)
+	}
+	if lookupEnv(env, "HOME") == "" {
+		env = append(env, "HOME="+user.Home)
+	}
+	if tty && lookupEnv(env, "TERM") == "" {
+		env = append(env, "TERM=xterm")
+	}
+	return env
 }
 
 func lookupEnv(env []string, key string) string {
@@ -209,47 +218,11 @@ func execFailure(name string, err error) error {
 	}
 }
 
-// reap waits for the container process, reaping any other children that exit
-// first (init inherits orphans).
-func reap(pid int) guestspec.Status {
-	for {
-		var ws syscall.WaitStatus
-		got, err := syscall.Wait4(-1, &ws, 0, nil)
-		if err == syscall.EINTR {
-			continue
-		}
-		if err != nil {
-			logf("wait: %v", err)
-			return guestspec.Status{Exit: guestspec.ExitRuntime, Error: fmt.Sprintf("waiting for the process: %v", err)}
-		}
-		if got != pid {
-			continue
-		}
-		switch {
-		case ws.Exited():
-			debugf("process exited with %d", ws.ExitStatus())
-			return guestspec.Status{Exit: ws.ExitStatus()}
-		case ws.Signaled():
-			debugf("process killed by %v", ws.Signal())
-			return guestspec.Status{Exit: guestspec.ExitSignalBase + int(ws.Signal())}
-		}
-	}
-}
-
 // cleanUp kills every remaining process and reaps them, so nothing is still
 // writing to the console ports when the status goes out.
 func cleanUp() {
 	syscall.Kill(-1, syscall.SIGKILL)
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		var ws syscall.WaitStatus
-		pid, err := syscall.Wait4(-1, &ws, syscall.WNOHANG, nil)
-		if err == syscall.ECHILD {
-			return
-		}
-		if pid == 0 {
-			time.Sleep(time.Millisecond)
-		}
+	if !children.waitIdle(time.Now().Add(time.Second)) {
+		logf("some processes did not exit after SIGKILL")
 	}
-	logf("some processes did not exit after SIGKILL")
 }

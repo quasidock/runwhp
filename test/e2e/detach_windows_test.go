@@ -4,6 +4,8 @@ package e2e
 
 import (
 	"bytes"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -349,6 +351,14 @@ func TestDeleteRunning(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(storeDir(t), "containers", id)); !os.IsNotExist(err) {
 		t.Errorf("the container's directory is still there: %v", err)
 	}
+
+	// A --rm container removes itself as it stops, which delete -f is
+	// content with.
+	rm := newName(t)
+	detached(t, "--rm", "--name", rm, alpine, "sleep", "60")
+	if r := cli(t, "delete", "-f", rm); r.code != 0 {
+		t.Errorf("delete -f of a --rm container: %+v", r)
+	}
 }
 
 // TestSupervisorKilled kills the runwhp running a container. The record
@@ -436,5 +446,63 @@ func TestKillForeground(t *testing.T) {
 	}
 	if s := stateOf(t, name); s.Status != "stopped" || exitCodeOf(s) != 4 {
 		t.Errorf("state %+v", s)
+	}
+}
+
+// TestDetachedOutlivesConsole runs run -d on a pseudo console and closes
+// the console, as closing a terminal window does: the container goes on.
+func TestDetachedOutlivesConsole(t *testing.T) {
+	name := newName(t)
+	p := startPTYArgv(t, 24, 80, append([]string{"run", "-d"}, withFlags([]string{"--name", name, alpine, "sleep", "60"})...))
+	if code := p.wait(); code != 0 {
+		t.Fatalf("run -d exited %d; the terminal shows %q", code, p.text())
+	}
+	p.close()
+	time.Sleep(time.Second)
+	if s := stateOf(t, name); s.Status != "running" {
+		t.Errorf("after the console closed: %+v", s)
+	}
+}
+
+// TestPublishOnRestart checks that a container's published ports are bound
+// again when it starts again, and that a port taken meanwhile fails the
+// start.
+func TestPublishOnRestart(t *testing.T) {
+	name := newName(t)
+	port := freePort(t)
+	detached(t, "--name", name, "-p", port+":8080", alpine, "sh", "-c",
+		`echo "boot $(cut -c1-8 /proc/sys/kernel/random/boot_id)" > /msg; exec nc -lk -p 8080 -e cat /msg`)
+	get := func() string {
+		var line string
+		for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+			c, err := net.Dial("tcp", "127.0.0.1:"+port)
+			if err != nil {
+				continue
+			}
+			c.SetReadDeadline(time.Now().Add(2 * time.Second))
+			b, _ := io.ReadAll(c)
+			c.Close()
+			if line = string(b); strings.HasPrefix(line, "boot ") {
+				return line
+			}
+		}
+		t.Fatalf("nothing served on port %s: %q", port, line)
+		return ""
+	}
+	first := get()
+	if r := cli(t, "restart", "-t", "1", name); r.code != 0 {
+		t.Fatalf("restart: %+v", r)
+	}
+	if second := get(); second == first {
+		t.Errorf("served %q before and after the restart", first)
+	}
+	cli(t, "stop", "-t", "1", name)
+	ln, err := net.Listen("tcp", "127.0.0.1:"+port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	if r := cli(t, "start", name); r.code != 1 || !strings.Contains(r.stderr, port) {
+		t.Errorf("start with the port taken: %+v", r)
 	}
 }

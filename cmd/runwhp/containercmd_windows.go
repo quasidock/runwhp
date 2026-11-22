@@ -161,6 +161,10 @@ func deleteContainer(store *container.Store, ref string, force bool) error {
 		if err := killAndWait(store, c); err != nil {
 			return err
 		}
+		if err := store.Remove(c); err != nil && !errors.Is(err, container.ErrNotFound) {
+			return err
+		}
+		return nil // gone: removed by its runwhp, if it was run with --rm
 	}
 	err = store.Remove(c)
 	if errors.Is(err, container.ErrRunning) {

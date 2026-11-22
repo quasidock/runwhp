@@ -15,6 +15,7 @@ const usage = `Usage:
   runwhp run [flags] IMAGE [COMMAND [ARG...]]   run a command in a new container
   runwhp create [flags] IMAGE [COMMAND...]      create a container, ready to start
   runwhp start CONTAINER...                     start created or stopped containers
+  runwhp exec [flags] CONTAINER COMMAND...      run a command in a running container
   runwhp kill [-a] CONTAINER [SIGNAL]           send a signal to a container
   runwhp stop [-t SECONDS] CONTAINER...         stop containers
   runwhp restart [-t SECONDS] CONTAINER...      stop containers and start them again
@@ -69,6 +70,8 @@ func realMain(args []string) int {
 		return cmdRestart(args[1:], os.Stdout)
 	case "logs":
 		return cmdLogs(args[1:], os.Stdout, os.Stderr)
+	case "exec":
+		return cmdExec(args[1:])
 	case "__supervise":
 		return cmdSupervise(args[1:])
 	case "help", "-h", "-help", "--help":

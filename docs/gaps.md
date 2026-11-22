@@ -1,17 +1,33 @@
 # Known gaps
 
-- There is no detaching or reattaching, and no way to send signals other
-  than SIGINT and SIGTERM.
-- Nothing written outside a bind mount or volume survives the run: the
-  scratch disk is deleted when it ends.
+- Nothing attaches to a container in the background: there is no
+  `attach`, `start -a` or `wait`. Its output is in its log or the files it
+  was given, and its stdin can only be a file or a pipe.
+- There are no restart policies and no `container prune`; containers a
+  plain `run` keeps stay until `delete`.
+- Logs grow until the container is deleted, carry no timestamps, and are
+  not rotated.
+- A foreground `run` ends with its terminal. A container in the background
+  outlives the terminal, but not a logoff, which ends it as killing its
+  runwhp would, nor a session whose job object keeps its processes in, as
+  some ssh servers and CI runners do. Whether it outlives closing Windows
+  Terminal, VS Code or mintty has been checked only with a pseudo console
+  closed under it.
+- A container run with `--rm` cannot be restarted.
+- A container in the background holds `runwhp.exe` open, so a build of
+  runwhp has to move it aside, as `build.ps1` does.
+- Keeping a record makes `run alpine:3.20 true` about 10 ms slower with
+  `--rm`, and about 35 ms slower for a kept container, whose writable layer
+  is frozen at the end, than in iteration 7; the vsock device is about 5 ms
+  of it.
+- `runwhp exec` needs vsock in the guest's kernel. runwhp's has it; WSL's
+  builds it as modules, which have to be passed with `--module`.
 - Volumes cannot be resized, nor shared by containers running at once, even
   read-only. `runwhp volume` cannot copy files in or out, and reading one
   from Windows needs WSL.
 - Image `VOLUME` declarations are ignored: those paths stay in the writable
   layer, as they would with `docker run --rm`.
-- A volume mounted on `/etc` keeps, after its first run, its own `hosts`,
-  `hostname` and `resolv.conf`, rather than those runwhp writes.
-- A full host disk shows in the container as I/O errors on the scratch disk
+- A full host disk shows in the container as I/O errors on the writable layer
   or a volume.
 - Every `write()` to a bind mount is a request to the host, about 130 µs each
   on the test machine, so a program writing in small pieces is slow there;
@@ -24,9 +40,10 @@
   kernel build reaches runwhp only when someone moves the pin in
   `internal/kernel/pin.go`, and the pinned digest is the only check on it:
   builds are not signed.
-- An image can have at most 56 non-empty layers, one more with
+- An image can have at most 55 non-empty layers, one more with
   `--network none`, one fewer with bind mounts, and one fewer for each
-  volume: each device, the scratch disk included, takes an I/O APIC line.
+  volume: each device, the writable layer and the vsock device included,
+  takes an I/O APIC line.
 - The network is IPv4 only and carries no ICMP. Only TCP ports can be
   published, each with an explicit host port, and there is no `-P`, `--dns`
   or `--dns-search`.

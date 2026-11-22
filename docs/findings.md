@@ -137,3 +137,48 @@
 - **Debian's images already skip most fsyncs.** Their dpkg is configured
   with `force-unsafe-io`, so overlayfs's `volatile`, which drops the
   writable layer's syncs, gains only about 5% on `apt-get install`.
+- **Windows will not replace a file someone has open, unless they share
+  delete and the rename has POSIX semantics.** `os.Rename`, `MoveFileEx`
+  underneath, fails with access denied over a file another process has
+  open, whether or not that process shares delete. A rename through
+  `FileRenameInfoEx` with `POSIX_SEMANTICS` and `REPLACE_IF_EXISTS`
+  succeeds if the reader opened with `FILE_SHARE_DELETE`, which `os.Open`
+  does not ask for, and fails with a sharing violation otherwise; both on
+  NTFS and on ReFS. runwhp reads container records sharing delete, and
+  replaces them with a POSIX rename.
+- **A reservation is only as good as what it points at.** Container names
+  are files in the store's `names` directory, made with exclusive
+  creation. With the name taken before its container's record was in
+  place, another runwhp found a name pointing at nothing and took it as
+  abandoned: on ReFS, two of eight concurrent creates got the same name.
+  runwhp now reserves a name once the record exists, and writes the name's
+  file aside and hard-links it into place, so that no one reads it empty.
+- **Leaving a job object needs the job's leave.** A process started with
+  `CREATE_BREAKAWAY_FROM_JOB` from a job without `BREAKAWAY_OK` fails to
+  start with access denied, and without the flag it dies when a
+  kill-on-close job is closed. With `BREAKAWAY_OK` the flag is enough, and
+  with `SILENT_BREAKAWAY_OK` every child leaves the job unasked. runwhp
+  asks to break away, and starts the background runwhp inside the job,
+  with a warning, when it may not. Starting it, until it reports on an
+  inherited pipe, takes about 12 ms.
+- **go-winio's dial sleeps 10 ms when the pipe is busy.** `DialPipe`
+  retries `ERROR_PIPE_BUSY` every 10 ms, and a listener makes its next
+  instance only once the previous one is accepted, so a dial right after
+  another can cost 10 ms. Against a server that is ready, a dial and one
+  request take about 100 µs, and a request on an open connection 25 µs.
+- **Closing a pseudo console twice corrupts the heap.** A second
+  `ClosePseudoConsole` of the same handle ended the process with
+  `STATUS_HEAP_CORRUPTION`.
+- **Keeping a record is cheaper on ReFS, removing one cheaper on NTFS.**
+  Making a container's record, a few small files written in the store's
+  `tmp` directory and renamed into place, takes 3-5 ms on NTFS and 1-3 ms
+  on ReFS; replacing its state 1-3 ms and 0.5-1 ms; removing it 2-3 ms and
+  6-8 ms.
+- **Linux takes a virtio socket device described in ACPI like any other.**
+  The guest's virtio-mmio driver binds its vsock transport to a device
+  with ID 19 and a `guest_cid` in its configuration, with no feature bits
+  offered: stream sockets are then assumed. WSL's kernel builds that
+  transport as modules, `vmw_vsock_virtio_transport_common.ko` and
+  `vmw_vsock_virtio_transport.ko`, and their names sort against their
+  order of loading, so init tries modules that failed again for as long as
+  others load.

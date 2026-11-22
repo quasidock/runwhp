@@ -196,3 +196,57 @@ const (
 	ExitNotFound     = 127 // the command does not exist
 	ExitSignalBase   = 128 // plus the signal number that killed the process
 )
+
+// ExecPort is the vsock port on which init serves runwhp exec, once the
+// container's process has started.
+//
+// runwhp exec opens a control connection and sends an ExecHello with Exec.
+// Init answers with an ExecEvent naming the session and the streams it
+// wants, or saying why it cannot run the command. The host opens one more
+// connection per stream, each starting with an ExecHello that attaches it,
+// followed by the stream's bytes: stdin from the host, stdout and stderr
+// to it, or with a terminal stdout alone. Once every stream is attached,
+// init starts the process and sends an ExecEvent with its pid. On the
+// control connection the host then sends Control messages, signals and
+// terminal sizes, and init sends a last ExecEvent when the process has
+// exited and its output has been sent. A process started with Detach gets
+// /dev/null and no streams, and its session ends once it has started.
+//
+// When the container's process exits, init kills every process left,
+// those of runwhp exec included.
+const ExecPort = 1024
+
+// Exec describes a process for runwhp exec.
+type Exec struct {
+	Args []string `json:"args"`
+	// Env is added to the container's environment.
+	Env []string `json:"env,omitempty"`
+	// Cwd defaults to the container's working directory, and must exist.
+	Cwd string `json:"cwd,omitempty"`
+	// User defaults to the container's user.
+	User   string `json:"user,omitempty"`
+	Stdin  bool   `json:"stdin,omitempty"`
+	TTY    bool   `json:"tty,omitempty"`
+	Rows   uint16 `json:"rows,omitempty"`
+	Cols   uint16 `json:"cols,omitempty"`
+	Detach bool   `json:"detach,omitempty"`
+}
+
+// ExecHello is the first line on each runwhp exec connection.
+type ExecHello struct {
+	Exec *Exec `json:"exec,omitempty"`
+	// Attach and Stream attach a connection to a session's stream.
+	Attach string `json:"attach,omitempty"`
+	Stream string `json:"stream,omitempty"`
+}
+
+// ExecEvent is a message from init on a runwhp exec control connection.
+type ExecEvent struct {
+	ID      string   `json:"id,omitempty"`
+	Streams []string `json:"streams,omitempty"`
+	Started bool     `json:"started,omitempty"`
+	Pid     int      `json:"pid,omitempty"`
+	Exited  bool     `json:"exited,omitempty"`
+	Exit    int      `json:"exit,omitempty"`
+	Error   string   `json:"error,omitempty"`
+}

@@ -16,6 +16,7 @@ import (
 
 	"github.com/quasidock/runwhp/internal/container"
 	"github.com/quasidock/runwhp/internal/guestspec"
+	"github.com/quasidock/runwhp/internal/virtio"
 )
 
 // killGrace is how long the guest has to end a container after SIGKILL
@@ -50,6 +51,7 @@ type supervisor struct {
 	// files are closed before the container is removed: a file open in
 	// its directory would keep that from being renamed away.
 	files []io.Closer
+	vsock *virtio.Vsock // the VM's vsock device, once it has one
 }
 
 // supervise takes a container's lock, records that this process is
@@ -119,7 +121,12 @@ func (s *supervisor) status() container.Status {
 
 // hooks are what bootContainer tells the supervisor.
 func (s *supervisor) hooks(waitStart bool) bootHooks {
-	return bootHooks{waitStart: waitStart, ready: s.isReady, started: s.started, failed: s.failed}
+	return bootHooks{waitStart: waitStart, ready: s.isReady, started: s.started, failed: s.failed,
+		vsock: func(v *virtio.Vsock) {
+			s.mu.Lock()
+			s.vsock = v
+			s.mu.Unlock()
+		}}
 }
 
 // isReady records that a container booted to wait for its start is ready.
@@ -332,10 +339,50 @@ func (s *supervisor) handle(c net.Conn) {
 		case container.OpWait:
 			<-s.stopped
 			rep = s.reply()
+		case container.OpConnect:
+			s.connect(c, r, req)
+			return
 		default:
 			rep = container.Reply{Error: fmt.Sprintf("this runwhp does not know the request %q", req.Op)}
 		}
 	}
 	data, _ := json.Marshal(rep)
 	c.Write(append(data, '\n'))
+}
+
+// connect connects c to a vsock port in the guest, and carries bytes both
+// ways until the guest closes the connection. What c sent beyond its
+// request waits in r. The guest's end of file closes c; c's end of file
+// shuts down the guest's receiving side, so a stream can end in one
+// direction while the other goes on.
+func (s *supervisor) connect(c net.Conn, r *bufio.Reader, req container.Request) {
+	reply := func(rep container.Reply) {
+		data, _ := json.Marshal(rep)
+		c.Write(append(data, '\n'))
+	}
+	if req.Port != guestspec.ExecPort {
+		reply(container.Reply{Error: fmt.Sprintf("vsock port %d is not runwhp exec's", req.Port)})
+		return
+	}
+	s.mu.Lock()
+	vs, status := s.vsock, s.state.Status
+	s.mu.Unlock()
+	if status != container.Running || vs == nil {
+		reply(container.Reply{Error: errNotRunning.Error()})
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	vc, err := vs.Dial(ctx, req.Port)
+	cancel()
+	if err != nil {
+		reply(container.Reply{Error: fmt.Sprintf("connecting to the container's init: %v", err)})
+		return
+	}
+	defer vc.Close()
+	reply(container.Reply{OK: true})
+	go func() {
+		io.Copy(vc, r)
+		vc.CloseWrite()
+	}()
+	io.Copy(c, vc)
 }
