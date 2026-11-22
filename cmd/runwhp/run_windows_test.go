@@ -248,10 +248,10 @@ func TestResolveKernel(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	t.Setenv("RUNWHP_KERNEL", `C:\env\bzImage`)
-	if p, err := resolveKernel(ctx, root, &runOptions{kernel: `C:\flag\bzImage`}, image.PullMissing); err != nil || p != `C:\flag\bzImage` {
+	if p, err := resolveKernel(ctx, root, explicitKernel(`C:\flag\bzImage`), image.PullMissing); err != nil || p != `C:\flag\bzImage` {
 		t.Errorf("--kernel: %q, %v", p, err)
 	}
-	if p, err := resolveKernel(ctx, root, &runOptions{}, image.PullMissing); err != nil || p != `C:\env\bzImage` {
+	if p, err := resolveKernel(ctx, root, explicitKernel(""), image.PullMissing); err != nil || p != `C:\env\bzImage` {
 		t.Errorf("RUNWHP_KERNEL: %q, %v", p, err)
 	}
 
@@ -261,7 +261,7 @@ func TestResolveKernel(t *testing.T) {
 	}
 	// A stored kernel is used without any network access, whatever the
 	// policy; a missing one is not fetched under --pull never.
-	_, err := resolveKernel(ctx, root, &runOptions{}, image.PullNever)
+	_, err := resolveKernel(ctx, root, explicitKernel(""), image.PullNever)
 	if err == nil || !strings.Contains(err.Error(), "runwhp pull") {
 		t.Errorf("missing kernel under --pull never: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestResolveKernel(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, policy := range []image.Policy{image.PullNever, image.PullMissing, image.PullAlways} {
-		if p, err := resolveKernel(ctx, root, &runOptions{}, policy); err != nil || p != stored {
+		if p, err := resolveKernel(ctx, root, explicitKernel(""), policy); err != nil || p != stored {
 			t.Errorf("stored kernel, --pull %s: %q, %v", policy, p, err)
 		}
 	}

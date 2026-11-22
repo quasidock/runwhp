@@ -21,19 +21,13 @@ import (
 	"syscall"
 	"time"
 
-	"golang.org/x/sys/windows"
-
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
 	"github.com/quasidock/runwhp/internal/boot"
-	"github.com/quasidock/runwhp/internal/disk"
-	"github.com/quasidock/runwhp/internal/fuse"
+	"github.com/quasidock/runwhp/internal/container"
 	"github.com/quasidock/runwhp/internal/guestspec"
-	"github.com/quasidock/runwhp/internal/hostfs"
 	"github.com/quasidock/runwhp/internal/image"
 	"github.com/quasidock/runwhp/internal/kernel"
-	"github.com/quasidock/runwhp/internal/netstack"
-	"github.com/quasidock/runwhp/internal/virtio"
 	"github.com/quasidock/runwhp/internal/vm"
 	"github.com/quasidock/runwhp/internal/volume"
 )
@@ -189,26 +183,6 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 	if o.interactive && o.tty && !isTerminal(os.Stdin) {
 		return fail, errors.New("the input device is not a TTY; if you are using mintty, try prefixing the command with 'winpty'")
 	}
-	memory, err := parseMemory(o.memory)
-	if err != nil {
-		return fail, err
-	}
-	cpus, err := parseCPUs(o.cpus, runtime.NumCPU())
-	if err != nil {
-		return fail, err
-	}
-	network, err := parseNetworkFlags(o.network, o.publish, o.addHosts)
-	if err != nil {
-		return fail, err
-	}
-	plan, err := parseMounts(o.volumes, o.mounts, o.tmpfs)
-	if err != nil {
-		return fail, err
-	}
-	scratchSize, err := parseStorageOpts(o.storageOpts)
-	if err != nil {
-		return fail, err
-	}
 	root, err := storeRoot()
 	if err != nil {
 		return fail, err
@@ -222,11 +196,47 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 		return fail, err
 	}
 	start := time.Now()
-
-	// The scratch disk is made while the image and kernel are read.
 	sweepStore(root, logf)
-	scratch := startScratch(root, scratchSize)
-	defer scratch.close()
+	cfg, err := resolveConfig(ctx, root, o, entrypointSet, args, policy, logf)
+	if err != nil {
+		return fail, err
+	}
+	logf("%4d ms  configuration resolved: %d layers", time.Since(start).Milliseconds(), max(len(cfg.Layers), len(cfg.LayerFiles)))
+	return bootContainer(ctx, root, cfg, policy, proxy, logf, start)
+}
+
+// resolveConfig turns run's flags and arguments into a container's
+// configuration: it pulls the image if need be, makes missing volumes,
+// fetches runwhp's kernel if it is missing, and resolves everything that
+// depends on this process, such as its working directory and environment.
+func resolveConfig(ctx context.Context, root string, o *runOptions, entrypointSet bool, args []string, policy image.Policy, logf func(string, ...any)) (*container.Config, error) {
+	memory, err := parseMemory(o.memory)
+	if err != nil {
+		return nil, err
+	}
+	cpus, err := parseCPUs(o.cpus, runtime.NumCPU())
+	if err != nil {
+		return nil, err
+	}
+	network, err := parseNetworkFlags(o.network, o.publish, o.addHosts)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := parseMounts(o.volumes, o.mounts, o.tmpfs)
+	if err != nil {
+		return nil, err
+	}
+	storageSize, err := parseStorageOpts(o.storageOpts)
+	if err != nil {
+		return nil, err
+	}
+	cfg := &container.Config{
+		Version: container.ConfigVersion, Created: time.Now().UTC(),
+		Stdin: o.interactive, TTY: o.tty,
+		Hosts: network.hosts, Network: network.enabled, Publish: network.publish, HostGateway: network.hostGateway,
+		Shares: plan.shares, Mounts: plan.mounts,
+		Memory: memory, CPUs: cpus, StorageSize: storageSize, Debug: o.debug,
+	}
 
 	// The process and its layers, from an image or (for development)
 	// from ext4 files given with --layer.
@@ -234,298 +244,143 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 		Entrypoint: o.entrypoint, EntrypointSet: entrypointSet,
 		Env: o.env, Workdir: o.workdir, User: o.user, LookupEnv: os.LookupEnv,
 	}
-	var config image.Process
-	var layerFiles []string
+	var process image.Process
 	if len(o.layers) > 0 {
 		overrides.Cmd = args
-		if config, err = image.BuildProcess(v1.Config{}, overrides); err != nil {
-			return fail, err
+		if process, err = image.BuildProcess(v1.Config{}, overrides); err != nil {
+			return nil, err
 		}
-		layerFiles = o.layers
+		for _, p := range o.layers {
+			if cfg.LayerFiles, err = appendAbs(cfg.LayerFiles, p); err != nil {
+				return nil, err
+			}
+		}
 	} else {
 		if len(args) == 0 {
-			return fail, fmt.Errorf("no image given; run 'runwhp run -h' for usage")
+			return nil, fmt.Errorf("no image given; run 'runwhp run -h' for usage")
 		}
 		store := image.Open(root)
 		store.Progress = os.Stderr
 		img, err := store.Ensure(ctx, args[0], policy)
 		if err != nil {
-			return fail, err
+			return nil, err
 		}
 		cf, err := img.ConfigFile()
 		if err != nil {
-			return fail, err
+			return nil, err
 		}
 		overrides.Cmd = args[1:]
-		if config, err = image.BuildProcess(cf.Config, overrides); err != nil {
-			return fail, err
+		if process, err = image.BuildProcess(cf.Config, overrides); err != nil {
+			return nil, err
 		}
-		diffIDs, err := img.Layers()
-		if err != nil {
-			return fail, err
+		if cfg.Layers, err = img.Layers(); err != nil {
+			return nil, err
 		}
-		for _, d := range diffIDs {
-			p, err := store.Layers.Path(d)
-			if err != nil {
-				return fail, err
-			}
-			layerFiles = append(layerFiles, p)
-		}
+		cfg.Image, cfg.ImageName, cfg.ImageDigest = args[0], img.Ref, img.Digest
+		cfg.StopSignal = cf.Config.StopSignal
 	}
-	// Each device takes an interrupt line: the console, the scratch disk,
-	// and the others named here.
-	others, users := 2, []string{}
-	if network.enabled {
-		others++
-		users = append(users, "the network")
-	}
-	if len(plan.shares) > 0 {
-		others++
-		users = append(users, "bind mounts")
-	}
-	if n := len(plan.volumes); n > 0 {
-		others += n
-		users = append(users, fmt.Sprintf("%d volumes", n))
-	}
-	if n := others + len(layerFiles); n > vm.MaxDevices {
-		what := fmt.Sprintf("the image's %d layers", len(layerFiles))
-		if len(users) > 0 {
-			what += ", " + strings.Join(users, ", ")
-		}
-		return fail, fmt.Errorf("too many devices: %s, the console and the scratch disk make %d, and runwhp has room for %d", what, n, vm.MaxDevices)
-	}
-	logf("%4d ms  image ready: %d layers", time.Since(start).Milliseconds(), len(layerFiles))
+	cfg.Args, cfg.Env, cfg.Cwd, cfg.User = process.Args, process.Env, process.Cwd, process.User
 
-	// Volumes, opened exclusively: a volume is in one container at a time.
-	var volumeDevices []virtio.Device
+	if err := checkDevices(cfg, len(plan.volumes)); err != nil {
+		return nil, err
+	}
+
+	// Named volumes are made now, as docker create makes them.
 	volumes := volume.Open(root)
-	for i, u := range plan.volumes {
+	for _, u := range plan.volumes {
 		size := int64(defaultDiskSize)
 		if u.size != "" {
 			if size, err = parseDiskSize(u.size); err != nil {
-				return fail, err
+				return nil, err
 			}
 		}
 		v, created, err := volumes.Ensure(u.name, size)
 		if err != nil {
-			return fail, err
-		}
-		f, err := disk.Open(v.Disk(), disk.Exclusive)
-		if errors.Is(err, disk.ErrInUse) {
-			return fail, fmt.Errorf("volume %s is in use by another container", v.Name)
-		}
-		if err != nil {
-			return fail, fmt.Errorf("volume %s: %w", v.Name, err)
-		}
-		defer f.Close()
-		fsize, err := f.Size()
-		if err != nil {
-			return fail, err
+			return nil, err
 		}
 		if created {
-			logf("%4d ms  created volume %s", time.Since(start).Milliseconds(), v.Name)
+			logf("created volume %s", v.Name)
 		}
-		volumeDevices = append(volumeDevices, &virtio.Blk{File: f, Sectors: uint64(fsize) / 512, Flush: true, Discard: true,
-			Serial: guestspec.VolumeSerial(i)})
+		cfg.Volumes = append(cfg.Volumes, container.Volume{Name: v.Name, Size: size})
 	}
 
-	kernelPath, err := resolveKernel(ctx, root, o, policy)
-	if err != nil {
-		return fail, err
-	}
-	kernelImage, err := os.ReadFile(kernelPath)
-	if err != nil {
-		return fail, fmt.Errorf("reading the kernel: %w", err)
-	}
-	bzImage, err := boot.ParseKernel(kernelImage)
-	if err != nil {
-		return fail, fmt.Errorf("%s: %w", kernelPath, err)
-	}
-	modules, err := readModules(o.modules)
-	if err != nil {
-		return fail, err
-	}
-	initPath := o.init
-	if initPath == "" {
-		exe, err := os.Executable()
-		if err != nil {
-			return fail, err
+	// The kernel is fetched now, if it has to be, so that booting later
+	// needs no network. Only a kernel named explicitly is recorded.
+	if cfg.Kernel = explicitKernel(o.kernel); cfg.Kernel != "" {
+		if cfg.Kernel, err = filepath.Abs(cfg.Kernel); err != nil {
+			return nil, err
 		}
-		initPath = filepath.Join(filepath.Dir(exe), "runwhp-init")
+	} else if _, err := resolveKernel(ctx, root, "", policy); err != nil {
+		return nil, err
 	}
-	initBinary, err := os.ReadFile(initPath)
-	if err != nil {
-		return fail, fmt.Errorf("reading the guest init program: %w", err)
+	if o.init != "" {
+		if cfg.Init, err = filepath.Abs(o.init); err != nil {
+			return nil, err
+		}
+	}
+	for _, p := range o.modules {
+		if cfg.Modules, err = appendAbs(cfg.Modules, p); err != nil {
+			return nil, err
+		}
 	}
 
-	sr := scratch.get()
-	if sr.err != nil {
-		return fail, sr.err
+	if cfg.Hostname = o.hostname; cfg.Hostname == "" {
+		cfg.Hostname = randomHostname()
 	}
-	if sr.file != nil {
-		logf("%4d ms  scratch disk ready: %d GiB, formatted in %d ms", time.Since(start).Milliseconds(), scratchSize>>30, sr.took.Milliseconds())
-	}
-
-	hostname := o.hostname
-	if hostname == "" {
-		hostname = randomHostname()
-	}
-	spec := guestspec.Spec{
-		Args: config.Args, Env: config.Env, Cwd: config.Cwd, User: config.User,
-		Hostname: hostname, Hosts: network.hosts, Layers: len(layerFiles), Scratch: sr.file != nil,
-		Volumes: len(volumeDevices), Debug: o.debug, Stdin: o.interactive, TTY: o.tty, Network: network.spec(),
-		Mounts: plan.mounts,
-	}
-	if o.tty {
-		spec.Rows, spec.Cols, _ = terminalSize(os.Stdout)
-	}
-	specJSON, err := json.Marshal(spec)
-	if err != nil {
-		return fail, err
-	}
-	files := []boot.File{
-		{Name: "dev", Mode: boot.ModeDir | 0o755},
-		{Name: "proc", Mode: boot.ModeDir | 0o755},
-		{Name: "sys", Mode: boot.ModeDir | 0o755},
-		{Name: "init", Mode: boot.ModeFile | 0o755, Data: initBinary},
-		{Name: "runwhp", Mode: boot.ModeDir | 0o755},
-		{Name: guestspec.SpecPath, Mode: boot.ModeFile | 0o644, Data: specJSON},
-	}
-	files = append(files, modules...)
-
-	// Devices: the console first, then the network device and the shares'
-	// file system if any, then one disk per layer, bottom first, then the
-	// scratch disk, then the volumes.
-	var stdin io.Reader
-	if o.interactive {
-		stdin = os.Stdin
-		if isTerminal(os.Stdin) {
-			stdin = &consoleReader{h: windows.Handle(os.Stdin.Fd()), lines: !o.tty}
-		}
-	}
-	status := &statusWriter{}
-	console := &virtio.Console{
-		Ports: []virtio.Port{
-			{Name: guestspec.PortStdout, Out: os.Stdout},
-			{Name: guestspec.PortStderr, Out: os.Stderr},
-			{Name: guestspec.PortControl, Out: status, In: proxy.queue},
-			{Name: guestspec.PortStdin, In: stdin},
-		},
-		Logf: logf,
-	}
-	proxy.console.Store(console)
-	devices := []virtio.Device{console}
-	if network.enabled {
-		nic := &virtio.Net{MAC: netstack.GuestMAC, MTU: netstack.MTU}
-		stack, err := netstack.New(netstack.Config{
-			Output:      nic.Deliver,
-			HostGateway: network.hostGateway,
-			Publish:     network.publish,
-			Logf:        logf,
-		})
-		if err != nil {
-			return fail, err
-		}
-		defer func() {
-			logf("%s", stack.Stats())
-			stack.Close()
-		}()
-		nic.Recv = stack.Inject
-		devices = append(devices, nic)
-	}
-	if len(plan.shares) > 0 {
-		fsys, err := hostfs.New(plan.shares, logf)
-		if err != nil {
-			return fail, err
-		}
-		defer fsys.Close()
-		server := &fuse.Server{FS: fsys, Logf: logf}
-		defer func() { logf("%s", server.Stats()) }()
-		devices = append(devices, &virtio.Fs{Tag: guestspec.FSTag, Handler: server})
-	}
-	for i, path := range layerFiles {
-		f, err := disk.Open(path, disk.ReadOnly)
-		if err != nil {
-			return fail, err
-		}
-		defer f.Close()
-		size, err := f.Size()
-		if err != nil {
-			return fail, err
-		}
-		devices = append(devices, &virtio.Blk{File: f, Sectors: uint64(size) / 512, ReadOnly: true,
-			Serial: guestspec.LayerSerial(i)})
-	}
-	if sr.file != nil {
-		// No FLUSH: the disk is thrown away after the run, so the guest
-		// need never wait for the host's disk.
-		devices = append(devices, &virtio.Blk{File: sr.file, Sectors: uint64(scratchSize) / 512, Discard: true,
-			Serial: guestspec.ScratchSerial})
-	}
-	devices = append(devices, volumeDevices...)
-
-	cmdline := baseCmdline + " quiet loglevel=3"
-	if o.debug {
-		cmdline = baseCmdline + " loglevel=7"
-	}
-	tail := &ring{max: consoleTail}
-	consoleLine := tail.add
-	if o.debug {
-		consoleLine = func(line string) { fmt.Fprintln(os.Stderr, line) }
-	}
-
-	var term *consoleState
-	if o.tty {
-		term, err = setupConsole(o.interactive, isTerminal(os.Stdout))
-		if err != nil {
-			return fail, fmt.Errorf("setting up the console: %w", err)
-		}
-		defer term.restore()
-		done := make(chan struct{})
-		defer close(done)
-		go watchSize(done, spec.Rows, spec.Cols, proxy.queue)
-	}
-	res, err := vm.Run(ctx, vm.Config{
-		Kernel:      bzImage,
-		Initrd:      boot.CPIO(files),
-		Cmdline:     cmdline,
-		Memory:      memory,
-		CPUs:        cpus,
-		Devices:     devices,
-		ConsoleLine: consoleLine,
-		Logf:        logf,
-	})
-	term.restore() // before anything else is printed
-	for _, s := range res.Stats {
-		logf("%s", s)
-	}
-	if err != nil {
-		tail.print(os.Stderr)
-		return fail, err
-	}
-	if ctx.Err() != nil {
-		return 130, ctx.Err()
-	}
-	st, ok := status.get()
-	if !ok {
-		tail.print(os.Stderr)
-		return fail, fmt.Errorf("the guest stopped without reporting how the container ended (%s)", res.Reason)
-	}
-	if st.Error != "" {
-		errorf("%s", st.Error)
-	}
-	return st.Exit, nil
+	return cfg, nil
 }
 
-// resolveKernel returns the bzImage to boot: the one --kernel names, else the
-// one RUNWHP_KERNEL names, else runwhp's own kernel from the store, fetched
-// first if it is missing and the pull policy allows.
-func resolveKernel(ctx context.Context, root string, o *runOptions, policy image.Policy) (string, error) {
-	if o.kernel != "" {
-		return o.kernel, nil
+func appendAbs(list []string, p string) ([]string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return list, err
 	}
-	if p := os.Getenv("RUNWHP_KERNEL"); p != "" {
-		return p, nil
+	return append(list, abs), nil
+}
+
+// checkDevices checks that the container's devices fit the I/O APIC: each
+// takes an interrupt line.
+func checkDevices(cfg *container.Config, volumes int) error {
+	// The console and the scratch disk, and the others named here.
+	others, users := 2, []string{}
+	if cfg.Network {
+		others++
+		users = append(users, "the network")
+	}
+	if len(cfg.Shares) > 0 {
+		others++
+		users = append(users, "bind mounts")
+	}
+	if volumes > 0 {
+		others += volumes
+		users = append(users, fmt.Sprintf("%d volumes", volumes))
+	}
+	layers := max(len(cfg.Layers), len(cfg.LayerFiles))
+	if n := others + layers; n > vm.MaxDevices {
+		what := fmt.Sprintf("the image's %d layers", layers)
+		if len(users) > 0 {
+			what += ", " + strings.Join(users, ", ")
+		}
+		return fmt.Errorf("too many devices: %s, the console and the scratch disk make %d, and runwhp has room for %d", what, n, vm.MaxDevices)
+	}
+	return nil
+}
+
+// explicitKernel is the bzImage --kernel names, else the one RUNWHP_KERNEL
+// names, else empty, which means runwhp's own kernel.
+func explicitKernel(flag string) string {
+	if flag != "" {
+		return flag
+	}
+	return os.Getenv("RUNWHP_KERNEL")
+}
+
+// resolveKernel returns the bzImage to boot: path if it is not empty, else
+// runwhp's own kernel from the store, fetched first if it is missing and the
+// pull policy allows.
+func resolveKernel(ctx context.Context, root, path string, policy image.Policy) (string, error) {
+	if path != "" {
+		return path, nil
 	}
 	store := kernel.Open(root)
 	store.Progress = os.Stderr

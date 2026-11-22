@@ -53,8 +53,11 @@ func parseNetworkFlags(mode string, publish, addHosts []string) (networkOptions,
 }
 
 // spec is the guest's side of the network, or nil without one.
-func (n networkOptions) spec() *guestspec.Network {
-	if !n.enabled {
+func (n networkOptions) spec() *guestspec.Network { return guestNetwork(n.enabled) }
+
+// guestNetwork is the guest's side of the network, or nil without one.
+func guestNetwork(enabled bool) *guestspec.Network {
+	if !enabled {
 		return nil
 	}
 	return &guestspec.Network{

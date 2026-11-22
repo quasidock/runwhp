@@ -14,8 +14,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/quasidock/runwhp/internal/container"
 	"github.com/quasidock/runwhp/internal/guestspec"
-	"github.com/quasidock/runwhp/internal/hostfs"
 	"github.com/quasidock/runwhp/internal/volume"
 )
 
@@ -342,7 +342,7 @@ type volumeUse struct {
 // mountPlan is what -v, --mount and --tmpfs ask for: the host directories to
 // share, the volumes to attach, and the mounts init makes.
 type mountPlan struct {
-	shares  []hostfs.Share
+	shares  []container.Share
 	volumes []volumeUse
 	mounts  []guestspec.Mount
 }
@@ -400,7 +400,7 @@ func parseMounts(volumes, mounts, tmpfs []string) (mountPlan, error) {
 				return plan, fmt.Errorf("bind source %s: %w", m.source, err)
 			}
 			gm.Share, gm.File = len(plan.shares), !st.IsDir()
-			plan.shares = append(plan.shares, hostfs.Share{Path: m.source, File: gm.File, ReadOnly: m.readOnly, Target: m.target})
+			plan.shares = append(plan.shares, container.Share{Path: m.source, File: gm.File, ReadOnly: m.readOnly, Target: m.target, Create: m.create})
 		case m.kind == guestspec.MountVolume && m.source == "":
 			gm.Kind = guestspec.MountAnon
 		case m.kind == guestspec.MountVolume:
