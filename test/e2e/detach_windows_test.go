@@ -113,12 +113,13 @@ func TestDetached(t *testing.T) {
 // writes to after the ID.
 func TestDetachedToFile(t *testing.T) {
 	name := newName(t)
+	exe := runwhp(t) // before the file is open: it may skip the test
 	out := filepath.Join(t.TempDir(), "out.txt")
 	f, err := os.Create(out)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(runwhp(t), append([]string{"run", "-d"}, withFlags([]string{"--name", name, alpine, "echo", "to the file"})...)...)
+	cmd := exec.Command(exe, append([]string{"run", "-d"}, withFlags([]string{"--name", name, alpine, "echo", "to the file"})...)...)
 	cmd.Stdout = f
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

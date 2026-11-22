@@ -107,7 +107,7 @@ Containers that outlive the command, in the background:
 | `-e`, `--env` | | `KEY=VALUE`, or `KEY` to copy it from the host; repeatable |
 | `-w`, `--workdir` | image's, else `/` | Working directory; created if missing |
 | `-u`, `--user` | image's, else root | `name`, `uid`, `name:group` or `uid:gid`, resolved against the image's `/etc/passwd` and `/etc/group` |
-| `-m`, `--memory` | `512m` | Guest RAM, `128m` to `3328m` |
+| `-m`, `--memory` | `512m` | Guest RAM, from `128m` up to this machine's memory |
 | `--cpus` | the host's, up to 4 | vCPUs, a whole number up to the host's logical processors, at most 64. Unlike Docker's `--cpus`, it counts processors rather than setting a quota, so `1.5` is refused. Builds size their jobs by `nproc`, so raise `-m` with it |
 | `--hostname` | the ID's first 12 digits | Hostname, also in `/etc/hostname` and `/etc/hosts` |
 | `--network`, `--net` | `user` | `user` gives the container a network through runwhp; `none` leaves it only loopback |

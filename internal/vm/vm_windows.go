@@ -1,8 +1,9 @@
 //go:build windows
 
 // Package vm runs one Linux guest on the Windows Hypervisor Platform: one or
-// more vCPUs, guest RAM at address 0, a serial port for the kernel console,
-// an emulated I/O APIC, and virtio-mmio devices.
+// more vCPUs, guest RAM from address 0 up to the device windows and on from
+// 4 GiB, a serial port for the kernel console, an emulated I/O APIC, and
+// virtio-mmio devices.
 //
 // Each vCPU runs on an OS thread of its own and serves the register accesses
 // it makes on that thread. The boot processor starts the others itself,
@@ -29,17 +30,25 @@ import (
 )
 
 const (
-	virtioBase = 0xd0000000 // one window per virtio device
+	virtioBase = LowMemoryEnd // one window per virtio device
 	virtioIRQ0 = 5
 
-	// MaxMemory keeps guest RAM below the virtio windows.
-	MaxMemory = virtioBase
 	// MaxDevices is how many virtio devices fit on the I/O APIC.
 	MaxDevices = IOAPICPins - virtioIRQ0
 	// MaxCPUs is the most vCPUs a guest can have: runwhp's kernel is built
 	// for at most 64.
 	MaxCPUs = 64
 )
+
+// MaxMemory is the most guest RAM runwhp gives a guest: this machine's
+// physical memory, in whole 2 MiB pages.
+func MaxMemory() uint64 {
+	phys, err := whp.PhysicalMemory()
+	if err != nil {
+		return LowMemoryEnd
+	}
+	return phys &^ (2<<20 - 1)
+}
 
 // Config describes a guest.
 type Config struct {
@@ -81,7 +90,7 @@ type Result struct {
 type machine struct {
 	cfg    Config
 	part   *whp.Partition
-	mem    []byte
+	mem    *guestMemory
 	ioapic *ioapic
 	virtio []*virtio.Transport
 	cpus   []*vcpu
@@ -136,8 +145,8 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 	if cfg.CPUs < 0 || cfg.CPUs > MaxCPUs {
 		return result, fmt.Errorf("%d vCPUs requested; between 1 and %d are possible", cfg.CPUs, MaxCPUs)
 	}
-	if cfg.Memory > MaxMemory || cfg.Memory%(2<<20) != 0 {
-		return result, fmt.Errorf("guest memory must be a multiple of 2 MiB and at most %d MiB", MaxMemory>>20)
+	if maxMem := MaxMemory(); cfg.Memory > maxMem || cfg.Memory%(2<<20) != 0 {
+		return result, fmt.Errorf("guest memory must be a multiple of 2 MiB and at most %d MiB", maxMem>>20)
 	}
 	if cfg.Memory < cfg.Kernel.MinMemory()+uint64(len(cfg.Initrd))+(16<<20) {
 		return result, fmt.Errorf("%d MiB of guest memory is too little for this kernel and initramfs", cfg.Memory>>20)
@@ -166,7 +175,12 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 		return result, err
 	}
 
-	host, mem, err := whp.AllocMemory(cfg.Memory)
+	low, high := splitMemory(cfg.Memory)
+	span := low
+	if high > 0 {
+		span = boot.HighMemoryBase + high
+	}
+	host, mem, err := whp.ReserveMemory(span)
 	if err != nil {
 		return result, err
 	}
@@ -176,9 +190,17 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 			whp.FreeMemory(host)
 		}
 	}()
-	m.mem = mem
-	if err := part.MapGpa(host, 0, cfg.Memory, whp.MapRead|whp.MapWrite|whp.MapExecute); err != nil {
-		return result, err
+	m.mem = &guestMemory{host: mem, low: low, high: high}
+	for _, r := range [][2]uint64{{0, low}, {boot.HighMemoryBase, high}} {
+		if r[1] == 0 {
+			continue
+		}
+		if err := whp.CommitMemory(host+uintptr(r[0]), r[1]); err != nil {
+			return result, err
+		}
+		if err := part.MapGpa(host+uintptr(r[0]), r[0], r[1], whp.MapRead|whp.MapWrite|whp.MapExecute); err != nil {
+			return result, err
+		}
 	}
 
 	m.ioapic = newIOAPIC(part.RequestInterrupt, m.logf)
@@ -203,7 +225,7 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 	if err != nil {
 		return result, err
 	}
-	layout, err := boot.Load(mem, cfg.Kernel, cfg.Initrd, cfg.Cmdline, devices, apicIDs)
+	layout, err := boot.Load(m.mem, low, high, cfg.Kernel, cfg.Initrd, cfg.Cmdline, devices, apicIDs)
 	if err != nil {
 		return result, err
 	}
@@ -507,12 +529,7 @@ func (m *machine) rtcRead() byte {
 }
 
 // Slice implements virtio.Memory over guest RAM.
-func (m *machine) Slice(addr, n uint64) ([]byte, bool) {
-	if addr+n < addr || addr+n > uint64(len(m.mem)) {
-		return nil, false
-	}
-	return m.mem[addr : addr+n], true
-}
+func (m *machine) Slice(addr, n uint64) ([]byte, bool) { return m.mem.Slice(addr, n) }
 
 // mmio serves one memory-mapped access decoded by the instruction emulator.
 // The I/O APIC and each transport take their own locks.
@@ -540,6 +557,16 @@ func (v *vcpu) mmio(gpa uint64, data []byte, write bool) {
 		} else {
 			val = t.Read(off, len(data))
 		}
+	case m.mem.Contains(gpa, uint64(len(data))):
+		// RAM the emulator reaches through us, such as the memory operand
+		// of an instruction that also touches a device.
+		b, _ := m.mem.Slice(gpa, uint64(len(data)))
+		if write {
+			copy(b, data)
+		} else {
+			copy(data, b)
+		}
+		return
 	default:
 		if page := gpa &^ 0xfff; !v.unknownPages[page] {
 			v.unknownPages[page] = true

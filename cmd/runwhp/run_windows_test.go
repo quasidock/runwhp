@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,20 +16,27 @@ import (
 	"github.com/quasidock/runwhp/internal/image"
 	"github.com/quasidock/runwhp/internal/kernel"
 	"github.com/quasidock/runwhp/internal/virtio"
+	"github.com/quasidock/runwhp/internal/vm"
 )
 
 func TestParseMemory(t *testing.T) {
-	for in, want := range map[string]uint64{
+	want := map[string]uint64{
 		"512m": 512 << 20, "1g": 1 << 30, "1.5g": 1536 << 20, "300M": 300 << 20,
 		"200000k":   196 << 20, // rounded up to 2 MiB
 		"134217728": 128 << 20,
-	} {
+	}
+	maxMem := vm.MaxMemory()
+	if maxMem >= 4<<30 {
+		want["4g"] = 4 << 30 // above the device windows
+	}
+	want[fmt.Sprintf("%dm", maxMem>>20)] = maxMem
+	for in, want := range want {
 		got, err := parseMemory(in)
 		if err != nil || got != want {
 			t.Errorf("parseMemory(%q) = %d, %v; want %d", in, got, err, want)
 		}
 	}
-	for _, in := range []string{"", "x", "-1g", "64m", "4g", "512"} {
+	for _, in := range []string{"", "x", "-1g", "64m", "512", fmt.Sprintf("%dm", maxMem>>20+2)} {
 		if _, err := parseMemory(in); err == nil {
 			t.Errorf("parseMemory(%q) accepted", in)
 		}

@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -22,6 +23,8 @@ var (
 	procDeletePartition      = whpDLL.NewProc("WHvDeletePartition")
 	procSetPartitionProperty = whpDLL.NewProc("WHvSetPartitionProperty")
 	procMapGpaRange          = whpDLL.NewProc("WHvMapGpaRange")
+	procUnmapGpaRange        = whpDLL.NewProc("WHvUnmapGpaRange")
+	procGetVPCounters        = whpDLL.NewProc("WHvGetVirtualProcessorCounters")
 	procCreateVP             = whpDLL.NewProc("WHvCreateVirtualProcessor")
 	procDeleteVP             = whpDLL.NewProc("WHvDeleteVirtualProcessor")
 	procRunVP                = whpDLL.NewProc("WHvRunVirtualProcessor")
@@ -31,9 +34,14 @@ var (
 	procRequestInterrupt     = whpDLL.NewProc("WHvRequestInterrupt")
 	procTranslateGva         = whpDLL.NewProc("WHvTranslateGva")
 
-	kernel32         = syscall.NewLazyDLL("kernel32.dll")
-	procVirtualAlloc = kernel32.NewProc("VirtualAlloc")
-	procVirtualFree  = kernel32.NewProc("VirtualFree")
+	// x/sys/windows has none of GlobalMemoryStatusEx,
+	// K32GetProcessMemoryInfo and DiscardVirtualMemory.
+	kernel32                 = syscall.NewLazyDLL("kernel32.dll")
+	procVirtualAlloc         = kernel32.NewProc("VirtualAlloc")
+	procVirtualFree          = kernel32.NewProc("VirtualFree")
+	procDiscardVirtualMemory = kernel32.NewProc("DiscardVirtualMemory")
+	procGlobalMemoryStatusEx = kernel32.NewProc("GlobalMemoryStatusEx")
+	procGetProcessMemoryInfo = kernel32.NewProc("K32GetProcessMemoryInfo")
 )
 
 // WHV_CAPABILITY_CODE
@@ -175,6 +183,20 @@ func (c *ExitContext) IoRax() uint64  { return c[10] }
 // Memory access context.
 func (c *ExitContext) MemGpa() uint64 { return c[9] }
 
+// Memory access kinds, from WHV_MEMORY_ACCESS_TYPE.
+const (
+	AccessRead    = 0
+	AccessWrite   = 1
+	AccessExecute = 2
+)
+
+// MemAccess decodes WHV_MEMORY_ACCESS_INFO: the kind of access, and whether
+// the guest physical address it touched is mapped at all.
+func (c *ExitContext) MemAccess() (kind uint32, unmapped bool) {
+	info := binary.LittleEndian.Uint32(c.Bytes()[68:])
+	return info & 3, info&4 != 0
+}
+
 func check(name string, r uintptr) error {
 	if hr := uint32(r); hr&0x80000000 != 0 {
 		return fmt.Errorf("%s: HRESULT 0x%08X", name, hr)
@@ -229,6 +251,13 @@ func (p *Partition) MapGpa(host uintptr, gpa, size uint64, flags uint32) error {
 	return check("WHvMapGpaRange", r)
 }
 
+// UnmapGpa removes a mapping made by MapGpa. The range must be exactly one
+// that was mapped.
+func (p *Partition) UnmapGpa(gpa, size uint64) error {
+	r, _, _ := procUnmapGpaRange.Call(p.h, uintptr(gpa), uintptr(size))
+	return check("WHvUnmapGpaRange", r)
+}
+
 func (p *Partition) CreateVP(index uint32) error {
 	r, _, _ := procCreateVP.Call(p.h, uintptr(index), 0)
 	return check("WHvCreateVirtualProcessor", r)
@@ -269,21 +298,135 @@ func (p *Partition) RequestInterrupt(deliveryMode, destMode, destination, vector
 	return check("WHvRequestInterrupt", r)
 }
 
-// AllocMemory commits zeroed, page-aligned memory outside the Go heap to back
-// guest RAM. Release it with FreeMemory once the partition is gone.
-func AllocMemory(size uint64) (uintptr, []byte, error) {
-	const memCommit, memReserve, pageReadWrite = 0x1000, 0x2000, 0x04
-	addr, _, err := procVirtualAlloc.Call(0, uintptr(size), memCommit|memReserve, pageReadWrite)
+// VPRuntime reports how long a virtual processor has run, in total and in
+// the hypervisor on its behalf (WHV_PROCESSOR_RUNTIME_COUNTERS).
+func (p *Partition) VPRuntime(index uint32) (total, hypervisor time.Duration, err error) {
+	var c struct{ total, hypervisor uint64 } // 100 ns units
+	var written uint32
+	const counterSetRuntime = 0
+	r, _, _ := procGetVPCounters.Call(p.h, uintptr(index), counterSetRuntime,
+		uintptr(unsafe.Pointer(&c)), unsafe.Sizeof(c), uintptr(unsafe.Pointer(&written)))
+	if err := check("WHvGetVirtualProcessorCounters", r); err != nil {
+		return 0, 0, err
+	}
+	return time.Duration(c.total) * 100, time.Duration(c.hypervisor) * 100, nil
+}
+
+const (
+	memCommit     = 0x1000
+	memReserve    = 0x2000
+	memDecommit   = 0x4000
+	memRelease    = 0x8000
+	memReset      = 0x80000
+	pageReadWrite = 0x04
+)
+
+// ReserveMemory reserves size bytes of address space outside the Go heap to
+// back guest RAM, without committing any of it. Commit parts of it with
+// CommitMemory, and release all of it with FreeMemory once the partition is
+// gone.
+func ReserveMemory(size uint64) (uintptr, []byte, error) {
+	addr, _, err := procVirtualAlloc.Call(0, uintptr(size), memReserve, pageReadWrite)
 	if addr == 0 {
-		return 0, nil, fmt.Errorf("VirtualAlloc(%d MiB): %w", size>>20, err)
+		return 0, nil, fmt.Errorf("reserving %d MiB of address space: %w", size>>20, err)
 	}
 	return addr, unsafe.Slice((*byte)(ptr(addr)), int(size)), nil
 }
 
+// CommitMemory commits zeroed pages of a reservation.
+func CommitMemory(addr uintptr, size uint64) error {
+	if r, _, err := procVirtualAlloc.Call(addr, uintptr(size), memCommit, pageReadWrite); r == 0 {
+		return fmt.Errorf("committing %d MiB: %w", size>>20, err)
+	}
+	return nil
+}
+
+// DecommitMemory gives committed pages back to Windows. They stay
+// reserved, and touching them faults until they are committed again.
+func DecommitMemory(addr uintptr, size uint64) error {
+	if r, _, err := procVirtualFree.Call(addr, uintptr(size), memDecommit); r == 0 {
+		return fmt.Errorf("decommitting %d MiB: %w", size>>20, err)
+	}
+	return nil
+}
+
+// DiscardMemory tells Windows the contents of committed pages are no
+// longer needed: it may drop them from the working set without writing
+// them anywhere, and they read back as anything. They stay committed.
+func DiscardMemory(addr uintptr, size uint64) error {
+	if r, _, _ := procDiscardVirtualMemory.Call(addr, uintptr(size)); r != 0 {
+		return fmt.Errorf("discarding %d KiB: %w", size>>10, syscall.Errno(r))
+	}
+	return nil
+}
+
+// ResetMemory marks committed pages as not worth keeping, as DiscardMemory
+// does, through VirtualAlloc's MEM_RESET.
+func ResetMemory(addr uintptr, size uint64) error {
+	if r, _, err := procVirtualAlloc.Call(addr, uintptr(size), memReset, pageReadWrite); r == 0 {
+		return fmt.Errorf("resetting %d KiB: %w", size>>10, err)
+	}
+	return nil
+}
+
 func FreeMemory(addr uintptr) {
-	const memRelease = 0x8000
 	procVirtualFree.Call(addr, 0, memRelease)
 }
+
+// PhysicalMemory reports how much RAM Windows has to work with.
+func PhysicalMemory() (uint64, error) {
+	// MEMORYSTATUSEX
+	var st struct {
+		length, memoryLoad                    uint32
+		totalPhys, availPhys                  uint64
+		totalPageFile, availPageFile          uint64
+		totalVirtual, availVirtual, availExtd uint64
+	}
+	st.length = uint32(unsafe.Sizeof(st))
+	if r, _, err := procGlobalMemoryStatusEx.Call(uintptr(unsafe.Pointer(&st))); r == 0 {
+		return 0, fmt.Errorf("GlobalMemoryStatusEx: %w", err)
+	}
+	return st.totalPhys, nil
+}
+
+// ProcessMemoryInfo is what Windows holds for a process.
+type ProcessMemoryInfo struct {
+	// Commit is the private memory committed to the process, which is
+	// what Task Manager calls its commit size.
+	Commit uint64
+	// WorkingSet is the memory resident for it, and PrivateWorkingSet the
+	// part not shared with other processes, which is what Task Manager
+	// shows as its memory. PrivateWorkingSet is 0 before Windows 10 21H2.
+	WorkingSet, PrivateWorkingSet, PeakWorkingSet uint64
+}
+
+// ProcessMemory reports what Windows holds for the process behind h.
+func ProcessMemory(h syscall.Handle) (ProcessMemoryInfo, error) {
+	// PROCESS_MEMORY_COUNTERS_EX2, of which _EX is the first 80 bytes.
+	var c struct {
+		cb, pageFaults                   uint32
+		peakWorkingSet, workingSet       uint64
+		quota                            [4]uint64
+		pagefileUsage, peakPagefileUsage uint64
+		privateUsage, privateWorkingSet  uint64
+		sharedCommit                     uint64
+	}
+	for _, size := range []uint32{uint32(unsafe.Sizeof(c)), 80} {
+		c.cb = size
+		if r, _, err := procGetProcessMemoryInfo.Call(uintptr(h), uintptr(unsafe.Pointer(&c)), uintptr(size)); r == 0 {
+			if size == 80 {
+				return ProcessMemoryInfo{}, fmt.Errorf("GetProcessMemoryInfo: %w", err)
+			}
+			continue
+		}
+		break
+	}
+	return ProcessMemoryInfo{Commit: c.privateUsage, WorkingSet: c.workingSet,
+		PrivateWorkingSet: c.privateWorkingSet, PeakWorkingSet: c.peakWorkingSet}, nil
+}
+
+// CurrentProcess is the pseudo-handle for this process.
+const CurrentProcess = ^syscall.Handle(0)
 
 // ptr converts an address handed to us by Windows into a pointer without
 // tripping vet's unsafe.Pointer arithmetic check. The memory is never on the

@@ -53,15 +53,43 @@ func TestParseKernel(t *testing.T) {
 	}
 }
 
+// flatMem is guest RAM from address 0 in one slice.
+type flatMem []byte
+
+func (m flatMem) Slice(addr, n uint64) ([]byte, bool) {
+	if addr+n < addr || addr+n > uint64(len(m)) {
+		return nil, false
+	}
+	return m[addr : addr+n], true
+}
+
+// sparseMem is guest RAM of any size, of which only the slices Load asked
+// for exist. Asking for a span twice, or for one outside RAM, fails.
+type sparseMem struct {
+	low, high uint64
+	slices    map[uint64][]byte
+}
+
+func (m *sparseMem) Slice(addr, n uint64) ([]byte, bool) {
+	inLow := addr+n <= m.low
+	inHigh := addr >= HighMemoryBase && addr+n <= HighMemoryBase+m.high
+	if addr+n < addr || !inLow && !inHigh || m.slices[addr] != nil {
+		return nil, false
+	}
+	b := make([]byte, n)
+	m.slices[addr] = b
+	return b, true
+}
+
 func TestLoad(t *testing.T) {
 	img := fakeKernel(t, "6.6")
 	k, err := ParseKernel(img)
 	if err != nil {
 		t.Fatal(err)
 	}
-	mem := make([]byte, 64<<20)
+	mem := make(flatMem, 64<<20)
 	initrd := bytes.Repeat([]byte{0xab}, 10000)
-	l, err := Load(mem, k, initrd, "console=ttyS0 quiet", testDevices(3), []uint32{0})
+	l, err := Load(mem, uint64(len(mem)), 0, k, initrd, "console=ttyS0 quiet", testDevices(3), []uint32{0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,8 +104,8 @@ func TestLoad(t *testing.T) {
 	if size != 10000 || at%4096 != 0 || !bytes.Equal(mem[at:at+size], initrd) || uint64(at+size) > uint64(len(mem)) {
 		t.Errorf("initramfs at %#x size %d is wrong", at, size)
 	}
-	if zp[0x1e8] != 3 || le.Uint64(zp[0x2d0+2*20+8:]) != uint64(len(mem))-highMem {
-		t.Error("e820 map is wrong")
+	if got := e820(zp); fmt.Sprint(got) != fmt.Sprint([][3]uint64{{0, lowMemEnd, 1}, {lowMemEnd, highMem - lowMemEnd, 2}, {highMem, uint64(len(mem)) - highMem, 1}}) {
+		t.Errorf("e820 map is %x", got)
 	}
 	if le.Uint64(zp[0x70:]) == 0 {
 		t.Error("acpi_rsdp_addr not set")
@@ -88,13 +116,59 @@ func TestLoad(t *testing.T) {
 		t.Errorf("page directory entry = %#x", pd)
 	}
 
-	small := make([]byte, 16<<20)
-	if _, err := Load(small, k, nil, "", nil, []uint32{0}); err == nil {
+	small := make(flatMem, 16<<20)
+	if _, err := Load(small, uint64(len(small)), 0, k, nil, "", nil, []uint32{0}); err == nil {
 		t.Error("loaded a kernel into too little memory")
 	}
-	if _, err := Load(mem, k, nil, "", nil, nil); err == nil {
+	if _, err := Load(mem, uint64(len(mem)), 0, k, nil, "", nil, nil); err == nil {
 		t.Error("loaded a guest without processors")
 	}
+}
+
+// TestLoadHighMemory loads an 8 GiB guest, with RAM up to the device hole
+// and the rest above 4 GiB, and checks that everything lands in low RAM.
+func TestLoadHighMemory(t *testing.T) {
+	k, err := ParseKernel(fakeKernel(t, "6.18"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const low = 0xd0000000
+	const high = 8<<30 - low
+	mem := &sparseMem{low: low, high: high, slices: map[uint64][]byte{}}
+	initrd := bytes.Repeat([]byte{0xcd}, 3<<20)
+	l, err := Load(mem, low, high, k, initrd, "quiet", testDevices(2), []uint32{0, 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	zp := mem.slices[0][ZeroPage:]
+	at, size := uint64(le.Uint32(zp[0x218:])), uint64(le.Uint32(zp[0x21c:]))
+	if at != l.InitrdAt || size != uint64(len(initrd)) || at+size > 1<<31 || !bytes.Equal(mem.slices[at], initrd) {
+		t.Errorf("initramfs at %#x size %d; want it whole below 2 GiB", at, size)
+	}
+	want := [][3]uint64{{0, lowMemEnd, 1}, {lowMemEnd, highMem - lowMemEnd, 2}, {highMem, low - highMem, 1}, {HighMemoryBase, high, 1}}
+	if got := e820(zp); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("e820 map is %x, want %x", got, want)
+	}
+	for addr := range mem.slices {
+		if addr >= low {
+			t.Errorf("Load wrote at %#x, above low RAM", addr)
+		}
+	}
+
+	// RAM that ends below the kernel is refused, whatever lies above 4 GiB.
+	if _, err := Load(&sparseMem{low: 16 << 20, high: high, slices: map[uint64][]byte{}}, 16<<20, high, k, nil, "", nil, []uint32{0}); err == nil {
+		t.Error("loaded a kernel into too little low memory")
+	}
+}
+
+// e820 decodes boot_params' e820 table as {address, size, type} entries.
+func e820(zp []byte) [][3]uint64 {
+	var entries [][3]uint64
+	for i := range int(zp[0x1e8]) {
+		p := zp[0x2d0+i*20:]
+		entries = append(entries, [3]uint64{le.Uint64(p[0:]), le.Uint64(p[8:]), uint64(le.Uint32(p[16:]))})
+	}
+	return entries
 }
 
 func testDevices(virtio int) []Device {

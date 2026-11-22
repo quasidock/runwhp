@@ -35,7 +35,10 @@ const (
 	// probe. no5lvl: on CPUs with 5-level paging, the bzImage decompressor
 	// would otherwise switch paging modes through a trampoline in low
 	// memory, which runwhp's boot layout has not been tried with.
-	baseCmdline = "console=ttyS0 nokaslr no5lvl pci=off panic=-1 reboot=acpi"
+	// swiotlb=noforce: with RAM above 4 GiB, the kernel would otherwise
+	// set aside and zero 64 MiB of bounce buffers for devices that cannot
+	// reach it, and no runwhp device needs them.
+	baseCmdline = "console=ttyS0 nokaslr no5lvl pci=off swiotlb=noforce panic=-1 reboot=acpi"
 	consoleTail = 200 // kernel console lines kept for error reports
 )
 
@@ -462,8 +465,8 @@ func parseMemory(s string) (uint64, error) {
 		return 0, fmt.Errorf("invalid memory size %q", s)
 	}
 	size := (n + (2<<20 - 1)) &^ (2<<20 - 1)
-	if size < 128<<20 || size > vm.MaxMemory {
-		return 0, fmt.Errorf("memory must be between 128m and %dm", vm.MaxMemory>>20)
+	if maxMem := vm.MaxMemory(); size < 128<<20 || size > maxMem {
+		return 0, fmt.Errorf("memory must be between 128m and %dm, this machine's memory", maxMem>>20)
 	}
 	return size, nil
 }

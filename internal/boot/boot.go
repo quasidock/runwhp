@@ -1,7 +1,7 @@
 // Package boot lays out a guest for direct Linux boot: the 64-bit boot
 // protocol, identity page tables, hardware-reduced ACPI tables and a newc
-// initramfs. It only writes bytes into a slice, so it builds and tests on any
-// operating system.
+// initramfs. It only writes bytes into guest memory it is handed, so it
+// builds and tests on any operating system.
 package boot
 
 import (
@@ -26,7 +26,17 @@ const (
 
 	IOAPICBase = 0xfec00000
 	LAPICBase  = 0xfee00000
+
+	// HighMemoryBase is where guest RAM resumes above the 32-bit hole that
+	// holds the devices.
+	HighMemoryBase = 1 << 32
 )
+
+// Memory is guest RAM as Load writes it. Slice returns the n bytes at guest
+// physical address addr, or false if they are not all RAM.
+type Memory interface {
+	Slice(addr, n uint64) ([]byte, bool)
+}
 
 // Segment selectors and attributes (G | D/L | P | S | type) the boot protocol
 // expects: __BOOT_CS and __BOOT_DS.
@@ -97,21 +107,37 @@ type Layout struct {
 }
 
 // Load places the kernel, an optional initramfs, the command line,
-// boot_params, page tables, a GDT and the ACPI tables into guest memory,
-// which starts at guest physical address 0. apicIDs are the local APIC ids
-// of the guest's processors, the boot processor first.
-func Load(mem []byte, k *Kernel, initrd []byte, cmdline string, devices []Device, apicIDs []uint32) (Layout, error) {
+// boot_params, page tables, a GDT and the ACPI tables into guest memory. The
+// guest has low bytes of RAM from address 0 and high bytes more from
+// HighMemoryBase; everything Load writes goes in low RAM. apicIDs are the
+// local APIC ids of the guest's processors, the boot processor first.
+func Load(mem Memory, low, high uint64, k *Kernel, initrd []byte, cmdline string, devices []Device, apicIDs []uint32) (Layout, error) {
 	var l Layout
-	ram := uint64(len(mem))
-	l.KernelAt, l.InitSize = k.prefAddress, k.initSize
-	if l.KernelAt+uint64(l.InitSize) > ram || uint64(len(k.payload)) > uint64(l.InitSize) {
-		return l, fmt.Errorf("kernel needs %d MiB at %#x; guest has %d MiB", l.InitSize>>20, l.KernelAt, ram>>20)
+	region := func(addr, n uint64) ([]byte, error) {
+		b, ok := mem.Slice(addr, n)
+		if !ok {
+			return nil, fmt.Errorf("guest memory at %#x (%d bytes) is not RAM", addr, n)
+		}
+		return b, nil
 	}
-	copy(mem[l.KernelAt:], k.payload)
+	l.KernelAt, l.InitSize = k.prefAddress, k.initSize
+	if l.KernelAt+uint64(l.InitSize) > low || uint64(len(k.payload)) > uint64(l.InitSize) {
+		return l, fmt.Errorf("kernel needs %d MiB at %#x; guest has %d MiB", l.InitSize>>20, l.KernelAt, low>>20)
+	}
+	// The first MiB holds the tables, boot_params and the command line.
+	first, err := region(0, highMem)
+	if err != nil {
+		return l, err
+	}
+	payload, err := region(l.KernelAt, uint64(len(k.payload)))
+	if err != nil {
+		return l, err
+	}
+	copy(payload, k.payload)
 	l.Entry = l.KernelAt + 0x200 // startup_64
 
 	// boot_params: copy the setup header, then fill in loader fields.
-	zp := mem[ZeroPage : ZeroPage+0x1000]
+	zp := first[ZeroPage : ZeroPage+0x1000]
 	clear(zp)
 	hdrEnd := 0x202 + int(k.image[0x201])
 	copy(zp[0x1f1:hdrEnd], k.image[0x1f1:hdrEnd])
@@ -120,12 +146,12 @@ func Load(mem []byte, k *Kernel, initrd []byte, cmdline string, devices []Device
 	if len(cmdline)+1 > int(k.cmdlineMax) || cmdlineAddr+len(cmdline)+1 > lowMemEnd {
 		return l, fmt.Errorf("kernel command line too long (%d bytes)", len(cmdline))
 	}
-	copy(mem[cmdlineAddr:], cmdline)
-	mem[cmdlineAddr+len(cmdline)] = 0
+	copy(first[cmdlineAddr:], cmdline)
+	first[cmdlineAddr+len(cmdline)] = 0
 	le.PutUint32(zp[0x228:], cmdlineAddr)
 
 	if len(initrd) > 0 {
-		top := min(ram, uint64(k.initrdMax)+1)
+		top := min(low, uint64(k.initrdMax)+1)
 		if uint64(len(initrd)) > top {
 			return l, fmt.Errorf("initramfs (%d MiB) does not fit in guest memory", len(initrd)>>20)
 		}
@@ -133,20 +159,28 @@ func Load(mem []byte, k *Kernel, initrd []byte, cmdline string, devices []Device
 		if l.InitrdAt < l.KernelAt+uint64(l.InitSize) {
 			return l, fmt.Errorf("initramfs (%d MiB) does not fit above the kernel", len(initrd)>>20)
 		}
-		copy(mem[l.InitrdAt:], initrd)
+		dst, err := region(l.InitrdAt, uint64(len(initrd)))
+		if err != nil {
+			return l, err
+		}
+		copy(dst, initrd)
 		le.PutUint32(zp[0x218:], uint32(l.InitrdAt))
 		le.PutUint32(zp[0x21c:], uint32(len(initrd)))
 	}
 
 	// e820 memory map.
 	const e820RAM, e820Reserved = 1, 2
-	entries := []struct {
+	type e820 struct {
 		addr, size uint64
 		kind       uint32
-	}{
+	}
+	entries := []e820{
 		{0, lowMemEnd, e820RAM},
 		{lowMemEnd, highMem - lowMemEnd, e820Reserved},
-		{highMem, ram - highMem, e820RAM},
+		{highMem, low - highMem, e820RAM},
+	}
+	if high > 0 {
+		entries = append(entries, e820{HighMemoryBase, high, e820RAM})
 	}
 	for i, e := range entries {
 		p := zp[0x2d0+i*20:]
@@ -156,26 +190,28 @@ func Load(mem []byte, k *Kernel, initrd []byte, cmdline string, devices []Device
 	}
 	zp[0x1e8] = byte(len(entries))
 
-	rsdp, err := writeACPI(mem[acpiAddr:acpiEnd], acpiAddr, devices, apicIDs)
+	rsdp, err := writeACPI(first[acpiAddr:acpiEnd], acpiAddr, devices, apicIDs)
 	if err != nil {
 		return l, err
 	}
 	le.PutUint64(zp[0x70:], rsdp) // acpi_rsdp_addr
 
-	// Identity-map the first 4 GiB with 2 MiB pages.
+	// Identity-map the first 4 GiB with 2 MiB pages: enough for the
+	// kernel, boot_params and the command line, which is all the boot
+	// protocol asks; the kernel builds its own tables for the rest.
 	const present, writable, huge = 1, 2, 0x80
 	pdpt, pd := uint64(PML4Addr+0x1000), uint64(PML4Addr+0x2000)
-	le.PutUint64(mem[PML4Addr:], pdpt|present|writable)
+	le.PutUint64(first[PML4Addr:], pdpt|present|writable)
 	for i := uint64(0); i < 4; i++ {
-		le.PutUint64(mem[pdpt+i*8:], (pd+i*0x1000)|present|writable)
+		le.PutUint64(first[pdpt+i*8:], (pd+i*0x1000)|present|writable)
 		for j := uint64(0); j < 512; j++ {
-			le.PutUint64(mem[pd+i*0x1000+j*8:], (i<<30|j<<21)|present|writable|huge)
+			le.PutUint64(first[pd+i*0x1000+j*8:], (i<<30|j<<21)|present|writable|huge)
 		}
 	}
 
 	// GDT: null, null, __BOOT_CS (0x10), __BOOT_DS (0x18).
-	le.PutUint64(mem[GDTAddr+SelCode:], 0x00af9b000000ffff)
-	le.PutUint64(mem[GDTAddr+SelData:], 0x00cf93000000ffff)
+	le.PutUint64(first[GDTAddr+SelCode:], 0x00af9b000000ffff)
+	le.PutUint64(first[GDTAddr+SelData:], 0x00cf93000000ffff)
 	return l, nil
 }
 
