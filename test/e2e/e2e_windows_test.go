@@ -60,16 +60,37 @@ func runwhp(t *testing.T) string {
 	return exe
 }
 
-// runArgs is the argument list of runwhp run, with RUNWHP_E2E_RUN_FLAGS
-// before args.
+// runArgs is the argument list of runwhp run --rm, with
+// RUNWHP_E2E_RUN_FLAGS before args. --rm keeps the tests from leaving
+// containers behind; keepArgs leaves it out.
 func runArgs(args ...string) []string {
-	out := []string{"run"}
+	return append([]string{"run", "--rm"}, withFlags(args)...)
+}
+
+// keepArgs is the argument list of runwhp run, which keeps the container,
+// with RUNWHP_E2E_RUN_FLAGS before args.
+func keepArgs(args ...string) []string {
+	return append([]string{"run"}, withFlags(args)...)
+}
+
+func withFlags(args []string) []string {
+	var out []string
 	for _, f := range filepath.SplitList(os.Getenv("RUNWHP_E2E_RUN_FLAGS")) {
 		if f != "" {
 			out = append(out, f)
 		}
 	}
 	return append(out, args...)
+}
+
+// cli runs runwhp with exactly args.
+func cli(t *testing.T, args ...string) result {
+	t.Helper()
+	cmd := exec.Command(runwhp(t), args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	return result{stdout.String(), stderr.String(), exitCode(err)}
 }
 
 type result struct {

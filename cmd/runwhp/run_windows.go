@@ -4,8 +4,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -66,6 +64,8 @@ type runOptions struct {
 	mounts      listFlag
 	tmpfs       listFlag
 	storageOpts listFlag
+	name        string
+	rm          bool
 
 	// Development flags, left out of the usage text.
 	init    string
@@ -108,6 +108,8 @@ func runFlags(o *runOptions) *flag.FlagSet {
 	fs.Var(&o.mounts, "mount", "")
 	fs.Var(&o.tmpfs, "tmpfs", "")
 	fs.Var(&o.storageOpts, "storage-opt", "")
+	fs.StringVar(&o.name, "name", "", "")
+	fs.BoolVar(&o.rm, "rm", false, "")
 	fs.StringVar(&o.init, "init", "", "")
 	fs.Var(&o.layers, "layer", "")
 	fs.Var(&o.modules, "module", "")
@@ -123,7 +125,10 @@ Flags:
   -u, --user USER[:GROUP]  user to run as: name or uid, optionally with a group
   -m, --memory SIZE      guest memory, such as 512m or 2g (default 512m)
       --cpus N           virtual processors (default: this machine's, up to 4)
-      --hostname NAME    container hostname (default: random)
+      --name NAME        name the container, as well as its ID
+      --rm               remove the container when it stops; otherwise it is kept, with
+                         its writable layer, until runwhp delete
+      --hostname NAME    container hostname (default: the start of its ID)
       --network MODE     user (default: outbound access through this machine) or none
   -p, --publish [IP:]HOSTPORT:PORT  forward a host port to a container TCP port (repeatable);
                          IP defaults to 127.0.0.1
@@ -132,7 +137,7 @@ Flags:
   -v, --volume HOSTPATH:PATH[:ro]  bind a host directory or file into the container (repeatable);
                          HOSTPATH is absolute or starts with a dot, and is created if missing
   -v, --volume NAME:PATH[:ro]  mount a named volume, created if missing; PATH alone makes an
-                         anonymous volume, gone after the run
+                         anonymous volume, removed with the container
       --mount type=bind|volume|tmpfs,source=...,target=PATH[,readonly]  the same, Docker's long form
       --tmpfs PATH[:OPTIONS]  mount a tmpfs, by default noexec,nosuid,nodev (repeatable)
       --storage-opt size=SIZE  how large the container's writable layer may grow (default 64g)
@@ -201,8 +206,21 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 	if err != nil {
 		return fail, err
 	}
-	logf("%4d ms  configuration resolved: %d layers", time.Since(start).Milliseconds(), max(len(cfg.Layers), len(cfg.LayerFiles)))
-	return bootContainer(ctx, root, cfg, policy, proxy, logf, start)
+	cfg.AutoRemove = o.rm
+	store := container.Open(root)
+	rec, err := store.Create(cfg, o.name)
+	if err != nil {
+		return fail, err
+	}
+	sup, err := supervise(store, rec, container.OutputTerminal)
+	if err != nil {
+		store.Remove(rec)
+		return fail, err
+	}
+	logf("%4d ms  container %s recorded: %d layers", time.Since(start).Milliseconds(), rec.Short(), max(len(cfg.Layers), len(cfg.LayerFiles)))
+	code, err := bootContainer(ctx, root, rec, policy, proxy, bootHooks{started: sup.started}, logf, start)
+	sup.finish(code, err)
+	return code, err
 }
 
 // resolveConfig turns run's flags and arguments into a container's
@@ -231,7 +249,7 @@ func resolveConfig(ctx context.Context, root string, o *runOptions, entrypointSe
 		return nil, err
 	}
 	cfg := &container.Config{
-		Version: container.ConfigVersion, Created: time.Now().UTC(),
+		Version: container.ConfigVersion, ID: container.NewID(), Created: time.Now().UTC(),
 		Stdin: o.interactive, TTY: o.tty,
 		Hosts: network.hosts, Network: network.enabled, Publish: network.publish, HostGateway: network.hostGateway,
 		Shares: plan.shares, Mounts: plan.mounts,
@@ -325,7 +343,7 @@ func resolveConfig(ctx context.Context, root string, o *runOptions, entrypointSe
 	}
 
 	if cfg.Hostname = o.hostname; cfg.Hostname == "" {
-		cfg.Hostname = randomHostname()
+		cfg.Hostname = cfg.ID[:12] // as Docker names it
 	}
 	return cfg, nil
 }
@@ -454,21 +472,19 @@ func parseCPUs(s string, host int) (int, error) {
 	return n, nil
 }
 
-func randomHostname() string {
-	var b [6]byte
-	rand.Read(b[:])
-	return hex.EncodeToString(b[:])
-}
-
-// statusWriter collects the JSON status line init sends on the control port.
-type statusWriter struct {
+// eventWriter reads the Events init sends on the control port, as JSON
+// lines, and keeps how the container ended.
+type eventWriter struct {
 	mu     sync.Mutex
 	buf    []byte
 	status guestspec.Status
 	ok     bool
+	// onStarted, if set, is called when the container process starts,
+	// with its pid in the guest.
+	onStarted func(pid int)
 }
 
-func (w *statusWriter) Write(p []byte) (int, error) {
+func (w *eventWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.buf = append(w.buf, p...)
@@ -477,16 +493,22 @@ func (w *statusWriter) Write(p []byte) (int, error) {
 		if i < 0 {
 			break
 		}
-		var st guestspec.Status
-		if err := json.Unmarshal(w.buf[:i], &st); err == nil {
-			w.status, w.ok = st, true
+		var ev guestspec.Event
+		if err := json.Unmarshal(w.buf[:i], &ev); err == nil {
+			switch {
+			case ev.Exited:
+				w.status, w.ok = guestspec.Status{Exit: ev.Exit, Error: ev.Error}, true
+			case ev.Started && w.onStarted != nil:
+				w.onStarted(ev.Pid)
+			}
 		}
 		w.buf = w.buf[i+1:]
 	}
 	return len(p), nil
 }
 
-func (w *statusWriter) get() (guestspec.Status, bool) {
+// get returns how the container ended, once init has said.
+func (w *eventWriter) get() (guestspec.Status, bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.status, w.ok

@@ -64,8 +64,8 @@ func main() {
 	syscall.Mount("sysfs", "/sys", "sysfs", 0, "")
 	console, _ = os.OpenFile("/dev/console", os.O_WRONLY, 0)
 
-	status := guestspec.Status{Exit: guestspec.ExitRuntime}
-	control, err := start(begin)
+	ctl := &controller{}
+	status, err := start(begin, ctl)
 	if err != nil {
 		var f *failure
 		if e, ok := err.(*failure); ok {
@@ -75,31 +75,20 @@ func main() {
 		}
 		logf("%v", f.err)
 		status = guestspec.Status{Exit: f.code, Error: f.err.Error()}
-	} else {
-		status = control.status
 	}
-	if control != nil && control.port != nil {
-		line, _ := json.Marshal(status)
-		if _, err := control.port.Write(append(line, '\n')); err != nil {
-			logf("reporting status: %v", err)
-		}
-	}
+	ctl.send(guestspec.Event{Exited: true, Exit: status.Exit, Error: status.Error})
 	shutdown()
 }
 
-type outcome struct {
-	port   *os.File
-	status guestspec.Status
-}
-
-func start(begin time.Time) (*outcome, error) {
+func start(begin time.Time, ctl *controller) (guestspec.Status, error) {
+	var none guestspec.Status
 	data, err := os.ReadFile("/" + guestspec.SpecPath)
 	if err != nil {
-		return nil, err
+		return none, err
 	}
 	var spec guestspec.Spec
 	if err := json.Unmarshal(data, &spec); err != nil {
-		return nil, fmt.Errorf("reading %s: %w", guestspec.SpecPath, err)
+		return none, fmt.Errorf("reading %s: %w", guestspec.SpecPath, err)
 	}
 	debug = spec.Debug
 	debugf("started %d ms after the kernel handed over", time.Since(begin).Milliseconds())
@@ -111,38 +100,38 @@ func start(begin time.Time) (*outcome, error) {
 		want = append(want, portMode{guestspec.PortStdin, os.O_RDONLY})
 	}
 	ports, err := openPorts(want, 5*time.Second)
-	out := &outcome{}
-	ctl := &controller{}
 	if p := ports[guestspec.PortControl]; p != nil {
-		out.port = p
+		ctl.setPort(p)
 		go ctl.listen(p)
 	}
 	if err != nil {
-		return out, err
+		return none, err
 	}
 	debugf("console ports open")
 
 	if err := mountRoot(&spec); err != nil {
-		return out, err
+		return none, err
 	}
 	debugf("root filesystem mounted from %d layers", spec.Layers)
 	if err := prepareRoot(&spec); err != nil {
-		return out, err
+		return none, err
 	}
 	user, err := resolveUser(&spec)
 	if err != nil {
-		return out, err
+		return none, err
 	}
-	// After prepareRoot, so the user's own /etc/hosts, say, wins over the
-	// one runwhp writes, and runwhp never writes into a host file.
 	if err := mountAll(&spec, user); err != nil {
-		return out, err
+		return none, err
+	}
+	// After the other mounts, so that a volume on /etc gets runwhp's
+	// files too, and a mount of the user's own /etc/hosts, say, wins.
+	if err := bindEtc(&spec); err != nil {
+		return none, err
 	}
 	if err := enterRoot(); err != nil {
-		return out, err
+		return none, err
 	}
-	out.status, err = runProcess(&spec, user, ports, ctl)
-	return out, err
+	return runProcess(&spec, user, ports, ctl)
 }
 
 func shutdown() {

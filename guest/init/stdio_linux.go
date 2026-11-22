@@ -195,7 +195,7 @@ func ioctl(f *os.File, req uintptr, arg unsafe.Pointer) error {
 
 // controller applies the host's Control messages: signals for the container
 // process or its process group, held until it has started, and terminal
-// sizes.
+// sizes. It also sends init's Events to the host.
 type controller struct {
 	mu         sync.Mutex
 	pid        int
@@ -203,6 +203,30 @@ type controller struct {
 	held       []guestspec.Control
 	master     *os.File
 	rows, cols uint16 // the latest size, for a terminal not made yet
+
+	sendMu sync.Mutex
+	port   *os.File // the control port, once open
+
+}
+
+// setPort gives send the control port.
+func (c *controller) setPort(port *os.File) {
+	c.sendMu.Lock()
+	c.port = port
+	c.sendMu.Unlock()
+}
+
+// send writes an Event to the host, if the control port is open.
+func (c *controller) send(ev guestspec.Event) {
+	line, _ := json.Marshal(ev)
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if c.port == nil {
+		return
+	}
+	if _, err := c.port.Write(append(line, '\n')); err != nil {
+		logf("sending %s: %v", line, err)
+	}
 }
 
 // listen reads Control messages from the control port until it closes.

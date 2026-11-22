@@ -27,14 +27,22 @@ import (
 	"github.com/quasidock/runwhp/internal/volume"
 )
 
-// boot runs a container's VM until it stops, and returns the container's
-// exit code.
-func bootContainer(ctx context.Context, root string, cfg *container.Config, policy image.Policy, proxy *signalProxy, logf func(string, ...any), start time.Time) (int, error) {
-	const fail = guestspec.ExitRuntime
+// bootHooks tell bootContainer's caller how the container is doing.
+type bootHooks struct {
+	// started, if set, is called when the container process has started,
+	// with its pid in the guest.
+	started func(pid int)
+}
 
-	// The scratch disk is made while the kernel is read.
-	scratch := startScratch(root, cfg.StorageSize)
-	defer scratch.close()
+// bootContainer runs a container's VM until it stops, and returns the
+// container's exit code. The caller holds the container's lock.
+func bootContainer(ctx context.Context, root string, rec *container.Container, policy image.Policy, proxy *signalProxy, hooks bootHooks, logf func(string, ...any), start time.Time) (int, error) {
+	const fail = guestspec.ExitRuntime
+	cfg := rec.Config
+
+	// The writable layer is opened, or made, while the kernel is read.
+	layer := startLayer(rec.RW(), cfg.StorageSize, cfg.AutoRemove)
+	defer layer.close()
 
 	layerFiles, err := layerPaths(root, cfg)
 	if err != nil {
@@ -86,17 +94,18 @@ func bootContainer(ctx context.Context, root string, cfg *container.Config, poli
 		return fail, err
 	}
 
-	sr := scratch.get()
-	if sr.err != nil {
-		return fail, sr.err
+	lr := layer.get()
+	if lr.err != nil {
+		return fail, lr.err
 	}
-	if sr.file != nil {
-		logf("%4d ms  scratch disk ready: %d GiB, formatted in %d ms", time.Since(start).Milliseconds(), cfg.StorageSize>>30, sr.took.Milliseconds())
+	keep := lr.file != nil && !cfg.AutoRemove
+	if lr.file != nil {
+		logf("%4d ms  writable layer ready: %d GiB, kept %v, opened in %d ms", time.Since(start).Milliseconds(), cfg.StorageSize>>30, keep, lr.took.Milliseconds())
 	}
 
 	spec := guestspec.Spec{
 		Args: cfg.Args, Env: cfg.Env, Cwd: cfg.Cwd, User: cfg.User,
-		Hostname: cfg.Hostname, Hosts: cfg.Hosts, Layers: len(layerFiles), Scratch: sr.file != nil,
+		Hostname: cfg.Hostname, Hosts: cfg.Hosts, Layers: len(layerFiles), Scratch: lr.file != nil, KeepLayer: keep,
 		Volumes: len(volumeDevices), Debug: cfg.Debug, Stdin: cfg.Stdin, TTY: cfg.TTY, Network: guestNetwork(cfg.Network),
 		Mounts: cfg.Mounts,
 	}
@@ -127,7 +136,7 @@ func bootContainer(ctx context.Context, root string, cfg *container.Config, poli
 			stdin = &consoleReader{h: windows.Handle(os.Stdin.Fd()), lines: !cfg.TTY}
 		}
 	}
-	status := &statusWriter{}
+	status := &eventWriter{onStarted: hooks.started}
 	console := &virtio.Console{
 		Ports: []virtio.Port{
 			{Name: guestspec.PortStdout, Out: os.Stdout},
@@ -184,10 +193,12 @@ func bootContainer(ctx context.Context, root string, cfg *container.Config, poli
 		devices = append(devices, &virtio.Blk{File: f, Sectors: uint64(size) / 512, ReadOnly: true,
 			Serial: guestspec.LayerSerial(i)})
 	}
-	if sr.file != nil {
-		// No FLUSH: the disk is thrown away after the run, so the guest
-		// need never wait for the host's disk.
-		devices = append(devices, &virtio.Blk{File: sr.file, Sectors: uint64(cfg.StorageSize) / 512, Discard: true,
+	if lr.file != nil {
+		// A kept layer offers FLUSH, so fsync in the container reaches the
+		// host's disk, as it would under Docker. A scratch disk does not:
+		// it is thrown away after the run, so the guest need never wait for
+		// the host's disk.
+		devices = append(devices, &virtio.Blk{File: lr.file, Sectors: uint64(cfg.StorageSize) / 512, Discard: true, Flush: keep,
 			Serial: guestspec.ScratchSerial})
 	}
 	devices = append(devices, volumeDevices...)

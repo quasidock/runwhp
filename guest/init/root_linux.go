@@ -115,13 +115,27 @@ func mountRoot(spec *guestspec.Spec) error {
 	opts := "lowerdir=" + strings.Join(lower, ":") + ",upperdir=/rw/upper,workdir=/rw/work"
 	if spec.Scratch {
 		dev := devices[guestspec.ScratchSerial]
+		replay := spec.KeepLayer && needsRecovery(dev)
 		if err := syscall.Mount(dev, "/rw", "ext4", 0, scratchMountOpts); err != nil {
 			return fmt.Errorf("mounting the scratch disk (%s): %w", dev, err)
 		}
-		// The scratch disk is thrown away after the run, so syncs on the
-		// container's root need not reach it.
-		opts += overlayScratchOpts
-		debugf("writable layer on the scratch disk, %s", dev)
+		if spec.KeepLayer {
+			// The layer outlives the run, so stopStorage freezes it.
+			fd, err := syscall.Open("/rw", syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
+			if err != nil {
+				return err
+			}
+			storage.rw = fd
+			openRCUExpedited()
+			if replay {
+				debugf("writable layer (%s): replayed its journal", dev)
+			}
+		} else {
+			// The scratch disk is thrown away after the run, so syncs on
+			// the container's root need not reach it.
+			opts += overlayScratchOpts
+		}
+		debugf("writable layer on the scratch disk, %s (kept %v)", dev, spec.KeepLayer)
 	} else if err := syscall.Mount("tmpfs", "/rw", "tmpfs", 0, "mode=755"); err != nil {
 		return fmt.Errorf("mounting tmpfs for the writable layer: %w", err)
 	}
@@ -135,8 +149,10 @@ func mountRoot(spec *guestspec.Spec) error {
 
 // Mount options for the scratch disk's ext4 and the overlay above it.
 // discard gives the host back the space of what the container deletes
-// during the run. volatile drops the overlay's syncs, which the scratch
-// disk does not need.
+// during the run. volatile drops the overlay's syncs, which a scratch disk
+// thrown away after the run does not need. A kept one cannot have it: a
+// volatile overlay leaves a mark in its work directory that only an unmount
+// removes, and refuses to be mounted again while it is there.
 const (
 	scratchMountOpts   = "discard"
 	overlayScratchOpts = ",volatile"
@@ -174,12 +190,14 @@ func prepareRoot(spec *guestspec.Spec) error {
 		}
 	}
 
-	os.MkdirAll(in("/etc"), 0o755)
+	if err := os.MkdirAll(etcDir, 0o755); err != nil {
+		return err
+	}
 	if spec.Hostname != "" {
 		if err := syscall.Sethostname([]byte(spec.Hostname)); err != nil {
 			return fmt.Errorf("setting hostname: %w", err)
 		}
-		writeEtc(in("/etc/hostname"), spec.Hostname+"\n")
+		writeEtc("hostname", spec.Hostname+"\n")
 	}
 	if spec.Hostname != "" || len(spec.Hosts) > 0 {
 		var hosts strings.Builder
@@ -187,7 +205,7 @@ func prepareRoot(spec *guestspec.Spec) error {
 		for _, h := range spec.Hosts {
 			hosts.WriteString(h + "\n")
 		}
-		writeEtc(in("/etc/hosts"), hosts.String())
+		writeEtc("hosts", hosts.String())
 	}
 	if err := loopbackUp(); err != nil {
 		logf("bringing up lo: %v", err)
@@ -200,18 +218,66 @@ func prepareRoot(spec *guestspec.Spec) error {
 		for _, server := range n.DNS {
 			fmt.Fprintf(&resolv, "nameserver %s\n", server)
 		}
-		writeEtc(in("/etc/resolv.conf"), resolv.String())
+		writeEtc("resolv.conf", resolv.String())
 	}
 	return nil
 }
 
-// writeEtc replaces a file in the image, even when the image has it as a
-// symlink, so the write never escapes into another path.
-func writeEtc(path, content string) {
-	os.Remove(path)
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		logf("writing %s: %v", path, err)
+// etcDir holds, in the initramfs, the files bindEtc binds over the
+// image's /etc/hostname, /etc/hosts and /etc/resolv.conf.
+const etcDir = "/runwhp/etc"
+
+// etcFiles are the files of etcDir, in the order bindEtc binds them.
+var etcFiles = []string{"hostname", "hosts", "resolv.conf"}
+
+func writeEtc(name, content string) {
+	if err := os.WriteFile(filepath.Join(etcDir, name), []byte(content), 0o644); err != nil {
+		logf("writing %s: %v", name, err)
 	}
+}
+
+// bindEtc binds the files prepareRoot wrote over the image's, as Docker
+// does, rather than writing them into the writable layer, which would keep
+// them in a container's changes. A mount the spec makes at one of those
+// paths wins, and none is bound where the host's files are, so that runwhp
+// never makes files on the host.
+func bindEtc(spec *guestspec.Spec) error {
+	for _, name := range etcFiles {
+		src := filepath.Join(etcDir, name)
+		if _, err := os.Stat(src); err != nil {
+			continue
+		}
+		target := "/etc/" + name
+		if mountedOver(spec, target) {
+			continue
+		}
+		p, err := resolveIn(target)
+		if err != nil {
+			return fmt.Errorf("%s: %w", target, err)
+		}
+		if err := makeMountPoint(p, true); err != nil {
+			logf("not binding %s: %v", target, err)
+			continue
+		}
+		if err := syscall.Mount(src, p, "", syscall.MS_BIND, ""); err != nil {
+			return fmt.Errorf("binding %s: %w", target, err)
+		}
+	}
+	return nil
+}
+
+// mountedOver reports whether the spec mounts something at target, or binds
+// host files at or above it.
+func mountedOver(spec *guestspec.Spec, target string) bool {
+	for _, m := range spec.Mounts {
+		if m.Target == target {
+			return true
+		}
+		if m.Kind == guestspec.MountBind && (m.Target == "/" || strings.HasPrefix(target, m.Target+"/")) {
+			return true
+		}
+	}
+	return false
 }
 
 func populateDev(dev string) error {

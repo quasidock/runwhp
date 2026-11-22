@@ -36,9 +36,7 @@ func prepareVolumes(spec *guestspec.Spec) error {
 		if err != nil {
 			return err
 		}
-		if fd, err := syscall.Open("/sys/kernel/rcu_expedited", syscall.O_WRONLY|syscall.O_CLOEXEC, 0); err == nil {
-			storage.rcuExpedited = fd
-		}
+		openRCUExpedited()
 		for i := range spec.Volumes {
 			dev, dir := devices[guestspec.VolumeSerial(i)], volumeDir(i)
 			if err := os.MkdirAll(dir, 0o755); err != nil {

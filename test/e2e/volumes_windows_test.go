@@ -314,7 +314,7 @@ func TestVolumeCommands(t *testing.T) {
 	env := []string{"RUNWHP_ROOT=" + t.TempDir()}
 	volumeCmd(t, env, "", "create", "one")
 	volumeCmd(t, env, "", "create", "two")
-	if r := volumeCmd(t, env, "", "prune"); r.code != 0 || !strings.Contains(r.stdout, "no anonymous volumes") {
+	if r := volumeCmd(t, env, "", "prune"); r.code != 0 || !strings.Contains(r.stdout, "go with their containers") {
 		t.Errorf("prune without -a: exit %d, stdout %q", r.code, r.stdout)
 	}
 	expect(t, volumeCmd(t, env, "n\n", "prune", "-a"), "", 0)

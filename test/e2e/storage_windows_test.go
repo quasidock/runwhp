@@ -28,10 +28,10 @@ func storeDir(t *testing.T) string {
 	return filepath.Join(dir, "runwhp")
 }
 
-// scratchFiles lists the scratch disks in the store.
-func scratchFiles(t *testing.T) map[string]bool {
+// containerDirs lists the containers' directories in the store.
+func containerDirs(t *testing.T) map[string]bool {
 	t.Helper()
-	entries, _ := os.ReadDir(filepath.Join(storeDir(t), "scratch"))
+	entries, _ := os.ReadDir(filepath.Join(storeDir(t), "containers"))
 	out := map[string]bool{}
 	for _, e := range entries {
 		out[e.Name()] = true
@@ -39,25 +39,33 @@ func scratchFiles(t *testing.T) map[string]bool {
 	return out
 }
 
-// newScratchFile waits for a scratch disk that is not in before to appear.
-func newScratchFile(t *testing.T, before map[string]bool) string {
+// newContainerDir waits for a container that is not in before to appear,
+// and for its writable layer.
+func newContainerDir(t *testing.T, before map[string]bool) string {
 	t.Helper()
 	for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-		for name := range scratchFiles(t) {
-			if !before[name] {
-				return name
+		for id := range containerDirs(t) {
+			if !before[id] {
+				if _, err := os.Stat(filepath.Join(storeDir(t), "containers", id, "rw.ext4")); err == nil {
+					return id
+				}
 			}
 		}
 	}
-	t.Fatal("no new scratch disk appeared")
+	t.Fatal("no new container appeared")
 	return ""
 }
 
-func waitGone(t *testing.T, name string) {
+// waitGone waits for a path in the store to go.
+func waitGone(t *testing.T, rel string) {
 	t.Helper()
-	for deadline := time.Now().Add(5 * time.Second); scratchFiles(t)[name]; time.Sleep(10 * time.Millisecond) {
+	p := filepath.Join(storeDir(t), rel)
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(p); os.IsNotExist(err) {
+			return
+		}
 		if time.Now().After(deadline) {
-			t.Fatalf("scratch disk %s still there", name)
+			t.Fatalf("%s still there", rel)
 		}
 	}
 }
@@ -127,47 +135,38 @@ func TestFsyncCheap(t *testing.T) {
 	}
 }
 
-func TestScratchRemovedAfterRun(t *testing.T) {
-	runwhp(t)
-	leftover := filepath.Join(storeDir(t), "scratch", "leftover.ext4")
-	os.MkdirAll(filepath.Dir(leftover), 0o755)
-	if err := os.WriteFile(leftover, []byte("from a run the machine stopped under"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	before := scratchFiles(t)
-	delete(before, "leftover.ext4")
+// TestRemovedAfterRun checks that --rm leaves nothing behind: no record and
+// no writable layer.
+func TestRemovedAfterRun(t *testing.T) {
+	before := containerDirs(t)
 	expect(t, run(t, alpine, "true"), "", 0)
-	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
-		t.Errorf("a scratch disk left by an earlier run was not removed: %v", err)
-	}
-	after := scratchFiles(t)
-	for name := range after {
-		if !before[name] {
-			t.Errorf("scratch disk %s left after the run", name)
+	for id := range containerDirs(t) {
+		if !before[id] {
+			t.Errorf("container %s left after a --rm run", id)
 		}
 	}
 }
 
-// TestScratchRemovedAfterHardStop stops the VM at once with a second
-// Ctrl+Break.
-func TestScratchRemovedAfterHardStop(t *testing.T) {
-	before := scratchFiles(t)
+// TestRemovedAfterHardStop stops the VM at once with a second Ctrl+Break.
+func TestRemovedAfterHardStop(t *testing.T) {
+	before := containerDirs(t)
 	var stdout syncBuffer
 	var stderr bytes.Buffer
 	cmd, interrupt := interruptible(t, &stdout, &stderr, alpine, "sh", "-c", `trap "" INT; echo ready; sleep 30`)
-	name := newScratchFile(t, before)
+	id := newContainerDir(t, before)
 	interrupt()
 	time.Sleep(500 * time.Millisecond)
 	interrupt()
 	if code := exitCode(cmd.Wait()); code != 130 {
 		t.Errorf("exit %d, want 130; stderr %q", code, stderr.String())
 	}
-	waitGone(t, name)
+	waitGone(t, filepath.Join("containers", id))
 }
 
-// TestScratchRemovedWhenKilled kills runwhp, as Task Manager would.
-func TestScratchRemovedWhenKilled(t *testing.T) {
-	before := scratchFiles(t)
+// TestRemovedWhenKilled kills runwhp, as Task Manager would. Windows
+// deletes the writable layer, and the next list removes the record.
+func TestRemovedWhenKilled(t *testing.T) {
+	before := containerDirs(t)
 	var stdout syncBuffer
 	cmd := exec.Command(runwhp(t), runArgs(alpine, "sh", "-c", "echo ready; sleep 30")...)
 	cmd.Stdout = &stdout
@@ -180,8 +179,12 @@ func TestScratchRemovedWhenKilled(t *testing.T) {
 			t.Fatal("container never got ready")
 		}
 	}
-	name := newScratchFile(t, before)
+	id := newContainerDir(t, before)
 	cmd.Process.Kill()
 	cmd.Wait()
-	waitGone(t, name)
+	waitGone(t, filepath.Join("containers", id, "rw.ext4"))
+	if r := cli(t, "list", "-q"); r.code != 0 || strings.Contains(r.stdout, id) {
+		t.Errorf("list: %+v", r)
+	}
+	waitGone(t, filepath.Join("containers", id))
 }

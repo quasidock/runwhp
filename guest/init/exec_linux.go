@@ -91,6 +91,7 @@ func runProcess(spec *guestspec.Spec, user passwd.User, ports map[string]*os.Fil
 		return guestspec.Status{}, execFailure(spec.Args[0], err)
 	}
 	ctl.start(pid)
+	ctl.send(guestspec.Event{Started: true, Pid: pid})
 
 	status := reap(pid)
 	ctl.exited()

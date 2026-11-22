@@ -3,9 +3,8 @@
 package main
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
+	"io/fs"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -106,67 +105,87 @@ func sweepStore(root string, logf func(string, ...any)) {
 	}
 }
 
-// newScratch makes this run's scratch disk: a sparse file of size bytes
-// in the store holding an empty ext4 file system, deleted when it is closed
+// openLayer opens a container's writable layer, a sparse file at path
+// holding an ext4 file system of size bytes. A kept layer is made and
+// formatted, with a journal, the first time, and opened as it is after
+// that; a scratch one is made for this run, and deleted when it is closed
 // or runwhp ends, however it ends.
-func newScratch(root string, size int64) (*disk.File, error) {
-	dir := filepath.Join(root, "scratch")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+func openLayer(path string, size int64, scratch bool) (*disk.File, error) {
+	if scratch {
+		f, err := disk.Create(path, size, disk.Scratch)
+		if err != nil {
+			return nil, err
+		}
+		if err := ext4.Format(f, size, ext4.Options{Label: "scratch"}); err != nil {
+			f.Close()
+			return nil, fmt.Errorf("formatting the scratch disk: %w", err)
+		}
+		return f, nil
+	}
+	f, err := disk.Open(path, disk.Exclusive)
+	if !errors.Is(err, fs.ErrNotExist) {
+		return f, err
+	}
+	// Made aside and moved into place once formatted, so a layer is never
+	// left half made.
+	tmp := path + ".new"
+	os.Remove(tmp)
+	if f, err = disk.Create(tmp, size, disk.Exclusive); err != nil {
 		return nil, err
 	}
-	var b [8]byte
-	rand.Read(b[:])
-	f, err := disk.Create(filepath.Join(dir, hex.EncodeToString(b[:])+".ext4"), size, disk.Scratch)
+	err = ext4.Format(f, size, ext4.Options{Journal: true, Label: "rw"})
+	f.Close()
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
 	if err != nil {
-		return nil, err
+		os.Remove(tmp)
+		return nil, fmt.Errorf("making the writable layer: %w", err)
 	}
-	if err := ext4.Format(f, size, ext4.Options{Label: "scratch"}); err != nil {
-		f.Close()
-		return nil, fmt.Errorf("formatting the scratch disk: %w", err)
-	}
-	return f, nil
+	return disk.Open(path, disk.Exclusive)
 }
 
-// scratchResult is what making the scratch disk in the background produced.
-// file is nil, with err nil, when the store's volume has no sparse files
-// and the writable layer stays in memory.
-type scratchResult struct {
+// layerResult is what opening the writable layer in the background
+// produced. file is nil, with err nil, when the store's volume has no
+// sparse files and the writable layer stays in memory.
+type layerResult struct {
 	file *disk.File
 	err  error
 	took time.Duration
 }
 
-// pendingScratch is the scratch disk being made in the background.
-type pendingScratch struct {
-	ch   <-chan scratchResult
+// pendingLayer is the writable layer being opened in the background.
+type pendingLayer struct {
+	ch   <-chan layerResult
 	once sync.Once
-	res  scratchResult
+	res  layerResult
 }
 
-// startScratch starts making the scratch disk while the caller does other
+// startLayer starts opening the writable layer while the caller does other
 // work.
-func startScratch(root string, size int64) *pendingScratch {
-	ch := make(chan scratchResult, 1)
+func startLayer(path string, size int64, scratch bool) *pendingLayer {
+	ch := make(chan layerResult, 1)
 	go func() {
 		start := time.Now()
-		f, err := newScratch(root, size)
+		f, err := openLayer(path, size, scratch)
 		if errors.Is(err, disk.ErrNotSparse) {
-			errorf("warning: the store's volume has no sparse files, so the container's writable layer stays in memory")
+			errorf("warning: the store's volume has no sparse files, so the container's writable layer stays in memory and is lost when it stops")
 			f, err = nil, nil
 		}
-		ch <- scratchResult{f, err, time.Since(start)}
+		ch <- layerResult{f, err, time.Since(start)}
 	}()
-	return &pendingScratch{ch: ch}
+	return &pendingLayer{ch: ch}
 }
 
-// get waits for the scratch disk.
-func (p *pendingScratch) get() scratchResult {
+// get waits for the writable layer.
+func (p *pendingLayer) get() layerResult {
 	p.once.Do(func() { p.res = <-p.ch })
 	return p.res
 }
 
-// close waits for the scratch disk and closes it, which deletes it.
-func (p *pendingScratch) close() {
+// close waits for the writable layer and closes it, which deletes a scratch
+// one.
+func (p *pendingLayer) close() {
 	if r := p.get(); r.file != nil {
 		r.file.Close()
 	}

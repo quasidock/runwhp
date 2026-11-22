@@ -16,6 +16,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/quasidock/runwhp/internal/container"
 	"github.com/quasidock/runwhp/internal/volume"
 )
 
@@ -24,7 +25,7 @@ const volumeUsage = `Usage:
   runwhp volume ls [-q]                           list volumes
   runwhp volume inspect NAME...                   describe volumes as JSON
   runwhp volume rm NAME...                        remove volumes and everything in them
-  runwhp volume prune [-a] [-f]                   remove volumes no running container uses
+  runwhp volume prune [-a] [-f]                   remove volumes no container uses
 
 A volume is an ext4 file system in a sparse file in the store's volumes
 directory. Mount one with run -v NAME:PATH; a container at a time can use it.
@@ -139,6 +140,11 @@ func cmdVolume(args []string, stdin io.Reader, stdout io.Writer) int {
 		}
 		code := 0
 		for _, name := range fs.Args() {
+			if users := volumeUsers(root, name); users != "" {
+				errorf("volume %s is in use by container %s; delete the container first", name, users)
+				code = 1
+				continue
+			}
 			if err := store.Remove(name); err != nil {
 				errorf("%v", err)
 				code = 1
@@ -158,13 +164,13 @@ func cmdVolume(args []string, stdin io.Reader, stdout io.Writer) int {
 		}
 		if !all {
 			// Docker's prune removes only anonymous volumes unless -a is
-			// given. runwhp's anonymous volumes end with their run, so
-			// there are none to remove.
-			fmt.Fprintln(stdout, "Total reclaimed space: 0B (runwhp keeps no anonymous volumes; -a removes unused named ones)")
+			// given. runwhp's live in their containers' writable layers,
+			// and go with them, so there are none to remove.
+			fmt.Fprintln(stdout, "Total reclaimed space: 0B (runwhp's anonymous volumes go with their containers; -a removes unused named ones)")
 			return 0
 		}
 		if !force {
-			fmt.Fprint(os.Stderr, "WARNING! This will remove every volume no running container uses, and all the data in them.\nAre you sure you want to continue? [y/N] ")
+			fmt.Fprint(os.Stderr, "WARNING! This will remove every volume no container uses, and all the data in them.\nAre you sure you want to continue? [y/N] ")
 			line, _ := bufio.NewReader(stdin).ReadString('\n')
 			if a := strings.ToLower(strings.TrimSpace(line)); a != "y" && a != "yes" {
 				return 0
@@ -178,7 +184,7 @@ func cmdVolume(args []string, stdin io.Reader, stdout io.Writer) int {
 		var freed int64
 		var removed []string
 		for _, v := range vs {
-			if busy, _ := v.InUse(); busy {
+			if busy, _ := v.InUse(); busy || volumeUsers(root, v.Name) != "" {
 				continue
 			}
 			onDisk, _ := v.OnDisk()
@@ -233,4 +239,22 @@ func humanSize(n int64) string {
 		num = strings.TrimRight(strings.TrimRight(num, "0"), ".")
 	}
 	return num + units[i]
+}
+
+// volumeUsers names the containers, running or not, that mount the named
+// volume, or is empty if none does.
+func volumeUsers(root, name string) string {
+	cs, err := container.Open(root).Referencing(name)
+	if err != nil {
+		return ""
+	}
+	var names []string
+	for _, c := range cs {
+		if c.Name != "" {
+			names = append(names, c.Name)
+		} else {
+			names = append(names, c.Short())
+		}
+	}
+	return strings.Join(names, ", ")
 }

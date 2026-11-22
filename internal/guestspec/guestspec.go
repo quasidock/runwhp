@@ -11,9 +11,12 @@
 // disk per named volume, with the serial VolumeSerial(i). Init finds disks
 // by serial, not by the order they appear in.
 //
-// The scratch disk holds an empty ext4 file system, made for this run and
-// thrown away after it, on which init puts the overlay's upper and work
-// directories. Without it, they go on a tmpfs.
+// The scratch disk holds the container's writable layer: an ext4 file
+// system on which init puts the overlay's upper and work directories.
+// Without it, they go on a tmpfs. With Spec.KeepLayer, the disk is kept
+// after the run and booted again: it has a journal, and init freezes its
+// file system before resetting the machine, as it does each volume's.
+// Otherwise it was made for this run and is thrown away after it.
 //
 // The virtio-fs device's root holds the host's shares as entries named "0",
 // "1", and so on. Init mounts it, sets OwnerXattr on its root, and binds each
@@ -24,10 +27,14 @@
 // before mounting anything, as Docker does, and freezes each volume's file
 // system before resetting the machine, which leaves it clean.
 //
+// Init makes /etc/hostname, /etc/hosts and, with a network,
+// /etc/resolv.conf, and binds them over the image's after the other mounts,
+// unless one of those mounts is at that path or binds host files above it.
+//
 // The control port carries JSON lines both ways. The host sends Control
-// messages: signals for the container process and terminal sizes. When the
-// container process has exited, init writes one Status and resets the
-// machine.
+// messages: signals for the container process and terminal sizes. Init
+// sends Events: when the process has started, and when it has exited, after
+// which init resets the machine.
 package guestspec
 
 import "fmt"
@@ -77,6 +84,9 @@ type Spec struct {
 	Layers int      `json:"layers"`
 	// Scratch says the writable layer goes on the scratch disk.
 	Scratch bool `json:"scratch,omitempty"`
+	// KeepLayer says the scratch disk outlives the run: what is written to
+	// it must reach the host before the guest resets.
+	KeepLayer bool `json:"keepLayer,omitempty"`
 	// Volumes is how many volume disks there are.
 	Volumes int `json:"volumes,omitempty"`
 	// Network configures the network interface. nil means the guest has
@@ -141,6 +151,19 @@ type Control struct {
 	// Rows and Cols, when both are set, are the terminal's new size.
 	Rows uint16 `json:"rows,omitempty"`
 	Cols uint16 `json:"cols,omitempty"`
+}
+
+// Event is a message from init to the host.
+type Event struct {
+	// Started: the container process runs, as Pid.
+	Started bool `json:"started,omitempty"`
+	Pid     int  `json:"pid,omitempty"`
+	// Exited: the process has ended with Exit, or could not be started, as
+	// Error says. Init sends it once, last, just before it resets the
+	// machine.
+	Exited bool   `json:"exited,omitempty"`
+	Exit   int    `json:"exit,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
 
 // Status is how the container ended.

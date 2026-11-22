@@ -65,19 +65,30 @@ func TestParseCPUs(t *testing.T) {
 	}
 }
 
-func TestStatusWriter(t *testing.T) {
-	var w statusWriter
+func TestEventWriter(t *testing.T) {
+	var started []int
+	w := eventWriter{onStarted: func(pid int) { started = append(started, pid) }}
 	if _, ok := w.get(); ok {
 		t.Fatal("status before any write")
 	}
-	w.Write([]byte(`{"exit":12`))
-	if _, ok := w.get(); ok {
-		t.Fatal("status from a partial line")
+	w.Write([]byte(`{"started":true,"pid":4`))
+	if len(started) != 0 {
+		t.Fatal("started from a partial line")
+	}
+	w.Write([]byte("2}\n{\"exited\":true,\"exit\":12"))
+	if _, ok := w.get(); ok || len(started) != 1 || started[0] != 42 {
+		t.Fatalf("after the start: started %v", started)
 	}
 	w.Write([]byte("7,\"error\":\"boom\"}\nnot json\n"))
 	st, ok := w.get()
 	if !ok || st.Exit != 127 || st.Error != "boom" {
 		t.Errorf("status = %+v, %v", st, ok)
+	}
+	// An exit of 0 has no exit field.
+	w = eventWriter{}
+	w.Write([]byte("{\"exited\":true}\n"))
+	if st, ok := w.get(); !ok || st.Exit != 0 {
+		t.Errorf("exit 0: %+v, %v", st, ok)
 	}
 }
 
