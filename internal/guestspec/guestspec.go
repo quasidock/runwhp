@@ -115,8 +115,19 @@ type Spec struct {
 	TTY  bool   `json:"tty,omitempty"`
 	Rows uint16 `json:"rows,omitempty"`
 	Cols uint16 `json:"cols,omitempty"`
+	// Reclaim says when init gives the guest's page cache back.
+	Reclaim Reclaim `json:"reclaim,omitzero"`
 	// Debug makes init describe what it does on the kernel console.
 	Debug bool `json:"debug,omitempty"`
+}
+
+// Reclaim has init reclaim the guest's page cache once the guest has kept
+// its processors idle for IdleSeconds, a step every IntervalSeconds, so
+// that the memory goes back to the host through free page reporting. Zero
+// IdleSeconds turns it off.
+type Reclaim struct {
+	IdleSeconds     int `json:"idleSeconds,omitempty"`
+	IntervalSeconds int `json:"intervalSeconds,omitempty"`
 }
 
 // Network is the static configuration of the guest's one network interface.

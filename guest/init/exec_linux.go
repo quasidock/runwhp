@@ -32,7 +32,7 @@ func resolveUser(spec *guestspec.Spec) (passwd.User, error) {
 // runProcess starts the container process, once enterRoot has made the
 // overlay the root, waits for it, kills whatever it left behind, and waits
 // for the last of its output to reach the ports.
-func runProcess(spec *guestspec.Spec, user passwd.User, ports map[string]*os.File, ctl *controller) (guestspec.Status, error) {
+func runProcess(spec *guestspec.Spec, user passwd.User, ports map[string]*os.File, ctl *controller, mem *memFiles) (guestspec.Status, error) {
 	if len(spec.Args) == 0 {
 		return guestspec.Status{}, fail(guestspec.ExitRuntime, "no command specified")
 	}
@@ -88,8 +88,16 @@ func runProcess(spec *guestspec.Spec, user passwd.User, ports map[string]*os.Fil
 	ctl.start(pid)
 	ctl.send(guestspec.Event{Started: true, Pid: pid})
 	execs := startExecServer(spec)
+	stopReclaim := make(chan struct{})
+	reclaimed := make(chan struct{})
+	go func() {
+		defer close(reclaimed)
+		mem.reclaimLoop(spec.Reclaim, stopReclaim)
+	}()
 
 	status := guestspec.Status{Exit: exitCode(<-done)}
+	close(stopReclaim)
+	<-reclaimed
 	debugf("process exited with %d", status.Exit)
 	ctl.exited()
 	cleanUp()

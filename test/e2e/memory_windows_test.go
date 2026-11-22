@@ -166,3 +166,51 @@ func TestMemoryGivenBack(t *testing.T) {
 	}
 	t.Logf("commit %d MiB before, %d full, %d %.1f s after freeing", before>>20, full>>20, now>>20, time.Since(start).Seconds())
 }
+
+// TestMemoryReclaimedWhenIdle writes 1 GiB to a container's writable
+// layer, which leaves it in the guest's page cache, and checks that an
+// idle guest gives the cache back, unless RUNWHP_RECLAIM_IDLE=0 says not
+// to.
+func TestMemoryReclaimedWhenIdle(t *testing.T) {
+	cached := func(name string) uint64 {
+		t.Helper()
+		r := execIn(t, name, "grep", "^Cached:", "/proc/meminfo")
+		var kb uint64
+		if _, err := fmt.Sscanf(r.stdout, "Cached: %d kB", &kb); err != nil {
+			t.Fatalf("reading Cached: %v in %+v", err, r)
+		}
+		return kb << 10
+	}
+	start := func(idle string) (string, int) {
+		t.Setenv("RUNWHP_RECLAIM_IDLE", idle)
+		name := newName(t)
+		detached(t, "--name", name, "-m", "3g", alpine, "sleep", "300")
+		if r := execIn(t, name, "sh", "-c", "head -c 1073741824 /dev/zero >/root/f && sync"); r.code != 0 {
+			t.Fatalf("writing 1 GiB: %+v", r)
+		}
+		return name, stateOf(t, name).Pid
+	}
+
+	name, pid := start("2")
+	needBalloon(t, name)
+	full := commitOf(t, pid)
+	deadline := time.Now().Add(60 * time.Second)
+	for c := cached(name); c > 400<<20; c = cached(name) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the guest still caches %d MiB after a minute idle", c>>20)
+		}
+		time.Sleep(2 * time.Second)
+	}
+	for now := commitOf(t, pid); now > full-500<<20; now = commitOf(t, pid) {
+		if time.Now().After(deadline) {
+			t.Fatalf("commit was %d MiB with the cache full and is still %d", full>>20, now>>20)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	name, _ = start("0")
+	time.Sleep(15 * time.Second)
+	if c := cached(name); c < 900<<20 {
+		t.Errorf("with RUNWHP_RECLAIM_IDLE=0, the cache went down to %d MiB", c>>20)
+	}
+}

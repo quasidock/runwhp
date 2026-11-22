@@ -65,6 +65,8 @@
   its own kernel's included, end up scattered over the RAM it has used:
   after a `go build` in a 4 GiB guest freed its memory, about 600 MiB of
   it stayed with the guest, in blocks too small to report.
+- A guest gives back its page cache only once it is idle, and gradually:
+  a busy container keeps what it has cached, up to all its free RAM.
 - A guest that hands the balloon RAM it still uses can make its own VMM
   fault on it, and end its own container.
 - Every guest's kernel describes all of its RAM, in 1/64 of it, which

@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -69,6 +70,30 @@ type bootHooks struct {
 	failed func(console []string)
 	// vsock, if set, is given the vsock device before the VM boots.
 	vsock func(*virtio.Vsock)
+}
+
+// Page cache reclaim: once the guest has been idle for reclaimIdle, init
+// gives back some of its page cache every reclaimInterval.
+const (
+	reclaimIdle     = 60 * time.Second
+	reclaimInterval = 5 * time.Second
+)
+
+// reclaimPolicy is when init reclaims the guest's page cache:
+// RUNWHP_RECLAIM_IDLE, in seconds, overrides reclaimIdle, and 0 turns
+// reclaiming off.
+func reclaimPolicy(logf func(string, ...any)) guestspec.Reclaim {
+	r := guestspec.Reclaim{IdleSeconds: int(reclaimIdle / time.Second), IntervalSeconds: int(reclaimInterval / time.Second)}
+	if v, ok := os.LookupEnv("RUNWHP_RECLAIM_IDLE"); ok {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			logf("RUNWHP_RECLAIM_IDLE=%q is not a number of seconds; ignored", v)
+			return r
+		}
+		r.IdleSeconds = n
+		r.IntervalSeconds = min(r.IntervalSeconds, max(n, 1))
+	}
+	return r
 }
 
 // detachedRows and detachedCols size the terminal of a container run with
@@ -152,7 +177,7 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 		Args: cfg.Args, Env: cfg.Env, Cwd: cfg.Cwd, User: cfg.User,
 		Hostname: cfg.Hostname, Hosts: cfg.Hosts, Layers: len(layerFiles), Scratch: lr.file != nil, KeepLayer: keep,
 		Volumes: len(volumeDevices), Debug: cfg.Debug, Stdin: cfg.Stdin, TTY: cfg.TTY, Network: guestNetwork(cfg.Network),
-		Mounts: cfg.Mounts, WaitStart: hooks.waitStart,
+		Mounts: cfg.Mounts, WaitStart: hooks.waitStart, Reclaim: reclaimPolicy(logf),
 	}
 	if cfg.TTY {
 		if bio.terminal {

@@ -129,10 +129,13 @@ func start(begin time.Time, ctl *controller) (guestspec.Status, error) {
 	if err := bindEtc(&spec); err != nil {
 		return none, err
 	}
+	// Before the container's root covers the initramfs, where init mounts
+	// the cgroup hierarchy for itself.
+	mem := openMemFiles()
 	if err := enterRoot(); err != nil {
 		return none, err
 	}
-	return runProcess(&spec, user, ports, ctl)
+	return runProcess(&spec, user, ports, ctl, mem)
 }
 
 func shutdown() {

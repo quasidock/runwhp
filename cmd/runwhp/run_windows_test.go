@@ -316,3 +316,27 @@ func TestReadModules(t *testing.T) {
 		t.Error("read a missing module")
 	}
 }
+
+func TestReclaimPolicy(t *testing.T) {
+	logf := func(string, ...any) {}
+	for _, c := range []struct {
+		env            string
+		set            bool
+		idle, interval int
+	}{
+		{set: false, idle: 60, interval: 5},
+		{env: "0", set: true, idle: 0, interval: 1},
+		{env: "2", set: true, idle: 2, interval: 2},
+		{env: "300", set: true, idle: 300, interval: 5},
+		{env: "soon", set: true, idle: 60, interval: 5},
+	} {
+		if c.set {
+			t.Setenv("RUNWHP_RECLAIM_IDLE", c.env)
+		} else {
+			os.Unsetenv("RUNWHP_RECLAIM_IDLE")
+		}
+		if r := reclaimPolicy(logf); r.IdleSeconds != c.idle || r.IntervalSeconds != c.interval {
+			t.Errorf("RUNWHP_RECLAIM_IDLE=%q: %+v", c.env, r)
+		}
+	}
+}

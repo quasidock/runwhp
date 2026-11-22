@@ -338,6 +338,16 @@ for the container's `runwhp.exe` shows what it has taken.
   reported only once all of it is free, and pages the guest keeps, its own
   kernel's especially, end up scattered over the RAM it has used, so some
   of what it frees stays with it.
+- **An idle guest gives back its page cache.** Files a container reads or
+  writes stay cached in its guest's RAM, as on any Linux. Once the guest
+  has kept its processors idle, below 5% of one, for a minute, runwhp's
+  init reclaims a tenth of that cache every 5 s, down to 2% of the guest's
+  RAM, through the memory cgroup's `memory.reclaim`, and the balloon gives
+  what that frees back to Windows: 1.5 GiB of cache goes in about three
+  minutes. Reading the files again costs little, since the layers, the
+  writable layer and volumes are files the host caches too. Becoming busy
+  again stops it. `RUNWHP_RECLAIM_IDLE` sets the idle time in seconds; `0`
+  turns it off.
 
 ### Storage
 
