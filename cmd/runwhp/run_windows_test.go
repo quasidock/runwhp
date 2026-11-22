@@ -30,13 +30,14 @@ func TestParseMemory(t *testing.T) {
 		want["4g"] = 4 << 30 // above the device windows
 	}
 	want[fmt.Sprintf("%dm", maxMem>>20)] = maxMem
+	want[""] = max(maxMem/2&^(2<<20-1), 512<<20)
 	for in, want := range want {
 		got, err := parseMemory(in)
 		if err != nil || got != want {
 			t.Errorf("parseMemory(%q) = %d, %v; want %d", in, got, err, want)
 		}
 	}
-	for _, in := range []string{"", "x", "-1g", "64m", "512", fmt.Sprintf("%dm", maxMem>>20+2)} {
+	for _, in := range []string{"x", "-1g", "64m", "512", fmt.Sprintf("%dm", maxMem>>20+2)} {
 		if _, err := parseMemory(in); err == nil {
 			t.Errorf("parseMemory(%q) accepted", in)
 		}

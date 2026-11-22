@@ -24,6 +24,7 @@ var (
 	procSetPartitionProperty = whpDLL.NewProc("WHvSetPartitionProperty")
 	procMapGpaRange          = whpDLL.NewProc("WHvMapGpaRange")
 	procUnmapGpaRange        = whpDLL.NewProc("WHvUnmapGpaRange")
+	procAdviseGpaRange       = whpDLL.NewProc("WHvAdviseGpaRange")
 	procGetVPCounters        = whpDLL.NewProc("WHvGetVirtualProcessorCounters")
 	procCreateVP             = whpDLL.NewProc("WHvCreateVirtualProcessor")
 	procDeleteVP             = whpDLL.NewProc("WHvDeleteVirtualProcessor")
@@ -249,6 +250,18 @@ func (p *Partition) Close() { procDeletePartition.Call(p.h) }
 func (p *Partition) MapGpa(host uintptr, gpa, size uint64, flags uint32) error {
 	r, _, _ := procMapGpaRange.Call(p.h, host, uintptr(gpa), uintptr(size), uintptr(flags))
 	return check("WHvMapGpaRange", r)
+}
+
+// PopulateGpa asks the hypervisor to fill in its page tables for a mapped
+// range ahead of the guest's first touches, committing the host's pages
+// for it as it goes (WHvAdviseGpaRange with WHvAdviseGpaRangeCodePopulate).
+func (p *Partition) PopulateGpa(gpa, size uint64) error {
+	r := struct{ gpa, size uint64 }{gpa, size}               // WHV_MEMORY_RANGE_ENTRY
+	advice := struct{ flags, access uint32 }{0, AccessWrite} // WHV_ADVISE_GPA_RANGE_POPULATE
+	const advicePopulate = 0
+	rc, _, _ := procAdviseGpaRange.Call(p.h, uintptr(unsafe.Pointer(&r)), 1, advicePopulate,
+		uintptr(unsafe.Pointer(&advice)), unsafe.Sizeof(advice))
+	return check("WHvAdviseGpaRange", rc)
 }
 
 // UnmapGpa removes a mapping made by MapGpa. The range must be exactly one

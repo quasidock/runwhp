@@ -95,8 +95,8 @@ func runFlags(o *runOptions) *flag.FlagSet {
 	fs.StringVar(&o.workdir, "workdir", "", "")
 	fs.StringVar(&o.user, "u", "", "")
 	fs.StringVar(&o.user, "user", "", "")
-	fs.StringVar(&o.memory, "m", "512m", "")
-	fs.StringVar(&o.memory, "memory", "512m", "")
+	fs.StringVar(&o.memory, "m", "", "")
+	fs.StringVar(&o.memory, "memory", "", "")
 	fs.StringVar(&o.cpus, "cpus", "", "")
 	fs.StringVar(&o.hostname, "hostname", "", "")
 	fs.StringVar(&o.pull, "pull", "missing", "")
@@ -129,7 +129,7 @@ Flags:
   -e, --env KEY[=VALUE]  set an environment variable (repeatable); KEY alone copies it from here
   -w, --workdir DIR      working directory inside the container
   -u, --user USER[:GROUP]  user to run as: name or uid, optionally with a group
-  -m, --memory SIZE      guest memory, such as 512m or 2g (default 512m)
+  -m, --memory SIZE      guest memory, such as 512m or 16g (default: half this machine's)
       --cpus N           virtual processors (default: this machine's, up to 4)
   -d, --detach           run the container in the background and print its ID; its output
                          goes to files stdout and stderr are redirected to, else to its log
@@ -457,9 +457,23 @@ func readModules(paths []string) ([]boot.File, error) {
 	return files, nil
 }
 
+// defaultMemory is half this machine's memory, in whole 2 MiB pages, and
+// at least 512 MiB, as WSL sizes its VM.
+func defaultMemory() uint64 {
+	return max(vm.MaxMemory()/2&^(2<<20-1), 512<<20)
+}
+
 // parseMemory reads a size the way docker run -m does (b, k, m or g suffix,
-// bytes without one) and rounds it up to 2 MiB.
+// bytes without one) and rounds it up to 2 MiB. "" means defaultMemory.
+//
+// A guest takes from Windows only the memory it touches, a 2 MiB chunk at
+// a time, so a large default costs little: the guest kernel's page
+// descriptors, 1/64 of its RAM, and about 8 ms of start-up per GiB, which
+// it spends describing them.
 func parseMemory(s string) (uint64, error) {
+	if s == "" {
+		return defaultMemory(), nil
+	}
 	n, err := parseSize(s)
 	if err != nil {
 		return 0, fmt.Errorf("invalid memory size %q", s)

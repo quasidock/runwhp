@@ -221,6 +221,7 @@ type containerState struct {
 	GuestPid    int       `json:"guestPid,omitempty"`
 	AutoRemove  bool      `json:"autoRemove,omitempty"`
 	Output      string    `json:"output,omitempty"`
+	Memory      uint64    `json:"memory"` // guest RAM, in bytes
 	Ports       []string  `json:"ports,omitempty"`
 	Volumes     []string  `json:"volumes,omitempty"`
 }
@@ -231,6 +232,7 @@ func stateOf(c *container.Container) containerState {
 		Name: c.Name, Image: imageOf(c.Config), ImageDigest: c.Config.ImageDigest, Command: c.Config.Args,
 		Created: c.Config.Created, StartedAt: c.State.StartedAt, FinishedAt: c.State.FinishedAt,
 		Error: c.State.Error, GuestPid: c.State.GuestPid, AutoRemove: c.Config.AutoRemove, Output: c.State.Output,
+		Memory: c.Config.Memory,
 	}
 	if c.State.Status == container.Stopped && !c.State.FinishedAt.IsZero() {
 		code := c.State.ExitCode

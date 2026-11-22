@@ -107,8 +107,8 @@ Containers that outlive the command, in the background:
 | `-e`, `--env` | | `KEY=VALUE`, or `KEY` to copy it from the host; repeatable |
 | `-w`, `--workdir` | image's, else `/` | Working directory; created if missing |
 | `-u`, `--user` | image's, else root | `name`, `uid`, `name:group` or `uid:gid`, resolved against the image's `/etc/passwd` and `/etc/group` |
-| `-m`, `--memory` | `512m` | Guest RAM, from `128m` up to this machine's memory |
-| `--cpus` | the host's, up to 4 | vCPUs, a whole number up to the host's logical processors, at most 64. Unlike Docker's `--cpus`, it counts processors rather than setting a quota, so `1.5` is refused. Builds size their jobs by `nproc`, so raise `-m` with it |
+| `-m`, `--memory` | half this machine's memory | Guest RAM, from `128m` up to this machine's memory. A guest takes only the memory it touches; see [Memory](#memory) |
+| `--cpus` | the host's, up to 4 | vCPUs, a whole number up to the host's logical processors, at most 64. Unlike Docker's `--cpus`, it counts processors rather than setting a quota, so `1.5` is refused |
 | `--hostname` | the ID's first 12 digits | Hostname, also in `/etc/hostname` and `/etc/hosts` |
 | `--network`, `--net` | `user` | `user` gives the container a network through runwhp; `none` leaves it only loopback |
 | `-p`, `--publish` | | `[IP:]HOSTPORT:PORT[/tcp]`: listen on the host and forward to the container's TCP port; repeatable. IP defaults to `127.0.0.1` |
@@ -314,6 +314,24 @@ events in the container, so file watchers there must poll.
 Removing a file that is open works as on Linux: the name goes at once and
 the open file stays readable. A rename replaces the target, even a read-only
 one. File locks are kept in the guest and are invisible to host programs.
+
+### Memory
+
+A container's guest has the memory `-m` gives it, half this machine's by
+default, but takes from Windows only what it touches: runwhp commits and
+maps guest RAM 2 MiB at a time, the first time the guest or a device uses
+it, rather than all of it when the VM starts. Task Manager's commit size
+for the container's `runwhp.exe` shows what it has taken.
+
+- **A floor per GiB.** The guest's kernel describes every page of its
+  RAM when it boots, in 1/64 of the RAM, so a guest always takes that
+  much: 128 MiB for an 8 GiB guest. Describing the pages costs about 8 ms
+  of start-up per GiB. A guest with the default memory, half of this
+  15 GiB machine's, runs `true` in about 220 ms, holding about 210 MiB;
+  one with `-m 512m` in about 150 ms, holding 60 MiB.
+- **Above 4 GiB.** Guest RAM runs up to the device windows at 3.25 GiB
+  and goes on from 4 GiB, as on a PC.
+- **What the guest has touched, it keeps** until the container stops.
 
 ### Storage
 

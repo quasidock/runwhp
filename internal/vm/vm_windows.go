@@ -114,6 +114,9 @@ type vcpu struct {
 	ioPorts      map[uint16]int
 	mmioCount    int
 	unknownPages map[uint64]bool
+
+	lastFault    [2]uint64 // gpa and rip of the last memory fault
+	faultRepeats int
 }
 
 // on names the vCPU in messages when there is more than one.
@@ -190,18 +193,9 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 			whp.FreeMemory(host)
 		}
 	}()
-	m.mem = &guestMemory{host: mem, low: low, high: high}
-	for _, r := range [][2]uint64{{0, low}, {boot.HighMemoryBase, high}} {
-		if r[1] == 0 {
-			continue
-		}
-		if err := whp.CommitMemory(host+uintptr(r[0]), r[1]); err != nil {
-			return result, err
-		}
-		if err := part.MapGpa(host+uintptr(r[0]), r[0], r[1], whp.MapRead|whp.MapWrite|whp.MapExecute); err != nil {
-			return result, err
-		}
-	}
+	// Nothing is committed or mapped yet: each chunk is, the first time
+	// the loader, a device or the guest touches it.
+	m.mem = newGuestMemory(mem, low, high, &hostBacking{part: part, base: host})
 
 	m.ioapic = newIOAPIC(part.RequestInterrupt, m.logf)
 	m.uart = newUART(func() { m.ioapic.pulse(uartIRQ) }, cfg.ConsoleLine)
@@ -415,8 +409,18 @@ func (v *vcpu) loop() {
 			return
 		}
 		reason := exit.Reason()
+		if reason == whp.ExitMemoryAccess && m.mem.Contains(exit.MemGpa(), 1) {
+			// RAM is never a device's: the guest touched a chunk that is
+			// not mapped yet.
+			reason = exitMemFault
+		}
 		v.exits[reason]++
 		switch reason {
+		case exitMemFault:
+			if err := v.fault(&exit); err != nil {
+				v.dump()
+				m.stop.stop("", false, err)
+			}
 		case whp.ExitIoPort:
 			if err := v.handleIO(&exit); err != nil {
 				m.stop.stop("", false, err)
@@ -442,6 +446,26 @@ func (v *vcpu) loop() {
 			m.stop.stop("", false, fmt.Errorf("unhandled exit reason %#x at rip %#x%s", reason, exit.Rip(), v.on()))
 		}
 	}
+}
+
+// exitMemFault counts, among the exit reasons, memory-access exits on RAM
+// that was not mapped yet.
+const exitMemFault = 0x10001
+
+// fault maps the RAM a memory-access exit touched, so the instruction can
+// run again. The same vCPU faulting again and again at one address means
+// mapping does not take, and stops the guest rather than spin.
+func (v *vcpu) fault(exit *whp.ExitContext) error {
+	gpa, rip := exit.MemGpa(), exit.Rip()
+	if gpa == v.lastFault[0] && rip == v.lastFault[1] {
+		if v.faultRepeats++; v.faultRepeats > 8 {
+			return fmt.Errorf("the guest keeps faulting on RAM at %#x, rip %#x%s", gpa, rip, v.on())
+		}
+	} else {
+		v.lastFault, v.faultRepeats = [2]uint64{gpa, rip}, 0
+	}
+	_, err := v.m.mem.Fault(gpa)
+	return err
 }
 
 func (v *vcpu) handleIO(exit *whp.ExitContext) error {
@@ -594,7 +618,7 @@ func (v *vcpu) dump() {
 
 func (m *machine) stats() []string {
 	names := map[uint32]string{whp.ExitIoPort: "io", whp.ExitHalt: "halt", whp.ExitCanceled: "canceled",
-		whp.ExitMemoryAccess: "mmio", whp.ExitUnrecoverableException: "triple-fault", whp.ExitApicEoi: "eoi"}
+		whp.ExitMemoryAccess: "mmio", exitMemFault: "memfault", whp.ExitUnrecoverableException: "triple-fault", whp.ExitApicEoi: "eoi"}
 	exits, ioPorts, mmioCount := map[uint32]int{}, map[uint16]int{}, 0
 	var perCPU []string
 	for _, v := range m.cpus {
@@ -645,6 +669,9 @@ func (m *machine) stats() []string {
 	}
 	if m.ioapic != nil {
 		out = append(out, fmt.Sprintf("mmio accesses: %d, interrupts delivered through the I/O APIC: %d", mmioCount, m.ioapic.deliveredCount()))
+	}
+	if m.mem != nil {
+		out = append(out, m.mem.stats())
 	}
 	for i, t := range m.virtio {
 		switch d := t.Device().(type) {

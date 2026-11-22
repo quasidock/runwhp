@@ -60,7 +60,11 @@
 - Each device has one virtqueue, which every vCPU shares.
 - Each MMIO access takes several round trips through `WinHvEmulation.dll`;
   a fast path for common instructions would cut the per-write output cost.
-- Guest memory is committed up front and never returned to Windows.
+- Memory a guest has touched is never returned to Windows until the
+  container stops, even once the guest has freed it.
+- Every guest's kernel describes all of its RAM, in 1/64 of it, which
+  each container holds for as long as it runs: 128 MiB with 8 GiB of
+  RAM. Hot-plugging memory (virtio-mem) would avoid it.
 - The guest clock starts at whatever the RTC stub reports and is not kept in
   step with the host afterwards.
 - String port I/O is not handled and stops the VMM with an error.

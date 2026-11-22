@@ -56,6 +56,7 @@ type stateJSON struct {
 	GuestPid   int      `json:"guestPid"`
 	AutoRemove bool     `json:"autoRemove"`
 	Volumes    []string `json:"volumes"`
+	Memory     uint64   `json:"memory"`
 }
 
 func stateOf(t *testing.T, ref string) stateJSON {
