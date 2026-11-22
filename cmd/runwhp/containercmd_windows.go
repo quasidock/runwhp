@@ -153,7 +153,9 @@ func deleteContainer(store *container.Store, ref string, force bool) error {
 		return err
 	}
 	if c.State.Active() {
-		if !force {
+		// A created container's process never started, so it is deleted
+		// as runc deletes one, without being forced.
+		if !force && c.State.Status != container.Created {
 			return fmt.Errorf("container %s is %s: stop it first, or delete it with -f", c.Short(), c.State.Status)
 		}
 		if err := killAndWait(store, c); err != nil {
@@ -240,8 +242,10 @@ func stateOf(c *container.Container) containerState {
 }
 
 func printJSON(w io.Writer, v any) {
-	data, _ := json.MarshalIndent(v, "", "    ")
-	fmt.Fprintf(w, "%s\n", data)
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "    ")
+	enc.Encode(v)
 }
 
 // imageOf is the image a container was made from, as it was given.
@@ -326,9 +330,3 @@ func humanDuration(d time.Duration) string {
 	}
 	return plural(int(d.Hours()/24/365), "year")
 }
-
-// killAndWait kills a container and waits for its runwhp to let it go.
-func killAndWait(store *container.Store, c *container.Container) error {
-	return fmt.Errorf("container %s is %s, and runwhp cannot stop it yet", c.Short(), c.State.Status)
-}
-

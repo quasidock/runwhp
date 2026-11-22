@@ -32,9 +32,10 @@
 // unless one of those mounts is at that path or binds host files above it.
 //
 // The control port carries JSON lines both ways. The host sends Control
-// messages: signals for the container process and terminal sizes. Init
-// sends Events: when the process has started, and when it has exited, after
-// which init resets the machine.
+// messages: signals for the container process, terminal sizes and, with
+// Spec.WaitStart, when to start the process. Init sends Events: when the
+// container is ready to start, when the process has started, and when it
+// has exited, after which init resets the machine.
 package guestspec
 
 import "fmt"
@@ -87,6 +88,11 @@ type Spec struct {
 	// KeepLayer says the scratch disk outlives the run: what is written to
 	// it must reach the host before the guest resets.
 	KeepLayer bool `json:"keepLayer,omitempty"`
+	// WaitStart has init prepare the container, send an Event with Ready,
+	// and wait for a Control with Start before it starts the process. A
+	// signal that arrives first ends the container without starting it, as
+	// if the process had been killed by it.
+	WaitStart bool `json:"waitStart,omitempty"`
 	// Volumes is how many volume disks there are.
 	Volumes int `json:"volumes,omitempty"`
 	// Network configures the network interface. nil means the guest has
@@ -145,9 +151,13 @@ type Mount struct {
 // Control is a message from the host to init.
 type Control struct {
 	// Signal, when not zero, is sent to the container process, or with
-	// Group to its whole process group, as a terminal's Ctrl+C would be.
+	// Group to its whole process group, as a terminal's Ctrl+C would be, or
+	// with All to every process in the container.
 	Signal int  `json:"signal,omitempty"`
 	Group  bool `json:"group,omitempty"`
+	All    bool `json:"all,omitempty"`
+	// Start starts the process of a container booted with Spec.WaitStart.
+	Start bool `json:"start,omitempty"`
 	// Rows and Cols, when both are set, are the terminal's new size.
 	Rows uint16 `json:"rows,omitempty"`
 	Cols uint16 `json:"cols,omitempty"`
@@ -155,6 +165,9 @@ type Control struct {
 
 // Event is a message from init to the host.
 type Event struct {
+	// Ready: with Spec.WaitStart, the container is prepared, and init waits
+	// for Control.Start.
+	Ready bool `json:"ready,omitempty"`
 	// Started: the container process runs, as Pid.
 	Started bool `json:"started,omitempty"`
 	Pid     int  `json:"pid,omitempty"`

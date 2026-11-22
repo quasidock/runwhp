@@ -3,6 +3,7 @@ module github.com/quasidock/runwhp
 go 1.26.8
 
 require (
+	github.com/Microsoft/go-winio v0.6.4
 	github.com/Microsoft/hcsshim v0.15.0
 	github.com/google/go-containerregistry v0.22.1
 	golang.org/x/net v0.59.0

@@ -64,7 +64,7 @@ func main() {
 	syscall.Mount("sysfs", "/sys", "sysfs", 0, "")
 	console, _ = os.OpenFile("/dev/console", os.O_WRONLY, 0)
 
-	ctl := &controller{}
+	ctl := newController(false)
 	status, err := start(begin, ctl)
 	if err != nil {
 		var f *failure
@@ -91,6 +91,7 @@ func start(begin time.Time, ctl *controller) (guestspec.Status, error) {
 		return none, fmt.Errorf("reading %s: %w", guestspec.SpecPath, err)
 	}
 	debug = spec.Debug
+	ctl.waitMode = spec.WaitStart
 	debugf("started %d ms after the kernel handed over", time.Since(begin).Milliseconds())
 	loadModules()
 

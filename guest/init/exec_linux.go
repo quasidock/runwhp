@@ -37,6 +37,14 @@ func runProcess(spec *guestspec.Spec, user passwd.User, ports map[string]*os.Fil
 	if len(spec.Args) == 0 {
 		return guestspec.Status{}, fail(guestspec.ExitRuntime, "no command specified")
 	}
+	if spec.WaitStart {
+		ctl.send(guestspec.Event{Ready: true})
+		debugf("ready; waiting for the host to start the process")
+		if sig := ctl.waitStart(); sig != 0 {
+			debugf("ended by signal %d before it started", sig)
+			return guestspec.Status{Exit: guestspec.ExitSignalBase + sig}, nil
+		}
+	}
 
 	env := append([]string(nil), spec.Env...)
 	if lookupEnv(env, "PATH") == "" {

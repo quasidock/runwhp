@@ -231,6 +231,13 @@ type signalProxy struct {
 	interrupts int
 }
 
+// listening reports whether init has opened the control port, and so can
+// take Control messages.
+func (p *signalProxy) listening() bool {
+	con := p.console.Load()
+	return con != nil && con.Connected(guestspec.PortControl)
+}
+
 func (p *signalProxy) run(sigs <-chan os.Signal) {
 	for sig := range sigs {
 		p.handle(sig)

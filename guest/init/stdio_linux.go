@@ -207,6 +207,41 @@ type controller struct {
 	sendMu sync.Mutex
 	port   *os.File // the control port, once open
 
+	// With Spec.WaitStart: whether the host has asked to start the
+	// process, the first signal it sent before that, and a wake-up for
+	// waitStart.
+	waitMode  bool
+	startReq  bool
+	preSignal int
+	wake      chan struct{}
+}
+
+func newController(waitMode bool) *controller {
+	return &controller{waitMode: waitMode, wake: make(chan struct{}, 1)}
+}
+
+// waitStart waits for the host to start the process. It returns 0, or the
+// number of a signal the host sent first.
+func (c *controller) waitStart() int {
+	for {
+		c.mu.Lock()
+		sig, start := c.preSignal, c.startReq
+		c.mu.Unlock()
+		if sig != 0 {
+			return sig
+		}
+		if start {
+			return 0
+		}
+		<-c.wake
+	}
+}
+
+func (c *controller) notify() {
+	select {
+	case c.wake <- struct{}{}:
+	default:
+	}
 }
 
 // setPort gives send the control port.
@@ -241,6 +276,12 @@ func (c *controller) listen(port *os.File) {
 		if m.Signal != 0 {
 			c.signal(m)
 		}
+		if m.Start {
+			c.mu.Lock()
+			c.startReq = true
+			c.mu.Unlock()
+			c.notify()
+		}
 		if m.Rows > 0 && m.Cols > 0 {
 			c.resize(m.Rows, m.Cols)
 		}
@@ -252,13 +293,21 @@ func (c *controller) signal(m guestspec.Control) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	switch {
+	case !c.started && c.waitMode:
+		if c.preSignal == 0 {
+			c.preSignal = m.Signal
+		}
+		c.notify()
 	case !c.started:
 		c.held = append(c.held, m)
 	case c.pid > 0:
 		// The process leads its own session, so its process group has
-		// its pid.
+		// its pid. -1 is every process but init.
 		target, sig := c.pid, syscall.Signal(m.Signal)
-		if m.Group {
+		switch {
+		case m.All:
+			target = -1
+		case m.Group:
 			target = -c.pid
 		}
 		debugf("sending %v to %d", sig, target)

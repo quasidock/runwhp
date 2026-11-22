@@ -66,6 +66,7 @@ type runOptions struct {
 	storageOpts listFlag
 	name        string
 	rm          bool
+	detach      bool
 
 	// Development flags, left out of the usage text.
 	init    string
@@ -110,6 +111,8 @@ func runFlags(o *runOptions) *flag.FlagSet {
 	fs.Var(&o.storageOpts, "storage-opt", "")
 	fs.StringVar(&o.name, "name", "", "")
 	fs.BoolVar(&o.rm, "rm", false, "")
+	fs.BoolVar(&o.detach, "d", false, "")
+	fs.BoolVar(&o.detach, "detach", false, "")
 	fs.StringVar(&o.init, "init", "", "")
 	fs.Var(&o.layers, "layer", "")
 	fs.Var(&o.modules, "module", "")
@@ -125,6 +128,8 @@ Flags:
   -u, --user USER[:GROUP]  user to run as: name or uid, optionally with a group
   -m, --memory SIZE      guest memory, such as 512m or 2g (default 512m)
       --cpus N           virtual processors (default: this machine's, up to 4)
+  -d, --detach           run the container in the background and print its ID; its output
+                         goes to files stdout and stderr are redirected to, else to its log
       --name NAME        name the container, as well as its ID
       --rm               remove the container when it stops; otherwise it is kept, with
                          its writable layer, until runwhp delete
@@ -161,6 +166,9 @@ func cmdRun(args []string) int {
 	}
 	entrypointSet := false
 	fs.Visit(func(f *flag.Flag) { entrypointSet = entrypointSet || f.Name == "entrypoint" })
+	if o.detach {
+		return runDetached(&o, entrypointSet, fs.Args())
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -212,13 +220,13 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 	if err != nil {
 		return fail, err
 	}
-	sup, err := supervise(store, rec, container.OutputTerminal)
+	sup, err := supervise(root, store, rec, container.OutputTerminal, proxy)
 	if err != nil {
 		store.Remove(rec)
 		return fail, err
 	}
 	logf("%4d ms  container %s recorded: %d layers", time.Since(start).Milliseconds(), rec.Short(), max(len(cfg.Layers), len(cfg.LayerFiles)))
-	code, err := bootContainer(ctx, root, rec, policy, proxy, bootHooks{started: sup.started}, logf, start)
+	code, err := bootContainer(ctx, root, rec, policy, proxy, foregroundIO(cfg), sup.hooks(false), logf, start)
 	sup.finish(code, err)
 	return code, err
 }
@@ -479,8 +487,10 @@ type eventWriter struct {
 	buf    []byte
 	status guestspec.Status
 	ok     bool
-	// onStarted, if set, is called when the container process starts,
-	// with its pid in the guest.
+	// onReady, if set, is called when a container booted to wait for its
+	// start is ready; onStarted, when the container process starts, with
+	// its pid in the guest.
+	onReady   func()
 	onStarted func(pid int)
 }
 
@@ -498,6 +508,8 @@ func (w *eventWriter) Write(p []byte) (int, error) {
 			switch {
 			case ev.Exited:
 				w.status, w.ok = guestspec.Status{Exit: ev.Exit, Error: ev.Error}, true
+			case ev.Ready && w.onReady != nil:
+				w.onReady()
 			case ev.Started && w.onStarted != nil:
 				w.onStarted(ev.Pid)
 			}

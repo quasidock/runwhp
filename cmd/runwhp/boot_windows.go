@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -27,16 +28,54 @@ import (
 	"github.com/quasidock/runwhp/internal/volume"
 )
 
+// bootIO is where a container's streams go.
+type bootIO struct {
+	// stdin is the container's standard input, when its config asks for
+	// one; nil gives it end of file at once.
+	stdin          io.Reader
+	stdout, stderr io.Writer
+	// terminal says this process's console is the container's: with -t it
+	// is put in raw mode and its size followed.
+	terminal bool
+	// diag takes runwhp's own diagnostics: the kernel console with
+	// --debug, and its last lines when something fails.
+	diag io.Writer
+}
+
+// foregroundIO is a foreground run's: this process's standard streams.
+func foregroundIO(cfg *container.Config) bootIO {
+	bio := bootIO{stdout: os.Stdout, stderr: os.Stderr, terminal: true, diag: os.Stderr}
+	if cfg.Stdin {
+		bio.stdin = os.Stdin
+		if isTerminal(os.Stdin) {
+			bio.stdin = &consoleReader{h: windows.Handle(os.Stdin.Fd()), lines: !cfg.TTY}
+		}
+	}
+	return bio
+}
+
 // bootHooks tell bootContainer's caller how the container is doing.
 type bootHooks struct {
+	// waitStart boots the container without starting its process: ready
+	// is called once it is prepared, and the process starts when the
+	// caller sends a Control with Start.
+	waitStart bool
+	ready     func()
 	// started, if set, is called when the container process has started,
 	// with its pid in the guest.
 	started func(pid int)
+	// failed, if set, is given the last kernel console lines when the VM
+	// failed, or stopped without saying how the container ended.
+	failed func(console []string)
 }
+
+// detachedRows and detachedCols size the terminal of a container run with
+// -t but no console of runwhp's own.
+const detachedRows, detachedCols = 24, 80
 
 // bootContainer runs a container's VM until it stops, and returns the
 // container's exit code. The caller holds the container's lock.
-func bootContainer(ctx context.Context, root string, rec *container.Container, policy image.Policy, proxy *signalProxy, hooks bootHooks, logf func(string, ...any), start time.Time) (int, error) {
+func bootContainer(ctx context.Context, root string, rec *container.Container, policy image.Policy, proxy *signalProxy, bio bootIO, hooks bootHooks, logf func(string, ...any), start time.Time) (int, error) {
 	const fail = guestspec.ExitRuntime
 	cfg := rec.Config
 
@@ -107,10 +146,14 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, p
 		Args: cfg.Args, Env: cfg.Env, Cwd: cfg.Cwd, User: cfg.User,
 		Hostname: cfg.Hostname, Hosts: cfg.Hosts, Layers: len(layerFiles), Scratch: lr.file != nil, KeepLayer: keep,
 		Volumes: len(volumeDevices), Debug: cfg.Debug, Stdin: cfg.Stdin, TTY: cfg.TTY, Network: guestNetwork(cfg.Network),
-		Mounts: cfg.Mounts,
+		Mounts: cfg.Mounts, WaitStart: hooks.waitStart,
 	}
 	if cfg.TTY {
-		spec.Rows, spec.Cols, _ = terminalSize(os.Stdout)
+		if bio.terminal {
+			spec.Rows, spec.Cols, _ = terminalSize(os.Stdout)
+		} else {
+			spec.Rows, spec.Cols = detachedRows, detachedCols
+		}
 	}
 	specJSON, err := json.Marshal(spec)
 	if err != nil {
@@ -131,16 +174,16 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, p
 	// scratch disk, then the volumes.
 	var stdin io.Reader
 	if cfg.Stdin {
-		stdin = os.Stdin
-		if isTerminal(os.Stdin) {
-			stdin = &consoleReader{h: windows.Handle(os.Stdin.Fd()), lines: !cfg.TTY}
+		stdin = bio.stdin
+		if stdin == nil {
+			stdin = strings.NewReader("")
 		}
 	}
-	status := &eventWriter{onStarted: hooks.started}
+	status := &eventWriter{onReady: hooks.ready, onStarted: hooks.started}
 	console := &virtio.Console{
 		Ports: []virtio.Port{
-			{Name: guestspec.PortStdout, Out: os.Stdout},
-			{Name: guestspec.PortStderr, Out: os.Stderr},
+			{Name: guestspec.PortStdout, Out: bio.stdout},
+			{Name: guestspec.PortStderr, Out: bio.stderr},
 			{Name: guestspec.PortControl, Out: status, In: proxy.queue},
 			{Name: guestspec.PortStdin, In: stdin},
 		},
@@ -210,11 +253,11 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, p
 	tail := &ring{max: consoleTail}
 	consoleLine := tail.add
 	if cfg.Debug {
-		consoleLine = func(line string) { fmt.Fprintln(os.Stderr, line) }
+		consoleLine = func(line string) { fmt.Fprintln(bio.diag, line) }
 	}
 
 	var term *consoleState
-	if cfg.TTY {
+	if cfg.TTY && bio.terminal {
 		term, err = setupConsole(cfg.Stdin, isTerminal(os.Stdout))
 		if err != nil {
 			return fail, fmt.Errorf("setting up the console: %w", err)
@@ -238,8 +281,14 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, p
 	for _, s := range res.Stats {
 		logf("%s", s)
 	}
+	failed := func() {
+		tail.print(bio.diag)
+		if hooks.failed != nil {
+			hooks.failed(tail.lines)
+		}
+	}
 	if err != nil {
-		tail.print(os.Stderr)
+		failed()
 		return fail, err
 	}
 	if ctx.Err() != nil {
@@ -247,11 +296,11 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, p
 	}
 	st, ok := status.get()
 	if !ok {
-		tail.print(os.Stderr)
+		failed()
 		return fail, fmt.Errorf("the guest stopped without reporting how the container ended (%s)", res.Reason)
 	}
 	if st.Error != "" {
-		errorf("%s", st.Error)
+		return st.Exit, errors.New(st.Error)
 	}
 	return st.Exit, nil
 }

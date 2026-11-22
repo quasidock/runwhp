@@ -6,12 +6,19 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
 
 const usage = `Usage:
   runwhp run [flags] IMAGE [COMMAND [ARG...]]   run a command in a new container
+  runwhp create [flags] IMAGE [COMMAND...]      create a container, ready to start
+  runwhp start CONTAINER...                     start created or stopped containers
+  runwhp kill [-a] CONTAINER [SIGNAL]           send a signal to a container
+  runwhp stop [-t SECONDS] CONTAINER...         stop containers
+  runwhp restart [-t SECONDS] CONTAINER...      stop containers and start them again
+  runwhp logs [-f] CONTAINER                    print the output of a container in the background
   runwhp list [-q] [--format table|json]        list containers
   runwhp state CONTAINER                        describe a container's state as JSON
   runwhp delete [-f] CONTAINER...               remove containers
@@ -50,6 +57,20 @@ func realMain(args []string) int {
 		return cmdDelete(args[1:], os.Stdout)
 	case "rename":
 		return cmdRename(args[1:])
+	case "create":
+		return cmdCreate(args[1:])
+	case "start":
+		return cmdStart(args[1:], os.Stdout)
+	case "kill":
+		return cmdKill(args[1:])
+	case "stop":
+		return cmdStop(args[1:], os.Stdout)
+	case "restart":
+		return cmdRestart(args[1:], os.Stdout)
+	case "logs":
+		return cmdLogs(args[1:], os.Stdout, os.Stderr)
+	case "__supervise":
+		return cmdSupervise(args[1:])
 	case "help", "-h", "-help", "--help":
 		fmt.Print(usage)
 		return 0
@@ -70,6 +91,10 @@ func storeRoot() (string, error) {
 	return filepath.Join(cache, "runwhp"), nil
 }
 
+// diagOut takes runwhp's own messages: stderr, except in a runwhp running
+// a container in the background, whose stderr may be the container's.
+var diagOut io.Writer = os.Stderr
+
 func errorf(format string, a ...any) {
-	fmt.Fprintf(os.Stderr, "runwhp: "+format+"\n", a...)
+	fmt.Fprintf(diagOut, "runwhp: "+format+"\n", a...)
 }
