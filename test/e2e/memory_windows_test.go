@@ -7,9 +7,14 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/windows"
 
 	"github.com/quasidock/runwhp/internal/vm"
+	"github.com/quasidock/runwhp/internal/whp"
 )
 
 // defaultMemory is what runwhp gives a guest without -m: half this
@@ -106,4 +111,58 @@ func TestMemoryCommittedLazily(t *testing.T) {
 	if !strings.Contains(r.stderr, "memfault=") {
 		t.Error("no memory faults counted")
 	}
+}
+
+// commitOf reports the memory Windows has committed to process pid.
+func commitOf(t *testing.T, pid int) uint64 {
+	t.Helper()
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		t.Fatalf("opening the container's runwhp, pid %d: %v", pid, err)
+	}
+	defer windows.CloseHandle(h)
+	info, err := whp.ProcessMemory(syscall.Handle(h))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Commit
+}
+
+// needBalloon skips a test of giving memory back when the guest's kernel
+// has no balloon driver, as WSL's has not.
+func needBalloon(t *testing.T, name string) {
+	t.Helper()
+	if r := execIn(t, name, "test", "-d", "/sys/bus/virtio/drivers/virtio_balloon"); r.code != 0 {
+		t.Skip("the guest's kernel has no virtio balloon driver, so it cannot give memory back")
+	}
+}
+
+// TestMemoryGivenBack fills 1.5 GiB of a running container's memory and
+// frees it, and checks that its runwhp process takes the memory from
+// Windows and gives it back.
+func TestMemoryGivenBack(t *testing.T) {
+	name := newName(t)
+	detached(t, "--name", name, "-m", "3g", "--tmpfs", "/t:size=2g", alpine, "sleep", "300")
+	needBalloon(t, name)
+	pid := stateOf(t, name).Pid
+	before := commitOf(t, pid)
+	if r := execIn(t, name, "sh", "-c", "head -c 1610612736 /dev/zero >/t/f"); r.code != 0 {
+		t.Fatalf("filling memory: %+v", r)
+	}
+	full := commitOf(t, pid)
+	if full < before+1400<<20 {
+		t.Fatalf("commit went from %d to %d MiB filling 1.5 GiB", before>>20, full>>20)
+	}
+	if r := execIn(t, name, "rm", "/t/f"); r.code != 0 {
+		t.Fatalf("freeing memory: %+v", r)
+	}
+	start := time.Now()
+	var now uint64
+	for now = commitOf(t, pid); now > full-1200<<20; now = commitOf(t, pid) {
+		if time.Since(start) > 60*time.Second {
+			t.Fatalf("commit was %d MiB before, %d full, and is still %d a minute after freeing it", before>>20, full>>20, now>>20)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	t.Logf("commit %d MiB before, %d full, %d %.1f s after freeing", before>>20, full>>20, now>>20, time.Since(start).Seconds())
 }

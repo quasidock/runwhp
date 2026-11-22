@@ -555,6 +555,10 @@ func (m *machine) rtcRead() byte {
 // Slice implements virtio.Memory over guest RAM.
 func (m *machine) Slice(addr, n uint64) ([]byte, bool) { return m.mem.Slice(addr, n) }
 
+// Contains and Discard implement virtio.Discarder over guest RAM.
+func (m *machine) Contains(addr, n uint64) bool { return m.mem.Contains(addr, n) }
+func (m *machine) Discard(addr, n uint64) bool  { return m.mem.Discard(addr, n) }
+
 // mmio serves one memory-mapped access decoded by the instruction emulator.
 // The I/O APIC and each transport take their own locks.
 func (v *vcpu) mmio(gpa uint64, data []byte, write bool) {
@@ -683,6 +687,8 @@ func (m *machine) stats() []string {
 		case *virtio.Net:
 			out = append(out, fmt.Sprintf("virtio %d: net, %d frames (%d KiB) from the guest, %d frames (%d KiB) to it, %d dropped",
 				i, d.TxFrames.Load(), d.TxBytes.Load()>>10, d.RxFrames.Load(), d.RxBytes.Load()>>10, d.RxDropped.Load()))
+		case *virtio.Balloon:
+			out = append(out, fmt.Sprintf("virtio %d: %s", i, d.Stats()))
 		case *virtio.Fs:
 			out = append(out, fmt.Sprintf("virtio %d: fs %q, %d requests, %d KiB from the guest, %d KiB to it",
 				i, d.Tag, d.Requests.Load(), d.BytesIn.Load()>>10, d.BytesOut.Load()>>10))

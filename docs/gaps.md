@@ -40,10 +40,10 @@
   kernel build reaches runwhp only when someone moves the pin in
   `internal/kernel/pin.go`, and the pinned digest is the only check on it:
   builds are not signed.
-- An image can have at most 55 non-empty layers, one more with
+- An image can have at most 54 non-empty layers, one more with
   `--network none`, one fewer with bind mounts, and one fewer for each
-  volume: each device, the writable layer and the vsock device included,
-  takes an I/O APIC line.
+  volume: each device, the writable layer, the vsock device and the
+  balloon included, takes an I/O APIC line.
 - The network is IPv4 only and carries no ICMP. Only TCP ports can be
   published, each with an explicit host port, and there is no `-P`, `--dns`
   or `--dns-search`.
@@ -60,8 +60,13 @@
 - Each device has one virtqueue, which every vCPU shares.
 - Each MMIO access takes several round trips through `WinHvEmulation.dll`;
   a fast path for common instructions would cut the per-write output cost.
-- Memory a guest has touched is never returned to Windows until the
-  container stops, even once the guest has freed it.
+- A guest gives back only the RAM it has free in whole, aligned 2 MiB
+  blocks. Without compaction in runwhp's kernel, the pages a guest keeps,
+  its own kernel's included, end up scattered over the RAM it has used:
+  after a `go build` in a 4 GiB guest freed its memory, about 600 MiB of
+  it stayed with the guest, in blocks too small to report.
+- A guest that hands the balloon RAM it still uses can make its own VMM
+  fault on it, and end its own container.
 - Every guest's kernel describes all of its RAM, in 1/64 of it, which
   each container holds for as long as it runs: 128 MiB with 8 GiB of
   RAM. Hot-plugging memory (virtio-mem) would avoid it.

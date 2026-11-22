@@ -331,7 +331,13 @@ for the container's `runwhp.exe` shows what it has taken.
   one with `-m 512m` in about 150 ms, holding 60 MiB.
 - **Above 4 GiB.** Guest RAM runs up to the device windows at 3.25 GiB
   and goes on from 4 GiB, as on a PC.
-- **What the guest has touched, it keeps** until the container stops.
+- **What the guest frees goes back.** The guest's kernel reports RAM it
+  has had free for two seconds to a virtio memory balloon, in blocks of
+  2 MiB, and runwhp gives it back to Windows: 3 GiB a guest frees is back
+  within about 15 s. The guest takes it again by touching it. A block is
+  reported only once all of it is free, and pages the guest keeps, its own
+  kernel's especially, end up scattered over the RAM it has used, so some
+  of what it frees stays with it.
 
 ### Storage
 
@@ -429,7 +435,7 @@ configuration, [`kernel/runwhp.config`](kernel/runwhp.config), applies over
 | Booting on runwhp's VMM | Hyper-V clock and APIC enlightenments without VMBus, ACPI (which needs PCI support, though runwhp boots with `pci=off`), virtio-mmio, the COM1 console, an uncompressed initramfs |
 | runwhp-init | ext4, overlayfs, tmpfs with xattrs, devtmpfs, virtio block, console and network devices, IPv4 and Unix sockets |
 | Containers | Namespaces, cgroup v2 controllers, seccomp, BPF, IPv6, 32-bit binaries, `binfmt_misc`, FUSE, TUN, veth, bridges, nftables and iptables (both over nftables and legacy) |
-| Later work | Host file sharing: virtio-fs, which bind mounts now use, and 9p, which nothing uses yet; vsock, which `runwhp exec` uses; the virtio balloon with free page reporting |
+| Later work | Host file sharing: virtio-fs, which bind mounts now use, and 9p, which nothing uses yet; vsock, which `runwhp exec` uses; the virtio balloon with free page reporting, which gives back the memory a guest frees |
 
 CPU vulnerability mitigations stay at upstream's defaults. The kernel is
 LZ4-compressed, which decompresses fastest.
@@ -516,7 +522,8 @@ bzImage.
    chose for it.
 4. The guest gets one multiport virtio console, with ports named `stdout`,
    `stderr`, `stdin` and `control`; a virtio socket device; a virtio
-   network device, unless `--network none`; a virtio-fs device, with bind
+   memory balloon; a virtio network device, unless `--network none`; a
+   virtio-fs device, with bind
    mounts; one read-only virtio-blk disk per layer; the writable layer; and
    one disk per named volume. Each disk's
    serial number names it, so init does not depend on probe order. The vCPU

@@ -23,6 +23,17 @@ type Memory interface {
 	Slice(addr, n uint64) ([]byte, bool)
 }
 
+// Discarder is implemented by guest memory that can give RAM back to the
+// host.
+type Discarder interface {
+	// Contains reports whether [addr, addr+n) is all RAM, without
+	// touching it.
+	Contains(addr, n uint64) bool
+	// Discard gives back the RAM in [addr, addr+n), which the guest no
+	// longer uses, and reports false if it is not all RAM.
+	Discard(addr, n uint64) bool
+}
+
 // Device is the device-specific half of a virtio device.
 //
 // Config, Notify and Reset are called with the transport's lock held, so they

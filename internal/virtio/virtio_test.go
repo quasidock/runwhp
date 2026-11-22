@@ -41,9 +41,17 @@ type usedElem struct {
 	len  uint32
 }
 
-func newDriver(t *testing.T, dev Device) *driver {
+func newDriver(t *testing.T, dev Device) *driver { return newDriverWrapped(t, dev, nil) }
+
+// newDriverWrapped is newDriver with the device seeing guest memory
+// through wrap.
+func newDriverWrapped(t *testing.T, dev Device, wrap func(testMem) Memory) *driver {
 	d := &driver{t: t, mem: make(testMem, 1<<20), next: 0x1000, queues: map[int]*driverQueue{}}
-	d.tr = NewTransport(dev, d.mem, func() { d.irqs++ })
+	var mem Memory = d.mem
+	if wrap != nil {
+		mem = wrap(d.mem)
+	}
+	d.tr = NewTransport(dev, mem, func() { d.irqs++ })
 	if d.tr.Read(regMagic, 4) != 0x74726976 || d.tr.Read(regVersion, 4) != 2 || d.tr.Read(regDeviceID, 4) != uint64(dev.DeviceID()) {
 		t.Fatal("bad virtio-mmio identification registers")
 	}

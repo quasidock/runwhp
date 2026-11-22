@@ -47,30 +47,79 @@ var errBadChain = errors.New("virtio: malformed descriptor chain")
 // ring is empty. A chain that points outside guest RAM or loops is returned
 // with err set; it must still be completed with Push.
 func (q *Queue) Pop(mem Memory) (c Chain, ok bool, err error) {
+	c.Head, ok = q.next(mem)
+	if !ok {
+		return c, false, nil
+	}
+	err = q.walk(mem, c.Head, func(addr uint64, n uint32, writable bool) bool {
+		data, ok := mem.Slice(addr, uint64(n))
+		if ok {
+			c.Buffers = append(c.Buffers, Buffer{data, writable})
+		}
+		return ok
+	})
+	return c, true, err
+}
+
+// Range is where one buffer of a chain lies in guest memory.
+type Range struct {
+	Addr     uint64
+	Len      uint32
+	Writable bool
+}
+
+// PopRanges takes the next chain as Pop does, but returns where its
+// buffers lie instead of the buffers themselves, so the guest RAM they name
+// is left untouched. The balloon uses it: its buffers are the RAM the
+// guest has free. Each range must be RAM, as Contains reports when mem
+// implements Discarder, or as Slice does otherwise.
+func (q *Queue) PopRanges(mem Memory) (head uint16, ranges []Range, ok bool, err error) {
+	head, ok = q.next(mem)
+	if !ok {
+		return 0, nil, false, nil
+	}
+	contains := func(addr, n uint64) bool { _, ok := mem.Slice(addr, n); return ok }
+	if d, ok := mem.(Discarder); ok {
+		contains = d.Contains
+	}
+	err = q.walk(mem, head, func(addr uint64, n uint32, writable bool) bool {
+		ranges = append(ranges, Range{addr, n, writable})
+		return contains(addr, uint64(n))
+	})
+	return head, ranges, true, err
+}
+
+// next takes the head of the next chain from the available ring.
+func (q *Queue) next(mem Memory) (head uint16, ok bool) {
 	n := uint64(q.Size)
 	avail, okA := mem.Slice(q.Avail, 4+2*n)
 	if !okA || q.lastAvail == loadIdx(avail) {
-		return c, false, nil
+		return 0, false
 	}
-	c.Head = le.Uint16(avail[4+2*(uint64(q.lastAvail)%n):])
+	head = le.Uint16(avail[4+2*(uint64(q.lastAvail)%n):])
 	q.lastAvail++
-	next := uint64(c.Head)
+	return head, true
+}
+
+// walk calls f with each descriptor of the chain starting at head, until f
+// returns false, which makes the chain bad.
+func (q *Queue) walk(mem Memory, head uint16, f func(addr uint64, n uint32, writable bool) bool) error {
+	n := uint64(q.Size)
+	next := uint64(head)
 	for i := uint64(0); ; i++ {
 		if i == n || next >= n {
-			return c, true, errBadChain
+			return errBadChain
 		}
 		desc, okD := mem.Slice(q.Desc+16*next, 16)
 		if !okD {
-			return c, true, errBadChain
+			return errBadChain
 		}
 		flags := le.Uint16(desc[12:])
-		data, okB := mem.Slice(le.Uint64(desc[0:]), uint64(le.Uint32(desc[8:])))
-		if !okB {
-			return c, true, errBadChain
+		if !f(le.Uint64(desc[0:]), le.Uint32(desc[8:]), flags&descWrite != 0) {
+			return errBadChain
 		}
-		c.Buffers = append(c.Buffers, Buffer{data, flags&descWrite != 0})
 		if flags&descNext == 0 {
-			return c, true, nil
+			return nil
 		}
 		next = uint64(le.Uint16(desc[14:]))
 	}

@@ -175,9 +175,9 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 	}
 	files = append(files, modules...)
 
-	// Devices: the console and the vsock device first, then the network
-	// device and the shares' file system if any, then one disk per layer,
-	// bottom first, then the writable layer, then the volumes.
+	// Devices: the console, the vsock device and the balloon first, then
+	// the network device and the shares' file system if any, then one disk
+	// per layer, bottom first, then the writable layer, then the volumes.
 	var stdin io.Reader
 	if cfg.Stdin {
 		stdin = bio.stdin
@@ -202,7 +202,8 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 	if hooks.vsock != nil {
 		hooks.vsock(vsock)
 	}
-	devices := []virtio.Device{console, vsock}
+	// The balloon gives back to Windows the memory the guest reports free.
+	devices := []virtio.Device{console, vsock, &virtio.Balloon{}}
 	if cfg.Network {
 		nic := &virtio.Net{MAC: netstack.GuestMAC, MTU: netstack.MTU}
 		stack, err := netstack.New(netstack.Config{

@@ -38,7 +38,9 @@ const (
 	// swiotlb=noforce: with RAM above 4 GiB, the kernel would otherwise
 	// set aside and zero 64 MiB of bounce buffers for devices that cannot
 	// reach it, and no runwhp device needs them.
-	baseCmdline = "console=ttyS0 nokaslr no5lvl pci=off swiotlb=noforce panic=-1 reboot=acpi"
+	// page_reporting_order=9: report free RAM to the balloon in blocks of
+	// 2 MiB, the unit runwhp gives back, rather than the default 4 MiB.
+	baseCmdline = "console=ttyS0 nokaslr no5lvl pci=off swiotlb=noforce page_reporting.page_reporting_order=9 panic=-1 reboot=acpi"
 	consoleTail = 200 // kernel console lines kept for error reports
 )
 
@@ -388,9 +390,9 @@ func appendAbs(list []string, p string) ([]string, error) {
 // checkDevices checks that the container's devices fit the I/O APIC: each
 // takes an interrupt line.
 func checkDevices(cfg *container.Config, volumes int) error {
-	// The console, the vsock device and the writable layer, and the others
-	// named here.
-	others, users := 3, []string{}
+	// The console, the vsock device, the balloon and the writable layer,
+	// and the others named here.
+	others, users := 4, []string{}
 	if cfg.Network {
 		others++
 		users = append(users, "the network")
@@ -409,7 +411,7 @@ func checkDevices(cfg *container.Config, volumes int) error {
 		if len(users) > 0 {
 			what += ", " + strings.Join(users, ", ")
 		}
-		return fmt.Errorf("too many devices: %s, the console, the vsock device and the writable layer make %d, and runwhp has room for %d", what, n, vm.MaxDevices)
+		return fmt.Errorf("too many devices: %s, the console, the vsock device, the balloon and the writable layer make %d, and runwhp has room for %d", what, n, vm.MaxDevices)
 	}
 	return nil
 }
@@ -467,9 +469,9 @@ func defaultMemory() uint64 {
 // bytes without one) and rounds it up to 2 MiB. "" means defaultMemory.
 //
 // A guest takes from Windows only the memory it touches, a 2 MiB chunk at
-// a time, so a large default costs little: the guest kernel's page
-// descriptors, 1/64 of its RAM, and about 8 ms of start-up per GiB, which
-// it spends describing them.
+// a time, and gives back what it frees, so a large default costs little:
+// the guest kernel's page descriptors, 1/64 of its RAM, and about 8 ms of
+// start-up per GiB, which it spends describing them.
 func parseMemory(s string) (uint64, error) {
 	if s == "" {
 		return defaultMemory(), nil

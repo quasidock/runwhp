@@ -3,7 +3,8 @@
 //
 // The host writes a Spec into the initramfs at SpecPath. The guest gets a
 // multiport virtio console with the ports named below; then a virtio socket
-// device, which gives the guest the context ID GuestCID; then, when
+// device, which gives the guest the context ID GuestCID; then a virtio
+// memory balloon, which only takes free page reporting; then, when
 // Spec.Network is set, a virtio network device with Network.MAC; then, when
 // any Mount binds a share, a virtio-fs device tagged FSTag; then one
 // read-only virtio block device per image layer, bottom layer first, each
