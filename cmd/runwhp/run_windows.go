@@ -210,23 +210,41 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 	}
 	start := time.Now()
 	sweepStore(root, logf)
+	// A --rm container's writable layer is a scratch disk, made while the
+	// image is resolved; a kept one is made in the container's directory
+	// once there is one.
+	var layer *pendingLayer
+	if o.rm {
+		size, err := parseStorageOpts(o.storageOpts)
+		if err != nil {
+			return fail, err
+		}
+		layer = startLayer(scratchPath(root), size, true)
+		defer layer.close()
+	}
 	cfg, err := resolveConfig(ctx, root, o, entrypointSet, args, policy, logf)
 	if err != nil {
 		return fail, err
 	}
 	cfg.AutoRemove = o.rm
 	store := container.Open(root)
-	rec, err := store.Create(cfg, o.name)
+	rec, err := store.CreateWith(cfg, o.name, container.State{Pid: os.Getpid(), Output: container.OutputTerminal})
 	if err != nil {
 		return fail, err
 	}
+	if layer == nil {
+		layer = startLayer(rec.RW(), cfg.StorageSize, false)
+		defer layer.close()
+	}
 	sup, err := supervise(root, store, rec, container.OutputTerminal, proxy)
 	if err != nil {
+		layer.close()
 		store.Remove(rec)
 		return fail, err
 	}
 	logf("%4d ms  container %s recorded: %d layers", time.Since(start).Milliseconds(), rec.Short(), max(len(cfg.Layers), len(cfg.LayerFiles)))
-	code, err := bootContainer(ctx, root, rec, policy, proxy, foregroundIO(cfg), sup.hooks(false), logf, start)
+	code, err := bootContainer(ctx, root, rec, layer, policy, proxy, foregroundIO(cfg), sup.hooks(false), logf, start)
+	layer.close()
 	sup.finish(code, err)
 	return code, err
 }

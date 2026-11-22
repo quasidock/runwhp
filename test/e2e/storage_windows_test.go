@@ -39,14 +39,13 @@ func containerDirs(t *testing.T) map[string]bool {
 	return out
 }
 
-// newContainerDir waits for a container that is not in before to appear,
-// and for its writable layer.
+// newContainerDir waits for a container that is not in before to appear.
 func newContainerDir(t *testing.T, before map[string]bool) string {
 	t.Helper()
 	for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
 		for id := range containerDirs(t) {
 			if !before[id] {
-				if _, err := os.Stat(filepath.Join(storeDir(t), "containers", id, "rw.ext4")); err == nil {
+				if _, err := os.Stat(filepath.Join(storeDir(t), "containers", id, "config.json")); err == nil {
 					return id
 				}
 			}
@@ -164,7 +163,7 @@ func TestRemovedAfterHardStop(t *testing.T) {
 }
 
 // TestRemovedWhenKilled kills runwhp, as Task Manager would. Windows
-// deletes the writable layer, and the next list removes the record.
+// deletes the scratch disk, and the next list removes the record.
 func TestRemovedWhenKilled(t *testing.T) {
 	before := containerDirs(t)
 	var stdout syncBuffer
@@ -182,7 +181,6 @@ func TestRemovedWhenKilled(t *testing.T) {
 	id := newContainerDir(t, before)
 	cmd.Process.Kill()
 	cmd.Wait()
-	waitGone(t, filepath.Join("containers", id, "rw.ext4"))
 	if r := cli(t, "list", "-q"); r.code != 0 || strings.Contains(r.stdout, id) {
 		t.Errorf("list: %+v", r)
 	}

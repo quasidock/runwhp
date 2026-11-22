@@ -34,8 +34,12 @@ type supervisor struct {
 	proxy *signalProxy // the control port, and stopping the VM
 	ln    net.Listener
 
-	mu      sync.Mutex
-	state   container.State
+	mu    sync.Mutex
+	state container.State
+	// wmu orders the writes of state: each writes it as it is then, so the
+	// last write is always of the latest. pending counts writes in flight.
+	wmu     sync.Mutex
+	pending sync.WaitGroup
 	ready   chan struct{} // closed once a container booted to wait is ready
 	running chan struct{} // closed once the process has started
 	stopped chan struct{} // closed once the container has stopped and that is recorded
@@ -62,19 +66,47 @@ func supervise(root string, store *container.Store, rec *container.Container, ou
 		lock.Close()
 		return nil, fmt.Errorf("serving container %s's pipe: %w", rec.Short(), err)
 	}
-	s.update(func(st *container.State) {
-		*st = container.State{Status: container.Creating, Pid: os.Getpid(), Output: output}
-	})
+	// A container this process made already records it.
+	if rec.State.Pid != os.Getpid() || rec.State.Output != output {
+		s.update(func(st *container.State) {
+			*st = container.State{Status: container.Creating, Pid: os.Getpid(), Output: output}
+		})
+	}
 	go s.serve()
 	return s, nil
 }
 
 // update changes the container's state and records it.
 func (s *supervisor) update(f func(*container.State)) {
+	s.change(f)
+	s.persist()
+}
+
+// updateLater changes the container's state at once, and records it in
+// the background.
+func (s *supervisor) updateLater(f func(*container.State)) {
+	s.change(f)
+	s.pending.Add(1)
+	go func() {
+		defer s.pending.Done()
+		s.persist()
+	}()
+}
+
+func (s *supervisor) change(f func(*container.State)) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	f(&s.state)
-	if err := s.lock.WriteState(s.state); err != nil {
+	s.mu.Unlock()
+}
+
+// persist records the state as it is now.
+func (s *supervisor) persist() {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	s.mu.Lock()
+	st := s.state
+	s.mu.Unlock()
+	if err := s.lock.WriteState(st); err != nil {
 		errorf("recording the state of container %s: %v", s.rec.Short(), err)
 	}
 }
@@ -96,9 +128,11 @@ func (s *supervisor) isReady() {
 	close(s.ready)
 }
 
-// started records that the container process runs, as pid in the guest.
+// started records that the container process runs, as pid in the guest:
+// in the background, since the guest goes on meanwhile, and whoever needs
+// it recorded first, a start request say, persists it itself.
 func (s *supervisor) started(pid int) {
-	s.update(func(st *container.State) {
+	s.updateLater(func(st *container.State) {
 		st.Status, st.GuestPid, st.StartedAt = container.Running, pid, time.Now().UTC()
 	})
 	close(s.running)
@@ -114,7 +148,7 @@ func (s *supervisor) failed(console []string) {
 // gives up the container's lock and pipe, and removes the container if it
 // was to be removed when it stopped.
 func (s *supervisor) finish(code int, err error) {
-	s.update(func(st *container.State) {
+	s.change(func(st *container.State) {
 		st.Status, st.Pid, st.GuestPid = container.Stopped, 0, 0
 		st.FinishedAt, st.ExitCode, st.Error = time.Now().UTC(), code, ""
 		switch {
@@ -128,6 +162,11 @@ func (s *supervisor) finish(code int, err error) {
 			st.Error = "runwhp failed"
 		}
 	})
+	autoRemove := s.rec.Config.AutoRemove
+	s.pending.Wait()
+	if !autoRemove {
+		s.persist()
+	}
 	close(s.stopped)
 	s.ln.Close()
 	// Let the answers to stop and wait requests go out.
@@ -137,13 +176,21 @@ func (s *supervisor) finish(code int, err error) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 	}
+	if !autoRemove {
+		s.lock.Close()
+		return
+	}
+	// A container to be removed is, with no last state recorded, unless
+	// it cannot be.
 	s.lock.Close()
-	if s.rec.Config.AutoRemove {
-		for _, f := range s.files {
-			f.Close()
-		}
-		if err := s.store.Remove(s.rec); err != nil {
-			errorf("removing container %s: %v", s.rec.Short(), err)
+	for _, f := range s.files {
+		f.Close()
+	}
+	if err := s.store.Remove(s.rec); err != nil {
+		errorf("removing container %s: %v", s.rec.Short(), err)
+		if s.lock, err = s.store.Lock(s.rec); err == nil {
+			s.persist()
+			s.lock.Close()
 		}
 	}
 }
@@ -230,6 +277,7 @@ func (s *supervisor) start() container.Reply {
 	}
 	select {
 	case <-s.running:
+		s.persist() // so that whoever asked sees it running
 		return s.reply()
 	case <-s.stopped:
 		r := s.reply()

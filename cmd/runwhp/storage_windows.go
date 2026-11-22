@@ -3,9 +3,11 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
-	"io/fs"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -105,6 +107,15 @@ func sweepStore(root string, logf func(string, ...any)) {
 	}
 }
 
+// scratchPath is where a new scratch disk goes: the store's scratch
+// directory, which sweepStore empties of disks left by runs the machine
+// stopped under.
+func scratchPath(root string) string {
+	var b [8]byte
+	rand.Read(b[:])
+	return filepath.Join(root, "scratch", hex.EncodeToString(b[:])+".ext4")
+}
+
 // openLayer opens a container's writable layer, a sparse file at path
 // holding an ext4 file system of size bytes. A kept layer is made and
 // formatted, with a journal, the first time, and opened as it is after
@@ -112,6 +123,9 @@ func sweepStore(root string, logf func(string, ...any)) {
 // or runwhp ends, however it ends.
 func openLayer(path string, size int64, scratch bool) (*disk.File, error) {
 	if scratch {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return nil, err
+		}
 		f, err := disk.Create(path, size, disk.Scratch)
 		if err != nil {
 			return nil, err
@@ -156,9 +170,10 @@ type layerResult struct {
 
 // pendingLayer is the writable layer being opened in the background.
 type pendingLayer struct {
-	ch   <-chan layerResult
-	once sync.Once
-	res  layerResult
+	ch        <-chan layerResult
+	once      sync.Once
+	res       layerResult
+	closeOnce sync.Once
 }
 
 // startLayer starts opening the writable layer while the caller does other
@@ -186,7 +201,9 @@ func (p *pendingLayer) get() layerResult {
 // close waits for the writable layer and closes it, which deletes a scratch
 // one.
 func (p *pendingLayer) close() {
-	if r := p.get(); r.file != nil {
-		r.file.Close()
-	}
+	p.closeOnce.Do(func() {
+		if r := p.get(); r.file != nil {
+			r.file.Close()
+		}
+	})
 }

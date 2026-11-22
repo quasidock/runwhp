@@ -45,4 +45,6 @@ type State struct {
 }
 
 // Active reports whether the state says the container has a VM.
-func (s State) Active() bool { return s.Status == Creating || s.Status == Created || s.Status == Running }
+func (s State) Active() bool {
+	return s.Status == Creating || s.Status == Created || s.Status == Running
+}

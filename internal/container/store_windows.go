@@ -120,6 +120,13 @@ func CheckName(name string) error {
 // and, unless it is empty, name. The record is made in the store's tmp
 // directory and moved into place whole.
 func (s *Store) Create(cfg *Config, name string) (*Container, error) {
+	return s.CreateWith(cfg, name, State{Status: Creating})
+}
+
+// CreateWith is Create, with st, whose status must be Creating, as the
+// container's first state: the process that makes a container and runs it
+// records itself in one write.
+func (s *Store) CreateWith(cfg *Config, name string, st State) (*Container, error) {
 	if !isID(cfg.ID) {
 		return nil, fmt.Errorf("invalid container ID %q", cfg.ID)
 	}
@@ -138,7 +145,8 @@ func (s *Store) Create(cfg *Config, name string) (*Container, error) {
 		return nil, err
 	}
 	defer os.RemoveAll(work)
-	c := &Container{ID: cfg.ID, Name: name, Config: cfg, State: State{Status: Creating}, dir: work}
+	st.Status = Creating
+	c := &Container{ID: cfg.ID, Name: name, Config: cfg, State: st, dir: work}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return nil, err

@@ -255,10 +255,11 @@ func cmdSupervise(args []string) int {
 	} else {
 		hooks.started = func(pid int) {
 			sup.started(pid)
+			sup.persist()
 			report.ok(container.Running)
 		}
 	}
-	code, err := bootContainer(ctx, root, rec, image.PullNever, proxy, bio, hooks, logf, time.Now())
+	code, err := bootContainer(ctx, root, rec, nil, image.PullNever, proxy, bio, hooks, logf, time.Now())
 	if err != nil {
 		errorf("%v", err)
 	}

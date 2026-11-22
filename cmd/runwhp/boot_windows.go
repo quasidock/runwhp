@@ -75,13 +75,17 @@ const detachedRows, detachedCols = 24, 80
 
 // bootContainer runs a container's VM until it stops, and returns the
 // container's exit code. The caller holds the container's lock.
-func bootContainer(ctx context.Context, root string, rec *container.Container, policy image.Policy, proxy *signalProxy, bio bootIO, hooks bootHooks, logf func(string, ...any), start time.Time) (int, error) {
+//
+// layer is the writable layer, being opened; if nil, bootContainer opens
+// the container's own, while it reads the kernel.
+func bootContainer(ctx context.Context, root string, rec *container.Container, layer *pendingLayer, policy image.Policy, proxy *signalProxy, bio bootIO, hooks bootHooks, logf func(string, ...any), start time.Time) (int, error) {
 	const fail = guestspec.ExitRuntime
 	cfg := rec.Config
 
-	// The writable layer is opened, or made, while the kernel is read.
-	layer := startLayer(rec.RW(), cfg.StorageSize, cfg.AutoRemove)
-	defer layer.close()
+	if layer == nil {
+		layer = startLayer(rec.RW(), cfg.StorageSize, cfg.AutoRemove)
+		defer layer.close()
+	}
 
 	layerFiles, err := layerPaths(root, cfg)
 	if err != nil {
