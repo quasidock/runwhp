@@ -2,7 +2,8 @@
 // init program inside the guest.
 //
 // The host writes a Spec into the initramfs at SpecPath. The guest gets a
-// multiport virtio console with the ports named below; then, when
+// multiport virtio console with the ports named below; then a virtio socket
+// device, which gives the guest the context ID GuestCID; then, when
 // Spec.Network is set, a virtio network device with Network.MAC; then, when
 // any Mount binds a share, a virtio-fs device tagged FSTag; then one
 // read-only virtio block device per image layer, bottom layer first, each
@@ -64,6 +65,9 @@ func VolumeSerial(i int) string { return fmt.Sprintf("vol%d", i) }
 // VolumeData is the directory of a volume's file system that is mounted
 // into the container.
 const VolumeData = "_data"
+
+// GuestCID is the guest's vsock context ID.
+const GuestCID = 3
 
 // FSTag is the mount tag of the virtio-fs device that carries the shares.
 const FSTag = "runwhp"

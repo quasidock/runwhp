@@ -385,8 +385,9 @@ func appendAbs(list []string, p string) ([]string, error) {
 // checkDevices checks that the container's devices fit the I/O APIC: each
 // takes an interrupt line.
 func checkDevices(cfg *container.Config, volumes int) error {
-	// The console and the scratch disk, and the others named here.
-	others, users := 2, []string{}
+	// The console, the vsock device and the writable layer, and the others
+	// named here.
+	others, users := 3, []string{}
 	if cfg.Network {
 		others++
 		users = append(users, "the network")
@@ -405,7 +406,7 @@ func checkDevices(cfg *container.Config, volumes int) error {
 		if len(users) > 0 {
 			what += ", " + strings.Join(users, ", ")
 		}
-		return fmt.Errorf("too many devices: %s, the console and the scratch disk make %d, and runwhp has room for %d", what, n, vm.MaxDevices)
+		return fmt.Errorf("too many devices: %s, the console, the vsock device and the writable layer make %d, and runwhp has room for %d", what, n, vm.MaxDevices)
 	}
 	return nil
 }

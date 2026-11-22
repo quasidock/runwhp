@@ -67,6 +67,8 @@ type bootHooks struct {
 	// failed, if set, is given the last kernel console lines when the VM
 	// failed, or stopped without saying how the container ended.
 	failed func(console []string)
+	// vsock, if set, is given the vsock device before the VM boots.
+	vsock func(*virtio.Vsock)
 }
 
 // detachedRows and detachedCols size the terminal of a container run with
@@ -173,9 +175,9 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 	}
 	files = append(files, modules...)
 
-	// Devices: the console first, then the network device and the shares'
-	// file system if any, then one disk per layer, bottom first, then the
-	// scratch disk, then the volumes.
+	// Devices: the console and the vsock device first, then the network
+	// device and the shares' file system if any, then one disk per layer,
+	// bottom first, then the writable layer, then the volumes.
 	var stdin io.Reader
 	if cfg.Stdin {
 		stdin = bio.stdin
@@ -194,7 +196,13 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 		Logf: logf,
 	}
 	proxy.console.Store(console)
-	devices := []virtio.Device{console}
+	// The vsock device carries runwhp exec's connections to init.
+	vsock := &virtio.Vsock{CID: guestspec.GuestCID, Logf: logf}
+	defer func() { logf("%s", vsock.Stats()) }()
+	if hooks.vsock != nil {
+		hooks.vsock(vsock)
+	}
+	devices := []virtio.Device{console, vsock}
 	if cfg.Network {
 		nic := &virtio.Net{MAC: netstack.GuestMAC, MTU: netstack.MTU}
 		stack, err := netstack.New(netstack.Config{
