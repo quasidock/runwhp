@@ -24,7 +24,9 @@ var storage = struct {
 // FIFREEZE, which x/sys/unix lacks: _IOWR('X', 119, int).
 const fifreeze = 0xc0045877
 
-// openRCUExpedited opens /sys/kernel/rcu_expedited for stopStorage, once.
+// openRCUExpedited opens /sys/kernel/rcu_expedited, once, while the
+// initramfs's sysfs is reachable: for stopStorage, and for init's own
+// steps that wait for RCU grace periods.
 func openRCUExpedited() {
 	if storage.rcuExpedited >= 0 {
 		return
@@ -49,11 +51,12 @@ func openRCUExpedited() {
 // Writes to bind mounts go to the host as they are made, except through
 // shared memory mappings, whose dirty pages syncfs writes back.
 func stopStorage() {
-	if (len(storage.volumes) > 0 || storage.rw >= 0) && storage.rcuExpedited >= 0 {
+	if storage.rcuExpedited >= 0 {
 		// A freeze waits for an RCU grace period at each of its three
-		// levels, tens of milliseconds apiece in an idle guest. Expedited
-		// grace periods take microseconds, and with the container gone
-		// their cost to everything else no longer matters.
+		// levels, and the balloon's driver for one as the kernel shuts it
+		// down, at ten milliseconds or more apiece in an idle guest.
+		// Expedited grace periods take microseconds, and with the
+		// container gone their cost to everything else no longer matters.
 		unix.Write(storage.rcuExpedited, []byte("1"))
 	}
 	for i, fd := range storage.volumes {

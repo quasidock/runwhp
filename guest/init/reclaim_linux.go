@@ -49,7 +49,17 @@ func openMemFiles() *memFiles {
 		logf("making %s: %v", cgroupDir, err)
 		return m
 	}
-	if err := syscall.Mount("cgroup2", cgroupDir, "cgroup2", syscall.MS_NOSUID|syscall.MS_NODEV|syscall.MS_NOEXEC, ""); err != nil {
+	// Mounting the hierarchy waits for an RCU grace period, 15 ms in a
+	// guest this idle; expedited, it takes well under one.
+	openRCUExpedited()
+	if storage.rcuExpedited >= 0 {
+		syscall.Write(storage.rcuExpedited, []byte("1"))
+	}
+	err = syscall.Mount("cgroup2", cgroupDir, "cgroup2", syscall.MS_NOSUID|syscall.MS_NODEV|syscall.MS_NOEXEC, "")
+	if storage.rcuExpedited >= 0 {
+		syscall.Write(storage.rcuExpedited, []byte("0"))
+	}
+	if err != nil {
 		logf("mounting cgroup2: %v", err)
 		return m
 	}
