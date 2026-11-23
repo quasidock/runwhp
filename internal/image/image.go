@@ -29,10 +29,13 @@ var Platform = v1.Platform{OS: "linux", Architecture: "amd64"}
 type Store struct {
 	Root   string // holds images/ and layers/
 	Layers *layer.Store
-	// Progress receives one line per pull step. nil discards them.
+	// Progress receives one line per pull step. nil discards them. Layers
+	// are fetched concurrently; the store serializes its writes.
 	Progress io.Writer
 	// Remote options, for tests.
 	RemoteOptions []remote.Option
+
+	progressMu sync.Mutex
 }
 
 // Open returns the store under root, creating nothing until it is written.
@@ -108,9 +111,13 @@ func (s *Store) recordPath(ref name.Reference) string {
 }
 
 func (s *Store) progressf(format string, a ...any) {
-	if s.Progress != nil {
-		fmt.Fprintf(s.Progress, format+"\n", a...)
+	if s.Progress == nil {
+		return
 	}
+	line := fmt.Sprintf(format+"\n", a...)
+	s.progressMu.Lock()
+	defer s.progressMu.Unlock()
+	io.WriteString(s.Progress, line)
 }
 
 // Get returns the local record of ref if it and all its layers are present.
