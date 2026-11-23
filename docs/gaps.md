@@ -67,7 +67,9 @@
   it stayed with the guest, in blocks too small to report.
 - `runwhp stats` keeps no history, and shows only running containers.
 - A guest gives back its page cache only once it is idle, and gradually:
-  a busy container keeps what it has cached, up to all its free RAM.
+  a busy container keeps what it has cached, up to all its free RAM, and
+  an idle one keeps 2% of its RAM cached, 157 MiB with this machine's
+  default.
 - A guest that hands the balloon RAM it still uses can make its own VMM
   fault on it, and end its own container.
 - Every guest's kernel describes all of its RAM, in 1/64 of it, which

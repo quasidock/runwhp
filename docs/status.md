@@ -1,5 +1,15 @@
 # Status
 
+- **Iteration 9** (2026-11-23): containers get as much memory as they
+  need and give back what they free. Guest RAM goes on above 4 GiB, up to
+  the machine's, and defaults to half of it. It is committed 2 MiB at a
+  time as the guest first touches it, so a guest takes from Windows only
+  what it uses, and a virtio balloon with free page reporting gives back
+  what the guest frees; an idle guest gives back its page cache too.
+  `runwhp stats` shows what running containers use. Runs got faster:
+  `run alpine:3.20 true` takes about 165 ms at 512m, and about 225 ms with
+  half the machine's memory, against about 265 ms in iteration 8. See
+  [Memory](../README.md#memory) and [Iteration 9 results](#iteration-9-results).
 - **Iteration 8** (2026-11-22): containers outlive the command that made
   them. Every run keeps its container, with its writable layer, unless
   `--rm`; `run -d` and `create` run one in the background, in a runwhp of
@@ -586,3 +596,114 @@ The new tests cover:
 
 The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
 the WSL kernel with its vsock modules passed with `--module`.
+
+## Iteration 9 results
+
+Measured on the test machine, which has 15.3 GiB of RAM, with runwhp's
+kernel, from Git Bash, with the store on NTFS (`C:`). "Iteration 8" is that
+iteration's build, run in turn with this one. Half the machine's memory,
+the new default, is 7852 MiB here.
+
+Runs got faster, over seven runs:
+
+| Measurement | Result |
+| --- | --- |
+| `run --rm alpine:3.20 true`, iteration 8 (512 MiB) | 255-272 ms |
+| the same, iteration 9, `-m 512m` | 159-168 ms |
+| the same, iteration 9, default memory (7852 MiB) | 216-233 ms |
+
+What a guest takes from Windows to run `true`, against all of its memory
+in iteration 8:
+
+| Memory | Committed at most | Memory faults |
+| --- | --- | --- |
+| 512 MiB | 62 MiB | 25 |
+| 2 GiB | 92 MiB | 39 |
+| 4 GiB | 138 MiB | 62 |
+| 7852 MiB | 206 MiB | 95 |
+| 15 GiB | 336 MiB | 160 |
+
+Most of it is the guest kernel's page descriptors, 1/64 of its RAM; each
+GiB also adds about 8 ms to a run. Before the guest's touches mapped its
+memory, committing and mapping 8 GiB up front took 140 ms, and the guest
+kernel then spent 250 ms describing its pages, 7.6 µs per 4 KiB page
+for the hypervisor to fill in its page tables; populating each chunk as
+it is mapped took that to 22 ms. See [Findings](findings.md).
+
+Giving memory back, watched from the host as the commit of the
+container's runwhp process:
+
+| Measurement | Result |
+| --- | --- |
+| a 4 GiB guest fills 3 GiB of tmpfs and deletes it | commit rose from 198 to 3289 MiB, and was back to 227 MiB 14 s after the delete |
+| the same, `TestMemoryGivenBack`'s 1.5 GiB in a 3 GiB guest | 176 MiB, 1724 MiB full, 379 MiB 8.3 s after |
+| 1.5 GiB of page cache in a 4 GiB guest, idle with `RUNWHP_RECLAIM_IDLE=5` | 1814 MiB, then 920 MiB 40 s later, a tenth of the cache every 5 s |
+| a 4-vCPU `go build` of runwhp in a 4 GiB guest | 230 MiB before, 1190 MiB at its peak, 870 MiB once its page cache was dropped |
+| a detached `postgres:17`, default memory, idle | 467 MiB a minute after it started, 462 MiB after seven idle minutes |
+
+A cold `GOOS=windows go build ./cmd/runwhp` in `golang:1.26` with
+`--cpus 16`, reading the source and module cache through read-only bind
+mounts, as in iteration 6, two runs each:
+
+| Build | Time | Committed at most |
+| --- | --- | --- |
+| iteration 8, `-m 3g` | 22.9 s, and 46.5 s the first time | 3 GiB |
+| iteration 9, default memory, no `-m` | 18.5-22.5 s | 1.26 GiB |
+
+Reading the Go toolchain out of `golang:1.26`'s layers, `tar` of
+`/usr/local/go` with caches dropped, `--cpus 4 -m 1g`, three runs each:
+
+| Build | Time |
+| --- | --- |
+| iteration 8 | 4.15-4.18 s, and 7.10 s the first time |
+| iteration 9 | 2.96-3.15 s |
+
+The guest fills its page cache from chunks populated whole rather than a
+page at a time.
+
+The balloon and init's cgroup mount each first cost about 15 ms a run,
+waiting for an RCU grace period: the balloon's driver as the kernel shuts
+it down, the mount as init makes it. Init now expedites grace periods for
+both, as it did for freezing volumes, and they cost nothing measurable.
+
+The idle postgres gave back little: its guest used 145 MiB, of which
+138 MiB was page cache, below the reclaimer's floor of 2% of its RAM,
+157 MiB here. The rest of what its runwhp held was the guest kernel's page
+descriptors, about 123 MiB, runwhp itself, and memory `initdb` had freed in
+blocks too small to report.
+
+`runwhp stats --no-stream` for two containers takes about 0.55 s, most of
+it the half second between its two samples.
+
+The new tests cover:
+
+- guest RAM in two ranges: spans in either and across the hole, one map
+  per chunk from 16 goroutines at once, faults inside and outside RAM and
+  across chunks, commit failing, and chunks given back whole and in part
+  while others are faulted in, under the race detector
+- the loader: e820 with and without RAM above 4 GiB, and an 8 GiB guest's
+  initramfs below 2 GiB
+- the balloon against a simulated driver: reports given back by address
+  without slicing what they name, chains running past RAM, the idle
+  inflate and deflate queues, a driver without reporting, and reset
+- the reclaimer's decisions, `/proc/meminfo` and `/proc/stat` parsing,
+  and counting tasks without the kernel's threads, on Linux
+- `-m` and its default, `RUNWHP_RECLAIM_IDLE`, the stats table, CPU %
+  from two samples, sizes, and a late answer from init not taken for the
+  next request
+- end to end:
+  - `-m 6g`: `MemTotal`, System RAM above 4 GiB, and 512 MiB of random
+    data through a tmpfs in the Normal zone, the RAM above 4 GiB
+  - the default memory, recorded in `state`, and `-m` above the machine's
+  - a guest committing only what it touches
+  - 1.5 GiB filled and freed, and back to Windows within a minute
+  - an idle guest's page cache given back, and kept with
+    `RUNWHP_RECLAIM_IDLE=0`
+  - `stats`: two busy loops on 2 vCPUs at 150-210%, an idle container's
+    PIDs and memory, all running containers, the table, network bytes, a
+    stopped container refused, and a foreground run
+
+The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
+the WSL kernel with its vsock modules passed with `--module`. WSL's kernel
+builds in the balloon and free page reporting, so it gives memory back
+too; it takes 64 MiB or so more of its own than runwhp's.

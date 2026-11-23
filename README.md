@@ -330,8 +330,9 @@ for the container's `runwhp.exe` shows what it has taken.
   RAM when it boots, in 1/64 of the RAM, so a guest always takes that
   much: 128 MiB for an 8 GiB guest. Describing the pages costs about 8 ms
   of start-up per GiB. A guest with the default memory, half of this
-  15 GiB machine's, runs `true` in about 220 ms, holding about 210 MiB;
-  one with `-m 512m` in about 150 ms, holding 60 MiB.
+  15 GiB machine's, runs `true` in about 225 ms, holding about 206 MiB;
+  one with `-m 512m` in about 165 ms, holding 62 MiB. Iteration 8, which
+  committed all of a 512 MiB guest up front, took about 265 ms.
 - **Above 4 GiB.** Guest RAM runs up to the device windows at 3.25 GiB
   and goes on from 4 GiB, as on a PC.
 - **What the guest frees goes back.** The guest's kernel reports RAM it

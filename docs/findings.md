@@ -182,3 +182,53 @@
   `vmw_vsock_virtio_transport.ko`, and their names sort against their
   order of loading, so init tries modules that failed again for as long as
   others load.
+- **The hypervisor fills in its page tables one page at a time.** A guest's
+  first touch of each 4 KiB page of RAM traps into the hypervisor, which
+  then maps it, at about 7.6 µs a page on the test machine, whether or not
+  the host already has the page. Linux writes a page descriptor for every
+  page of RAM as it boots, 1/64 of it, so an 8 GiB guest spent 250 ms on
+  that alone. `WHvAdviseGpaRange` with its populate advice fills in a
+  range at once: about 0.2 ms for 2 MiB, mostly zeroing it, and the same
+  boot step took 22 ms. runwhp populates each 2 MiB chunk as it maps it.
+- **Mapping guest memory costs by its size.** `WHvMapGpaRange` took about
+  18 ms per GiB, so mapping 8 GiB before the guest started took 140 ms.
+- **An access to an unmapped address always reaches the VMM.** With guest
+  RAM reserved but neither committed nor mapped, every first touch of a
+  chunk exits as a memory access; committing, mapping and populating the
+  chunk and running the instruction again is all it takes. The Hyper-V
+  pages the guest's kernel places in its RAM, the hypercall page and the
+  reference TSC page, work wherever they land.
+- **Decommitting behind a live mapping needs a populate to undo.** With
+  `GpaAccessFaultExit` set, a guest touching a page whose host memory was
+  decommitted while its chunk stayed mapped exits as a memory access.
+  Committing the page again was not enough: the guest faulted again at the
+  same address until the page was also populated. That would let runwhp
+  give back free blocks smaller than a chunk, but each 4 KiB page the
+  guest then touched again faulted, at about 0.45 ms each, so runwhp gives
+  back whole chunks only.
+- **Two more steps wait for RCU grace periods.** Mounting the cgroup
+  hierarchy waited 13-16 ms for one, and the balloon's driver about as
+  long as the kernel shut it down, unregistering free page reporting.
+  Expedited, each takes well under a millisecond. Expediting grace periods
+  for the whole of init's setup was no faster than for those two steps.
+- **With RAM above 4 GiB, Linux sets aside bounce buffers.** x86 zeroes
+  64 MiB of them at boot for devices that cannot reach high memory.
+  No runwhp device needs them, and `swiotlb=noforce` keeps them away.
+- **virtio-mmio numbers only the queues a driver uses.** With free page
+  reporting the only balloon feature, Linux sets up the inflate, deflate
+  and reporting queues as 0, 1 and 2, skipping the statistics and hinting
+  queues without leaving gaps.
+- **Free page reporting reports in rounds.** Two seconds after RAM is
+  freed, the guest's kernel reports free blocks of the reporting order or
+  larger, 32 to a request, and only part of what is free each round: 3 GiB
+  a guest freed came back in seven rounds over about 14 s. Without huge
+  pages, the default order is the page block's, 4 MiB here; runwhp asks
+  for 2 MiB, its own unit, which left a little less behind.
+- **What the guest keeps ends up everywhere it has been.** After a 4-vCPU
+  `go build` in a 4 GiB guest, with its page cache dropped, the guest had
+  4 GiB free but runwhp still held about 870 MiB, against 230 MiB before
+  the build: some 400 MiB of the guest's free RAM was in blocks smaller
+  than 2 MiB, with the pages it kept, mostly its kernel's own, scattered
+  over every chunk the build had used. Compaction, built into a test
+  kernel and run once the guest was idle, moved little: kernel pages do
+  not move.
