@@ -131,6 +131,8 @@ func pushImage(t *testing.T, repo string, layers ...v1.Layer) string {
 	if err := remote.Write(r, img); err != nil {
 		t.Fatal(err)
 	}
+	// The registry goes with the test, and so does the image.
+	t.Cleanup(func() { cli(t, "rmi", "-f", ref) })
 	return ref
 }
 

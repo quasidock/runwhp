@@ -205,6 +205,8 @@ func TestWhiteouts(t *testing.T) {
 	if err := remote.Write(r, img); err != nil {
 		t.Fatal(err)
 	}
+	// The registry goes with the test, and so does the image.
+	t.Cleanup(func() { cli(t, "rmi", "-f", ref) })
 	expect(t, run(t, "--pull", "always", ref, "sh", "-c", "ls /data /opq"), "/data:\nkeep\n\n/opq:\nnew\n", 0)
 }
 

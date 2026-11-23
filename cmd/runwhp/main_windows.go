@@ -28,12 +28,15 @@ const usage = `Usage:
   runwhp delete [-f] CONTAINER...               remove containers
   runwhp rename CONTAINER NAME                  rename a container
   runwhp pull IMAGE                             pull an image, and runwhp's kernel, into the local store
+  runwhp images [-q] [REPOSITORY[:TAG]]         list images
+  runwhp rmi [-f] IMAGE...                      remove images
+  runwhp image COMMAND                          list, inspect, remove and prune images
   runwhp volume COMMAND                         create, list, inspect and remove volumes
 
-Run 'runwhp run -h' for the run flags, and 'runwhp volume' for the volume
-commands. A container is named by its ID, a unique prefix of it, or its
-name. It is kept after it stops, with its writable layer, until deleted,
-unless it was run with --rm.
+Run 'runwhp run -h' for the run flags, and 'runwhp image' or 'runwhp
+volume' for their commands. A container is named by its ID, a unique
+prefix of it, or its name. It is kept after it stops, with its writable
+layer, until deleted, unless it was run with --rm.
 
 The local store is in %LOCALAPPDATA%\runwhp unless RUNWHP_ROOT is set. The
 first run or pull fetches runwhp's kernel into it.
@@ -53,6 +56,12 @@ func realMain(args []string) int {
 		return cmdPull(args[1:])
 	case "volume":
 		return cmdVolume(args[1:], os.Stdin, os.Stdout)
+	case "image":
+		return cmdImage(args[1:], os.Stdin, os.Stdout)
+	case "images":
+		return cmdImages(args[1:], os.Stdout)
+	case "rmi":
+		return cmdRmi(args[1:], os.Stdout)
 	case "list":
 		return cmdList(args[1:], os.Stdout)
 	case "state":
