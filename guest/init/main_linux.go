@@ -6,6 +6,9 @@
 // signals and terminal sizes, reports how the process ended, and resets the
 // machine so the VMM exits.
 //
+// The container shares init's PID namespace, so init keeps it from stopping
+// the machine itself: see protectInit.
+//
 // The contract with the host is in internal/guestspec.
 package main
 
@@ -63,6 +66,7 @@ func main() {
 	syscall.Mount("proc", "/proc", "proc", 0, "")
 	syscall.Mount("sysfs", "/sys", "sysfs", 0, "")
 	console, _ = os.OpenFile("/dev/console", os.O_WRONLY, 0)
+	protectInit() // before init starts anything
 
 	ctl := newController(false)
 	status, err := start(begin, ctl)

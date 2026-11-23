@@ -99,19 +99,18 @@ echo $before $after`
 	}
 }
 
-// TestCPUExit checks the container's exit code and a reset requested from a
-// CPU other than the first, which is how Linux reboots.
+// TestCPUExit checks the container's exit code, from the last CPU, and a
+// reset requested from a CPU other than the first: init's, once the
+// container has moved every thread of init there. The container cannot
+// reset the machine itself (TestNoReboot).
 func TestCPUExit(t *testing.T) {
 	expect(t, run(t, "--cpus", cpus(t, 4), debian, "taskset", "-c", "3", "sh", "-c", "echo out; exit 3"), "out\n", 3)
 
 	start := time.Now()
-	r := run(t, "--cpus", "4", "python:3.12-slim", "taskset", "-c", "2", "python3", "-c",
-		"import ctypes; ctypes.CDLL(None).reboot(0x01234567)")
-	if r.code != 125 || !strings.Contains(r.stderr, "guest requested reset") {
-		t.Errorf("reboot: exit %d, stderr %q; want 125 and the reset", r.code, r.stderr)
-	}
+	r := run(t, "--cpus", "4", debian, "sh", "-c", "taskset -a -p -c 2 1 >/dev/null && echo moved; exit 5")
+	expect(t, r, "moved\n", 5)
 	if d := time.Since(start); d > 15*time.Second {
-		t.Errorf("reboot took %v", d)
+		t.Errorf("the run took %v", d)
 	}
 }
 
