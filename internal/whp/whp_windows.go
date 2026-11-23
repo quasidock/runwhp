@@ -138,8 +138,11 @@ const (
 	ExitCanceled               = 0x2001
 )
 
-// WHV_REGISTER_NAME
+// WHV_REGISTER_NAME. The general-purpose registers, RegRax to RegR15, are
+// 0x00 to 0x0F in the order x86 encodes them: rax, rcx, rdx, rbx, rsp, rbp,
+// rsi, rdi, r8 to r15.
 const (
+	RegR15    = 0x0F
 	RegRax    = 0x00
 	RegRsp    = 0x04
 	RegRsi    = 0x06
@@ -198,6 +201,23 @@ func (c *ExitContext) Rflags() uint64   { return c[5] }
 func (c *ExitContext) IoInfo() uint32 { return binary.LittleEndian.Uint32(c.Bytes()[68:]) }
 func (c *ExitContext) IoPort() uint16 { return binary.LittleEndian.Uint16(c.Bytes()[72:]) }
 func (c *ExitContext) IoRax() uint64  { return c[10] }
+
+// WHV_X64_VP_EXECUTION_STATE bits.
+const (
+	StateEferLma             = 1 << 4
+	StateInterruptionPending = 1 << 6
+	StateInterruptShadow     = 1 << 12
+)
+
+// SegmentLong is the L bit of WHV_X64_SEGMENT_REGISTER's attributes: a code
+// segment of 64-bit mode.
+const SegmentLong = 1 << 13
+
+// ExecutionState is the vCPU's WHV_X64_VP_EXECUTION_STATE at the exit.
+func (c *ExitContext) ExecutionState() uint16 { return binary.LittleEndian.Uint16(c.Bytes()[8:]) }
+
+// CsAttributes are the attributes of CS at the exit.
+func (c *ExitContext) CsAttributes() uint16 { return binary.LittleEndian.Uint16(c.Bytes()[30:]) }
 
 // Memory access context.
 func (c *ExitContext) MemGpa() uint64 { return c[9] }

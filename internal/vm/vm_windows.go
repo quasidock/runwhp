@@ -6,9 +6,10 @@
 // virtio-mmio devices.
 //
 // Each vCPU runs on an OS thread of its own and serves the register accesses
-// it makes on that thread. The boot processor starts the others itself,
-// through the hypervisor's local APIC emulation, which also carries their
-// interprocessor interrupts. Devices may also work from goroutines of their
+// it makes on that thread. Plain movs to and from device registers, which is
+// all Linux uses, are decoded here; WinHvEmulation.dll decodes anything else.
+// The boot processor starts the others itself, through the hypervisor's local
+// APIC emulation, which also carries their interprocessor interrupts. Devices may also work from goroutines of their
 // own, through virtio.Transport.Do, and raise interrupts from there:
 // WHvRequestInterrupt wakes a vCPU even while the hypervisor holds it halted,
 // which it does without exiting to us when the guest idles.
@@ -119,6 +120,11 @@ type vcpu struct {
 	mmioCount    int
 	mmioOps      map[uint16]int // opcodes of the instructions the emulator ran
 	unknownPages map[uint64]bool
+
+	// Scratch space for fastMmio, so that an exit allocates nothing.
+	regNames  [2]uint32
+	regValues [2]whp.RegValue
+	mmioData  [8]byte
 
 	lastFault    [2]uint64 // gpa and rip of the last memory fault
 	faultRepeats int
@@ -464,14 +470,15 @@ func (v *vcpu) loop() {
 			// not mapped yet.
 			reason = exitMemFault
 		}
-		v.exits[reason]++
-		v.handle(reason, &exit)
-		v.exitTicks[reason] += whp.Ticks() - began
+		kind := v.handle(reason, &exit)
+		v.exits[kind]++
+		v.exitTicks[kind] += whp.Ticks() - began
 	}
 }
 
-// handle serves one exit.
-func (v *vcpu) handle(reason uint32, exit *whp.ExitContext) {
+// handle serves one exit, and returns the kind to count it as: its reason,
+// or exitMmioFast.
+func (v *vcpu) handle(reason uint32, exit *whp.ExitContext) uint32 {
 	m := v.m
 	switch reason {
 	case exitMemFault:
@@ -493,6 +500,9 @@ func (v *vcpu) handle(reason uint32, exit *whp.ExitContext) {
 		v.dump()
 		m.stop.stop("triple fault"+v.on(), false, nil)
 	case whp.ExitMemoryAccess:
+		if v.fastMmio(exit) {
+			return exitMmioFast
+		}
 		v.mmioOps[opcode(exit.InstructionBytes())]++
 		if err := v.emu.TryMmio(exit); err != nil {
 			v.dump()
@@ -504,11 +514,15 @@ func (v *vcpu) handle(reason uint32, exit *whp.ExitContext) {
 		v.dump()
 		m.stop.stop("", false, fmt.Errorf("unhandled exit reason %#x at rip %#x%s", reason, exit.Rip(), v.on()))
 	}
+	return reason
 }
 
-// exitMemFault counts, among the exit reasons, memory-access exits on RAM
-// that was not mapped yet.
-const exitMemFault = 0x10001
+// Kinds of exit counted apart from their reasons: memory-access exits on
+// RAM that was not mapped yet, and those served without the emulator.
+const (
+	exitMemFault = 0x10001
+	exitMmioFast = 0x10002
+)
 
 // fault maps the RAM a memory-access exit touched, so the instruction can
 // run again. The same vCPU faulting again and again at one address means
@@ -617,8 +631,86 @@ func (m *machine) Slice(addr, n uint64) ([]byte, bool) { return m.mem.Slice(addr
 func (m *machine) Contains(addr, n uint64) bool { return m.mem.Contains(addr, n) }
 func (m *machine) Discard(addr, n uint64) bool  { return m.mem.Discard(addr, n) }
 
-// mmio serves one memory-mapped access decoded by the instruction emulator.
-// The I/O APIC and each transport take their own locks.
+// fastMmio serves a memory-mapped access without the instruction emulator
+// when its instruction is a plain mov between a register and a device's
+// registers, as Linux's readl and writel are, in 64-bit mode with nothing
+// pending. That takes one or two register calls; the emulator also reads
+// some 30 registers, writes 18, and translates the instruction's virtual
+// address, which took 10-20 us an access. It reports false, having done
+// nothing, for anything else, which the emulator serves as before.
+func (v *vcpu) fastMmio(exit *whp.ExitContext) bool {
+	const rflagsTF = 1 << 8
+	state := exit.ExecutionState()
+	if state&whp.StateEferLma == 0 || exit.CsAttributes()&whp.SegmentLong == 0 ||
+		state&(whp.StateInterruptionPending|whp.StateInterruptShadow) != 0 || exit.Rflags()&rflagsTF != 0 {
+		return false
+	}
+	op, ok := decodeMov(exit.InstructionBytes())
+	if !ok {
+		return false
+	}
+	kind, _ := exit.MemAccess()
+	gpa := exit.MemGpa()
+	if kind != whp.AccessRead && kind != whp.AccessWrite || op.write != (kind == whp.AccessWrite) || !v.m.device(gpa, op.size) {
+		return false
+	}
+	m := v.m
+	reg := uint32(whp.RegRax + op.reg)
+	data := v.mmioData[:op.size]
+	var old uint64
+	if op.write || op.merge {
+		v.regNames[0] = reg
+		if err := m.part.GetRegs(v.index, v.regNames[:1], v.regValues[:1]); err != nil {
+			return false
+		}
+		old = v.regValues[0][0]
+	}
+	if op.write {
+		for i := range data {
+			data[i] = byte(old >> (8 * i))
+		}
+	}
+	v.mmio(gpa, data, op.write)
+
+	n := 0
+	if !op.write {
+		var val uint64
+		for i, b := range data {
+			val |= uint64(b) << (8 * i)
+		}
+		if op.merge {
+			mask := uint64(1)<<(8*op.size) - 1
+			val = old&^mask | val
+		}
+		// A 32-bit result clears the register's upper half, as the
+		// processor would; val already has it clear.
+		v.regNames[0], v.regValues[0] = reg, whp.Reg64(val)
+		n = 1
+	}
+	v.regNames[n], v.regValues[n] = whp.RegRip, whp.Reg64(exit.Rip()+uint64(op.length))
+	if err := m.part.SetRegs(v.index, v.regNames[:n+1], v.regValues[:n+1]); err != nil {
+		v.dump()
+		m.stop.stop("", false, fmt.Errorf("completing a device access at rip %#x: %w%s", exit.Rip(), err, v.on()))
+	}
+	return true
+}
+
+// device reports whether [gpa, gpa+n) lies within one device's registers:
+// the I/O APIC's, or a single virtio window.
+func (m *machine) device(gpa uint64, n int) bool {
+	last := gpa + uint64(n) - 1
+	switch {
+	case gpa >= boot.IOAPICBase && last < boot.IOAPICBase+0x1000:
+		return true
+	case gpa >= virtioBase && (gpa-virtioBase)/virtio.WindowSize < uint64(len(m.virtio)):
+		return (gpa-virtioBase)/virtio.WindowSize == (last-virtioBase)/virtio.WindowSize
+	}
+	return false
+}
+
+// mmio serves one memory-mapped access, decoded by fastMmio or the
+// instruction emulator. The I/O APIC and each transport take their own
+// locks.
 func (v *vcpu) mmio(gpa uint64, data []byte, write bool) {
 	m := v.m
 	v.mmioCount++
@@ -680,7 +772,7 @@ func (v *vcpu) dump() {
 
 func (m *machine) stats() []string {
 	names := map[uint32]string{whp.ExitIoPort: "io", whp.ExitHalt: "halt", whp.ExitCanceled: "canceled",
-		whp.ExitMemoryAccess: "mmio", exitMemFault: "memfault", whp.ExitUnrecoverableException: "triple-fault", whp.ExitApicEoi: "eoi"}
+		whp.ExitMemoryAccess: "mmio", exitMmioFast: "mmio-fast", exitMemFault: "memfault", whp.ExitUnrecoverableException: "triple-fault", whp.ExitApicEoi: "eoi"}
 	exits, ioPorts, mmioCount := map[uint32]int{}, map[uint16]int{}, 0
 	ticks, ops := map[uint32]int64{}, map[uint16]int{}
 	var perCPU []string

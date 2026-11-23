@@ -207,3 +207,36 @@ func TestCPUStdoutConcurrent(t *testing.T) {
 		t.Errorf("exit %d, %d bytes of stdout; want 20000000 zeros; stderr %q", r.code, len(r.stdout), r.stderr)
 	}
 }
+
+// TestMmioFastPath checks that the VMM serves nearly every device register
+// access itself rather than through WinHvEmulation.dll, which is several
+// times slower: the guest's kernel reaches its devices with plain movs.
+func TestMmioFastPath(t *testing.T) {
+	r := run(t, "--debug", alpine, "sh", "-c", "head -c 1000000 /dev/zero | wc -c")
+	if r.code != 0 || strings.TrimSpace(r.stdout) != "1000000" {
+		t.Fatalf("exit %d, stdout %q", r.code, r.stdout)
+	}
+	fast, emulated := -1, 0
+	for _, line := range strings.Split(r.stderr, "\n") {
+		_, exits, ok := strings.Cut(line, "exits: ")
+		if !ok {
+			continue
+		}
+		for _, f := range strings.Fields(exits) {
+			name, n, _ := strings.Cut(f, "=")
+			v, _ := strconv.Atoi(n)
+			switch name {
+			case "mmio-fast":
+				fast = v
+			case "mmio":
+				emulated = v
+			}
+		}
+	}
+	if fast < 0 {
+		t.Fatalf("no mmio-fast count in the VMM's statistics:\n%s", r.stderr)
+	}
+	if fast < 1000 || emulated*20 > fast+emulated {
+		t.Errorf("%d device accesses served by the VMM, %d by the emulator; want under 5%% emulated", fast, emulated)
+	}
+}
