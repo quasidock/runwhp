@@ -210,7 +210,15 @@ func (a *attachStdin) Read(p []byte) (int, error) {
 }
 
 // push passes input on, waiting while attachInputBacklog pieces wait.
+// Input that comes once the container's has ended is dropped.
 func (a *attachStdin) push(p []byte) {
+	// A select picks among ready cases at random, and the backlog has
+	// room, so the end has to be checked first.
+	select {
+	case <-a.ended:
+		return
+	default:
+	}
 	select {
 	case a.ch <- p:
 	case <-a.ended:
