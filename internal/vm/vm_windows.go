@@ -114,8 +114,10 @@ type vcpu struct {
 	emu   *whp.Emulator
 
 	exits        map[uint32]int
+	exitTicks    map[uint32]int64 // performance-counter ticks spent handling each kind
 	ioPorts      map[uint16]int
 	mmioCount    int
+	mmioOps      map[uint16]int // opcodes of the instructions the emulator ran
 	unknownPages map[uint64]bool
 
 	lastFault    [2]uint64 // gpa and rip of the last memory fault
@@ -216,7 +218,8 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 		}
 		defer part.DeleteVP(uint32(i))
 		m.cpus = append(m.cpus, &vcpu{m: m, index: uint32(i),
-			exits: map[uint32]int{}, ioPorts: map[uint16]int{}, unknownPages: map[uint64]bool{}})
+			exits: map[uint32]int{}, exitTicks: map[uint32]int64{}, ioPorts: map[uint16]int{}, mmioOps: map[uint16]int{},
+			unknownPages: map[uint64]bool{}})
 	}
 	if cfg.Probe != nil {
 		// Detached before the VPs and the partition go.
@@ -454,6 +457,7 @@ func (v *vcpu) loop() {
 			m.stop.stop("", false, fmt.Errorf("%w%s", err, v.on()))
 			return
 		}
+		began := whp.Ticks()
 		reason := exit.Reason()
 		if reason == whp.ExitMemoryAccess && m.mem.Contains(exit.MemGpa(), 1) {
 			// RAM is never a device's: the guest touched a chunk that is
@@ -461,36 +465,44 @@ func (v *vcpu) loop() {
 			reason = exitMemFault
 		}
 		v.exits[reason]++
-		switch reason {
-		case exitMemFault:
-			if err := v.fault(&exit); err != nil {
-				v.dump()
-				m.stop.stop("", false, err)
-			}
-		case whp.ExitIoPort:
-			if err := v.handleIO(&exit); err != nil {
-				m.stop.stop("", false, err)
-			}
-		case whp.ExitHalt:
-			if exit.Rflags()&0x200 == 0 {
-				m.logf("CPU %d halted with interrupts disabled at rip %#x", v.index, exit.Rip())
-				m.stop.park(int(v.index))
-			}
-		case whp.ExitCanceled:
-		case whp.ExitUnrecoverableException:
+		v.handle(reason, &exit)
+		v.exitTicks[reason] += whp.Ticks() - began
+	}
+}
+
+// handle serves one exit.
+func (v *vcpu) handle(reason uint32, exit *whp.ExitContext) {
+	m := v.m
+	switch reason {
+	case exitMemFault:
+		if err := v.fault(exit); err != nil {
 			v.dump()
-			m.stop.stop("triple fault"+v.on(), false, nil)
-		case whp.ExitMemoryAccess:
-			if err := v.emu.TryMmio(&exit); err != nil {
-				v.dump()
-				m.stop.stop("", false, fmt.Errorf("%w%s", err, v.on()))
-			}
-		case whp.ExitApicEoi:
-			// Only level-triggered interrupts report EOI; none are used.
-		default:
-			v.dump()
-			m.stop.stop("", false, fmt.Errorf("unhandled exit reason %#x at rip %#x%s", reason, exit.Rip(), v.on()))
+			m.stop.stop("", false, err)
 		}
+	case whp.ExitIoPort:
+		if err := v.handleIO(exit); err != nil {
+			m.stop.stop("", false, err)
+		}
+	case whp.ExitHalt:
+		if exit.Rflags()&0x200 == 0 {
+			m.logf("CPU %d halted with interrupts disabled at rip %#x", v.index, exit.Rip())
+			m.stop.park(int(v.index))
+		}
+	case whp.ExitCanceled:
+	case whp.ExitUnrecoverableException:
+		v.dump()
+		m.stop.stop("triple fault"+v.on(), false, nil)
+	case whp.ExitMemoryAccess:
+		v.mmioOps[opcode(exit.InstructionBytes())]++
+		if err := v.emu.TryMmio(exit); err != nil {
+			v.dump()
+			m.stop.stop("", false, fmt.Errorf("%w%s", err, v.on()))
+		}
+	case whp.ExitApicEoi:
+		// Only level-triggered interrupts report EOI; none are used.
+	default:
+		v.dump()
+		m.stop.stop("", false, fmt.Errorf("unhandled exit reason %#x at rip %#x%s", reason, exit.Rip(), v.on()))
 	}
 }
 
@@ -670,31 +682,46 @@ func (m *machine) stats() []string {
 	names := map[uint32]string{whp.ExitIoPort: "io", whp.ExitHalt: "halt", whp.ExitCanceled: "canceled",
 		whp.ExitMemoryAccess: "mmio", exitMemFault: "memfault", whp.ExitUnrecoverableException: "triple-fault", whp.ExitApicEoi: "eoi"}
 	exits, ioPorts, mmioCount := map[uint32]int{}, map[uint16]int{}, 0
+	ticks, ops := map[uint32]int64{}, map[uint16]int{}
 	var perCPU []string
 	for _, v := range m.cpus {
 		total := 0
 		for reason, n := range v.exits {
 			exits[reason] += n
+			ticks[reason] += v.exitTicks[reason]
 			total += n
 		}
 		for port, n := range v.ioPorts {
 			ioPorts[port] += n
 		}
+		for op, n := range v.mmioOps {
+			ops[op] += n
+		}
 		mmioCount += v.mmioCount
 		perCPU = append(perCPU, fmt.Sprintf("%d=%d", v.index, total))
 	}
-	var parts []string
-	for reason, n := range exits {
-		name := names[reason]
-		if name == "" {
-			name = fmt.Sprintf("%#x", reason)
+	name := func(reason uint32) string {
+		if n := names[reason]; n != "" {
+			return n
 		}
-		parts = append(parts, fmt.Sprintf("%s=%d", name, n))
+		return fmt.Sprintf("%#x", reason)
+	}
+	var parts, handling []string
+	perSecond := float64(whp.TicksPerSecond())
+	for reason, n := range exits {
+		parts = append(parts, fmt.Sprintf("%s=%d", name(reason), n))
+		if reason != whp.ExitCanceled {
+			handling = append(handling, fmt.Sprintf("%s=%.1fus", name(reason), float64(ticks[reason])/perSecond/float64(n)*1e6))
+		}
 	}
 	sort.Strings(parts)
-	out := []string{"exits: " + strings.Join(parts, " ")}
+	sort.Strings(handling)
+	out := []string{"exits: " + strings.Join(parts, " "), "exit handling (average): " + strings.Join(handling, " ")}
 	if len(m.cpus) > 1 {
 		out = append(out, "exits per CPU: "+strings.Join(perCPU, " "))
+	}
+	if len(ops) > 0 {
+		out = append(out, "mmio instructions emulated: "+topOpcodes(ops, 5))
 	}
 
 	type portCount struct {

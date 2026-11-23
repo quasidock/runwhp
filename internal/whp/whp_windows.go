@@ -43,7 +43,25 @@ var (
 	procDiscardVirtualMemory = kernel32.NewProc("DiscardVirtualMemory")
 	procGlobalMemoryStatusEx = kernel32.NewProc("GlobalMemoryStatusEx")
 	procGetProcessMemoryInfo = kernel32.NewProc("K32GetProcessMemoryInfo")
+	procQueryPerfCounter     = kernel32.NewProc("QueryPerformanceCounter")
+	procQueryPerfFrequency   = kernel32.NewProc("QueryPerformanceFrequency")
 )
+
+// Ticks reads the performance counter. Go's monotonic clock advances in
+// steps of tens of microseconds or more on Windows, too coarse to time a
+// single exit; the performance counter counts in 100 ns or finer.
+func Ticks() int64 {
+	var c int64
+	syscall.SyscallN(procQueryPerfCounter.Addr(), uintptr(unsafe.Pointer(&c)))
+	return c
+}
+
+// TicksPerSecond is the rate at which Ticks counts.
+func TicksPerSecond() int64 {
+	var f int64
+	syscall.SyscallN(procQueryPerfFrequency.Addr(), uintptr(unsafe.Pointer(&f)))
+	return f
+}
 
 // WHV_CAPABILITY_CODE
 const (
@@ -183,6 +201,13 @@ func (c *ExitContext) IoRax() uint64  { return c[10] }
 
 // Memory access context.
 func (c *ExitContext) MemGpa() uint64 { return c[9] }
+
+// InstructionBytes are the bytes of the instruction behind a memory-access
+// exit, as many as the hypervisor fetched: up to 16, or none.
+func (c *ExitContext) InstructionBytes() []byte {
+	b := c.Bytes()
+	return b[52 : 52+min(int(b[48]), 16)]
+}
 
 // Memory access kinds, from WHV_MEMORY_ACCESS_TYPE.
 const (
