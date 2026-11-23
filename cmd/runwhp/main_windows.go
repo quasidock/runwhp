@@ -33,6 +33,8 @@ const usage = `Usage:
   runwhp rmi [-f] IMAGE...                      remove images
   runwhp image COMMAND                          list, inspect, remove and prune images
   runwhp volume COMMAND                         create, list, inspect and remove volumes
+  runwhp system df [-v]                         show the space the store takes
+  runwhp system prune [-a] [--volumes] [-f]     remove what nothing uses
 
 Run 'runwhp run -h' for the run flags, and 'runwhp image' or 'runwhp
 volume' for their commands. A container is named by its ID, a unique
@@ -61,6 +63,8 @@ func realMain(args []string) int {
 		return cmdImage(args[1:], os.Stdin, os.Stdout)
 	case "container":
 		return cmdContainer(args[1:], os.Stdin, os.Stdout)
+	case "system":
+		return cmdSystem(args[1:], os.Stdin, os.Stdout)
 	case "images":
 		return cmdImages(args[1:], os.Stdout)
 	case "rmi":

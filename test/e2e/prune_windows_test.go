@@ -327,3 +327,89 @@ func TestContainerPrune(t *testing.T) {
 		}
 	}
 }
+
+// TestSystemDf counts a container's writable layer and its image.
+func TestSystemDf(t *testing.T) {
+	s := newOwnStore(t)
+	s.ok(keepArgs("--name", "big", alpine, "sh", "-c", "head -c 52428800 /dev/urandom > /big && sync")...)
+	r := s.ok("system", "df")
+	var containers []string
+	for _, l := range strings.Split(r.stdout, "\n") {
+		if strings.HasPrefix(l, "Containers") {
+			containers = strings.Fields(l)
+		}
+	}
+	if len(containers) < 5 || containers[1] != "1" || containers[2] != "0" || !strings.HasSuffix(containers[3], "MiB") {
+		t.Errorf("system df:\n%s", r.stdout)
+	}
+	if r := s.ok("system", "df", "-v"); !strings.Contains(r.stdout, "Containers space usage:") || !hasRow(r.stdout, "alpine", "3.20", "1") {
+		t.Errorf("system df -v:\n%s", r.stdout)
+	}
+	var js struct {
+		Containers []struct {
+			Name string
+			Size int64
+		}
+		Images []struct{ Containers int }
+	}
+	if err := json.Unmarshal([]byte(s.ok("system", "df", "--format", "json").stdout), &js); err != nil ||
+		len(js.Containers) != 1 || js.Containers[0].Size < 50<<20 || len(js.Images) != 1 || js.Images[0].Containers != 1 {
+		t.Errorf("system df --format json: %v, %+v", err, js)
+	}
+}
+
+// hasRow reports whether a line of out starts with repo and tag and ends
+// with last.
+func hasRow(out, repo, tag, last string) bool {
+	for _, l := range strings.Split(out, "\n") {
+		f := strings.Fields(l)
+		if len(f) > 3 && f[0] == repo && f[1] == tag && f[len(f)-1] == last {
+			return true
+		}
+	}
+	return false
+}
+
+// TestSystemPrune removes a stopped container, an image no container uses,
+// an old kernel and a volume no container uses, and keeps a running
+// container with its image and volume.
+func TestSystemPrune(t *testing.T) {
+	s := newOwnStore(t)
+	old := filepath.Join(s.root, "kernels", "sha256", strings.Repeat("a", 64))
+	os.MkdirAll(old, 0o755)
+	os.WriteFile(filepath.Join(old, "bzImage"), make([]byte, 1<<20), 0o644)
+	s.ok("volume", "create", "used")
+	s.ok("volume", "create", "free")
+	running := strings.TrimSpace(s.ok(append([]string{"run", "-d", "-v", "used:/data"}, withFlags([]string{alpine, "sleep", "60"})...)...).stdout)
+	s.ok(keepArgs("--name", "stopped", busybox, "true")...)
+
+	r := s.cli("", "system", "prune")
+	if r.code != 0 || r.stdout != "" || !strings.Contains(r.stderr, "all dangling images") || strings.Contains(r.stderr, "volumes") {
+		t.Errorf("declined: exit %d, %q, %q", r.code, r.stdout, r.stderr)
+	}
+	r = s.ok("system", "prune", "-a", "--volumes", "-f")
+	for _, want := range []string{"Deleted Containers:\n", "untagged: " + busybox + "\ndeleted: sha256:", "Deleted Kernels:\nsha256:" + strings.Repeat("a", 64) + "\n", "Deleted Volumes:\nfree\n", "Total reclaimed space: "} {
+		if !strings.Contains(r.stdout, want) {
+			t.Errorf("system prune lacks %q:\n%s", want, r.stdout)
+		}
+	}
+	if strings.Contains(r.stdout, alpine) || strings.Contains(r.stdout, running) {
+		t.Errorf("system prune removed what the running container uses:\n%s", r.stdout)
+	}
+	if left := strings.Fields(s.ok("list", "-q").stdout); len(left) != 1 || left[0] != running {
+		t.Errorf("containers left: %v", left)
+	}
+	if r := s.ok("images"); !strings.Contains(r.stdout, "alpine") || strings.Contains(r.stdout, "busybox") {
+		t.Errorf("images left:\n%s", r.stdout)
+	}
+	if r := s.ok("volume", "ls", "-q"); r.stdout != "used\n" {
+		t.Errorf("volumes left: %q", r.stdout)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Errorf("the old kernel: %v", err)
+	}
+
+	// What went is pulled again when it is needed.
+	s.ok("delete", "-f", running)
+	expect(t, s.ok(runArgs(busybox, "echo", "back")...), "back\n", 0)
+}
