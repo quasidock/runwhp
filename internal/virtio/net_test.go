@@ -214,3 +214,43 @@ func TestNetResetAndDrain(t *testing.T) {
 		t.Error("frame for an unattached device not counted as dropped")
 	}
 }
+
+// usedWatcher records a ring's used index each time the device slices that
+// ring, as it does to return each chain.
+type usedWatcher struct {
+	testMem
+	ring *uint64
+	seen []uint16
+}
+
+func (w *usedWatcher) Slice(addr, n uint64) ([]byte, bool) {
+	if w.ring != nil && addr == *w.ring {
+		w.seen = append(w.seen, le.Uint16(w.testMem[addr+2:]))
+	}
+	return w.testMem.Slice(addr, n)
+}
+
+// A frame spread over several receive chains must reach the guest whole: a
+// guest polling the ring that sees the first chain, whose header counts
+// three, before the other two drops the frame as missing buffers.
+func TestNetReceivePublishesFrameWhole(t *testing.T) {
+	w := &usedWatcher{}
+	dev := &Net{MTU: 65520}
+	d := newDriverWrapped(t, dev, func(m testMem) Memory { w.testMem = m; return w })
+	postRx(d, 4, 1000)
+	d.kick(netRxQueue)
+	w.ring = &d.queues[netRxQueue].used
+
+	dev.Deliver(pattern(2500, 5))
+	for i, idx := range w.seen {
+		if idx != 0 {
+			t.Fatalf("used index was %d while the frame's chains were being returned (look %d of %d)", idx, i, len(w.seen))
+		}
+	}
+	if len(w.seen) == 0 {
+		t.Fatal("the used ring was never touched")
+	}
+	if u := d.collect(netRxQueue); len(u) != 3 {
+		t.Fatalf("used = %+v", u)
+	}
+}

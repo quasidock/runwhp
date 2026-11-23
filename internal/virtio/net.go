@@ -253,8 +253,11 @@ func (n *Net) fill(t *Transport, q *Queue, frame []byte, merge bool) (used, ok b
 				written += uint32(copyFrom(&src, b.Data))
 			}
 		}
-		q.Push(mem, c.Head, written)
+		q.Add(mem, c.Head, written)
 	}
+	// All of the frame's chains at once: the guest drops a frame whose
+	// header counts more chains than it finds.
+	q.Publish(mem)
 	n.RxFrames.Add(1)
 	n.RxBytes.Add(uint64(len(frame)))
 	return true, true

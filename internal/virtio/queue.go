@@ -24,7 +24,8 @@ type Queue struct {
 	Avail uint64 // driver ("available") ring
 	Used  uint64 // device ("used") ring
 
-	lastAvail uint16
+	lastAvail   uint16
+	unpublished uint16 // chains added but not yet published
 }
 
 func (q *Queue) ready() bool { return q.Ready && q.Size > 0 && q.Size <= MaxQueueSize }
@@ -132,18 +133,42 @@ func (q *Queue) Unpop(n int) { q.lastAvail -= uint16(n) }
 // Push returns a chain to the driver, reporting how many bytes the device
 // wrote into its writable buffers.
 func (q *Queue) Push(mem Memory, head uint16, written uint32) {
+	q.Add(mem, head, written)
+	q.Publish(mem)
+}
+
+// Add returns a chain to the driver as Push does, but leaves it unseen
+// until Publish, which shows every chain added since at once. A network
+// frame spread over several chains has to arrive whole: a guest polling the
+// ring that finds the first chain, whose header counts them all, before the
+// rest, drops the frame.
+func (q *Queue) Add(mem Memory, head uint16, written uint32) {
 	n := uint64(q.Size)
 	used, ok := mem.Slice(q.Used, 4+8*n)
 	if !ok {
 		return
 	}
-	idx := le.Uint16(used[2:])
+	idx := le.Uint16(used[2:]) + q.unpublished
 	slot := used[4+8*(uint64(idx)%n):]
 	le.PutUint32(slot[0:], uint32(head))
 	le.PutUint32(slot[4:], written)
+	q.unpublished++
+}
+
+// Publish makes the chains added since the last Publish visible to the
+// driver.
+func (q *Queue) Publish(mem Memory) {
+	if q.unpublished == 0 {
+		return
+	}
+	used, ok := mem.Slice(q.Used, 4+8*uint64(q.Size))
+	if !ok {
+		return
+	}
 	// The guest may be reading the ring right now: publish the index only
-	// after the element.
-	storeIdx(used, idx+1)
+	// after the elements.
+	storeIdx(used, le.Uint16(used[2:])+q.unpublished)
+	q.unpublished = 0
 }
 
 // loadIdx and storeIdx access the index of a ring whose first four bytes
