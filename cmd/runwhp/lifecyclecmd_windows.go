@@ -230,6 +230,72 @@ func startContainer(ctx context.Context, store *container.Store, ref string) err
 	return nil
 }
 
+const waitUsage = `Usage: runwhp wait CONTAINER...
+
+Wait for containers to stop, and print each one's exit code, in order. A
+container that has stopped already answers at once.
+`
+
+func cmdWait(args []string, stdout io.Writer) int {
+	fs := newFlags("wait", waitUsage)
+	if fs.Parse(args) != nil || fs.NArg() == 0 {
+		fs.Usage()
+		return 2
+	}
+	store, ok := openContainers()
+	if !ok {
+		return 1
+	}
+	ctx, stop := interruptible()
+	defer stop()
+	code := 0
+	for _, ref := range fs.Args() {
+		exit, err := waitContainer(ctx, store, ref)
+		if ctx.Err() != nil {
+			return 130
+		}
+		if err != nil {
+			errorf("%v", err)
+			code = 1
+			continue
+		}
+		fmt.Fprintln(stdout, exit)
+	}
+	return code
+}
+
+// waitContainer waits for a container to stop, and returns its exit code.
+func waitContainer(ctx context.Context, store *container.Store, ref string) (int, error) {
+	c, err := store.Resolve(ref)
+	if err != nil {
+		return 0, err
+	}
+	if !c.State.Active() {
+		return c.State.ExitCode, nil
+	}
+	root, _ := storeRoot()
+	rep, err := container.Ask(ctx, root, c.ID, container.Request{Op: container.OpWait})
+	if ctx.Err() != nil {
+		return 0, ctx.Err()
+	}
+	if err == nil && rep.Status == container.Stopped {
+		// It answers before it removes a container run with --rm.
+		return rep.ExitCode, nil
+	}
+	// Its runwhp went away without answering, or had gone already: what it
+	// recorded says, or what the store records for a runwhp that died.
+	if err := waitUnlocked(c, 10*time.Second); err != nil {
+		return 0, err
+	}
+	if c, err = store.Resolve(c.ID); err != nil {
+		return 0, err
+	}
+	if c.State.Active() {
+		return 0, fmt.Errorf("container %s: its runwhp did not say how it ended", c.Short())
+	}
+	return c.State.ExitCode, nil
+}
+
 func errFromReply(rep container.Reply) error {
 	if strings.Contains(rep.Error, container.ErrRunning.Error()) {
 		return container.ErrRunning
