@@ -6,7 +6,8 @@
 // device, which gives the guest the context ID GuestCID; then a virtio
 // memory balloon, which only takes free page reporting; then, when
 // Spec.Network is set, a virtio network device with Network.MAC; then, when
-// any Mount binds a share, a virtio-fs device tagged FSTag; then one
+// any Mount binds a share, a virtio-fs device tagged FSTag, and when any
+// binds a delegated share, one tagged FSTagDelegated; then one
 // read-only virtio block device per image layer, bottom layer first, each
 // with the serial LayerSerial(i); then, when Spec.Scratch is set, the
 // writable scratch disk, with the serial ScratchSerial; then one writable
@@ -20,9 +21,11 @@
 // file system before resetting the machine, as it does each volume's.
 // Otherwise it was made for this run and is thrown away after it.
 //
-// The virtio-fs device's root holds the host's shares as entries named "0",
-// "1", and so on. Init mounts it, sets OwnerXattr on its root, and binds each
-// share onto its Mount.Target.
+// A virtio-fs device's root holds its shares as entries named "0", "1", and
+// so on. Init mounts it, sets OwnerXattr on its root, and binds each share
+// onto its Mount.Target. The FSTagDelegated device's FUSE connection takes
+// the kernel's writeback cache, so writes reach the host when files are
+// closed or synced, or the kernel writes back, rather than as they are made.
 //
 // A volume's disk holds a journaled ext4 file system, whose directory _data
 // is what the container sees. Init fills an empty _data from the image
@@ -71,8 +74,13 @@ const VolumeData = "_data"
 // GuestCID is the guest's vsock context ID.
 const GuestCID = 3
 
-// FSTag is the mount tag of the virtio-fs device that carries the shares.
-const FSTag = "runwhp"
+// FSTag is the mount tag of the virtio-fs device that carries the shares,
+// and FSTagDelegated that of the one carrying delegated shares, whose writes
+// the guest caches.
+const (
+	FSTag          = "runwhp"
+	FSTagDelegated = "runwhp-delegated"
+)
 
 // OwnerXattr is the extended attribute init sets on the root of the shares,
 // to "UID:GID" of the container's user, before anything else reads them.
@@ -157,6 +165,10 @@ type Mount struct {
 	Name     string `json:"name,omitempty"` // the volume's name, for messages
 	File     bool   `json:"file,omitempty"` // the share is a file, not a directory
 	ReadOnly bool   `json:"readonly,omitempty"`
+	// Delegated says the share is on the virtio-fs device tagged
+	// FSTagDelegated, whose FUSE connection caches writes, instead of the
+	// one tagged FSTag. Each device numbers its shares from 0.
+	Delegated bool `json:"delegated,omitempty"`
 	// NoCopy leaves a new volume empty, instead of filling it with what the
 	// image has at Target.
 	NoCopy bool `json:"nocopy,omitempty"`

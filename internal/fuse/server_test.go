@@ -380,3 +380,23 @@ func TestInline(t *testing.T) {
 		t.Error("a request too short to name a node was refused; Serve answers those")
 	}
 }
+
+// The writeback cache is taken only when the server is told to, and only
+// if the kernel offers it.
+func TestInitWriteback(t *testing.T) {
+	for _, tc := range []struct {
+		writeback bool
+		offered   uint32
+		want      uint32
+	}{
+		{false, 0xffffffff, wantInitFlags},
+		{true, 0xffffffff, wantInitFlags | initWritebackCache},
+		{true, wantInitFlags, wantInitFlags},
+	} {
+		s := &Server{FS: &fakeFS{}, Writeback: tc.writeback}
+		_, out, _ := serve(t, s, request(opInit, 0, uint32(7), uint32(45), uint32(0), tc.offered))
+		if f := le.Uint32(out[12:]); f != tc.want {
+			t.Errorf("writeback %v, kernel offering %#x: flags %#x, want %#x", tc.writeback, tc.offered, f, tc.want)
+		}
+	}
+}

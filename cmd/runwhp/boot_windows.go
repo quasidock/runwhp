@@ -211,8 +211,9 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 	files = append(files, modules...)
 
 	// Devices: the console, the vsock device and the balloon first, then
-	// the network device and the shares' file system if any, then one disk
-	// per layer, bottom first, then the writable layer, then the volumes.
+	// the network device and the shares' file systems if any, the delegated
+	// shares' second, then one disk per layer, bottom first, then the
+	// writable layer, then the volumes.
 	var stdin io.Reader
 	if cfg.Stdin {
 		stdin = bio.stdin
@@ -258,8 +259,19 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 		nic.Recv = stack.Inject
 		devices = append(devices, nic)
 	}
-	if len(cfg.Shares) > 0 {
-		shares, err := hostShares(cfg.Shares)
+	// Delegated shares get a file system of their own, since a FUSE
+	// connection takes the writeback cache, or not, as a whole.
+	for _, delegated := range []bool{false, true} {
+		var group []container.Share
+		for _, s := range cfg.Shares {
+			if s.Delegated == delegated {
+				group = append(group, s)
+			}
+		}
+		if len(group) == 0 {
+			continue
+		}
+		shares, err := hostShares(group)
 		if err != nil {
 			return fail, err
 		}
@@ -268,9 +280,14 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 			return fail, err
 		}
 		defer fsys.Close()
-		server := &fuse.Server{FS: fsys, Logf: logf}
+		fsys.Writeback = delegated
+		server := &fuse.Server{FS: fsys, Logf: logf, Writeback: delegated}
 		defer func() { logf("%s", server.Stats()) }()
-		devices = append(devices, &virtio.Fs{Tag: guestspec.FSTag, Handler: server})
+		tag := guestspec.FSTag
+		if delegated {
+			tag = guestspec.FSTagDelegated
+		}
+		devices = append(devices, &virtio.Fs{Tag: tag, Handler: server})
 	}
 	for i, path := range layerFiles {
 		f, err := disk.Open(path, disk.ReadOnly)

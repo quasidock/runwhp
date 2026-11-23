@@ -397,9 +397,18 @@ func checkDevices(cfg *container.Config, volumes int) error {
 		others++
 		users = append(users, "the network")
 	}
-	if len(cfg.Shares) > 0 {
+	consistent, delegated := false, false
+	for _, s := range cfg.Shares {
+		consistent, delegated = consistent || !s.Delegated, delegated || s.Delegated
+	}
+	if consistent {
 		others++
 		users = append(users, "bind mounts")
+	}
+	if delegated {
+		// Delegated bind mounts have a file system of their own.
+		others++
+		users = append(users, "delegated bind mounts")
 	}
 	if volumes > 0 {
 		others += volumes

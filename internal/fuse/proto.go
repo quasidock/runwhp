@@ -87,6 +87,7 @@ const (
 	initAutoInvalData   = 1 << 12
 	initDoReaddirplus   = 1 << 13
 	initReaddirplusAuto = 1 << 14
+	initWritebackCache  = 1 << 16
 	initParallelDirops  = 1 << 18
 	initMaxPages        = 1 << 22
 	initCacheSymlinks   = 1 << 23

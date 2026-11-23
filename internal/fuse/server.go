@@ -72,6 +72,13 @@ type Server struct {
 	// Logf, when set, reports protocol problems and errors the file system
 	// returned that are not an Errno.
 	Logf func(format string, a ...any)
+	// Writeback takes the kernel's writeback cache, when it offers it: the
+	// guest gathers writes in its page cache and sends them when files are
+	// closed or synced, or as it writes back dirty pages. It also trusts its
+	// own idea of each cached file's size and times, so host changes to
+	// those files may go unseen. The file system must let files opened only
+	// for writing be read: the kernel fills the pages it writes in part.
+	Writeback bool
 
 	counts  [maxOpcode]atomic.Uint64
 	nanos   [maxOpcode]atomic.Int64 // time spent serving each opcode
@@ -402,7 +409,11 @@ func (s *Server) init(r *reader) ([]byte, error) {
 	w.u32(kernelVersion)
 	w.u32(min(minor, minorVersion))
 	w.u32(readahead)
-	w.u32(flags & wantInitFlags)
+	want := uint32(wantInitFlags)
+	if s.Writeback {
+		want |= initWritebackCache
+	}
+	w.u32(flags & want)
 	w.u16(64)                  // max_background
 	w.u16(48)                  // congestion_threshold
 	w.u32(MaxPages * pageSize) // max_write

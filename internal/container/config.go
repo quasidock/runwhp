@@ -78,6 +78,9 @@ type Share struct {
 	Target   string `json:"target"`
 	// Create makes a missing directory at Path again, as -v does.
 	Create bool `json:"create,omitempty"`
+	// Delegated lets the guest cache writes, which reach the host later:
+	// such shares are served by a file system of their own.
+	Delegated bool `json:"delegated,omitempty"`
 }
 
 // Volume is a named volume the container mounts.

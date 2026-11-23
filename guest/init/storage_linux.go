@@ -13,13 +13,14 @@ import (
 // file descriptors on file systems whose data must reach the host before
 // the guest resets.
 var storage = struct {
-	shares  int   // the virtio-fs mount, or -1
-	volumes []int // each volume's file system
-	rw      int   // a kept writable layer's file system, or -1
+	shares    int   // the virtio-fs mount, or -1
+	delegated int   // the delegated shares' virtio-fs mount, or -1
+	volumes   []int // each volume's file system
+	rw        int   // a kept writable layer's file system, or -1
 	// rcuExpedited is /sys/kernel/rcu_expedited, opened while the
 	// initramfs's sysfs is still reachable and writable, or -1.
 	rcuExpedited int
-}{shares: -1, rw: -1, rcuExpedited: -1}
+}{shares: -1, delegated: -1, rw: -1, rcuExpedited: -1}
 
 // FIFREEZE, which x/sys/unix lacks: _IOWR('X', 119, int).
 const fifreeze = 0xc0045877
@@ -49,7 +50,8 @@ func openRCUExpedited() {
 // however it is mounted.
 //
 // Writes to bind mounts go to the host as they are made, except through
-// shared memory mappings, whose dirty pages syncfs writes back.
+// shared memory mappings, whose dirty pages syncfs writes back, and on
+// delegated bind mounts, whose cached writes it writes back too.
 func stopStorage() {
 	if storage.rcuExpedited >= 0 {
 		// A freeze waits for an RCU grace period at each of its three
@@ -65,9 +67,11 @@ func stopStorage() {
 	if storage.rw >= 0 {
 		freeze(storage.rw, "the writable layer", -1)
 	}
-	if storage.shares >= 0 {
-		if err := unix.Syncfs(storage.shares); err != nil {
-			debugf("syncing the host's files: %v", err)
+	for _, fd := range []int{storage.shares, storage.delegated} {
+		if fd >= 0 {
+			if err := unix.Syncfs(fd); err != nil {
+				logf("syncing the host's files: %v", err)
+			}
 		}
 	}
 }

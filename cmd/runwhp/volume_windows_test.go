@@ -8,7 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/quasidock/runwhp/internal/container"
 	"github.com/quasidock/runwhp/internal/guestspec"
+	"github.com/quasidock/runwhp/internal/vm"
 )
 
 const (
@@ -36,6 +38,9 @@ func TestParseVolume(t *testing.T) {
 		{`pg-data.v2:/var/lib/pg:ro,nocopy`, mountSpec{kind: volumeKind, source: "pg-data.v2", target: "/var/lib/pg", readOnly: true, noCopy: true}},
 		{`/app/node_modules`, mountSpec{kind: volumeKind, target: "/app/node_modules"}},
 		{`/cache/`, mountSpec{kind: volumeKind, target: "/cache"}},
+		{`C:\out:/out:delegated`, mountSpec{kind: bindKind, source: `C:\out`, target: "/out", create: true, delegated: true}},
+		{`C:\out:/out:ro,delegated`, mountSpec{kind: bindKind, source: `C:\out`, target: "/out", readOnly: true, create: true, delegated: true}},
+		{`C:\out:/out:consistent`, mountSpec{kind: bindKind, source: `C:\out`, target: "/out", create: true}},
 	} {
 		got, err := parseVolume(tc.in, cwd)
 		if err != nil || got != tc.want {
@@ -85,6 +90,9 @@ func TestParseMount(t *testing.T) {
 		{`type=volume,source=v1,target=/s`, mountSpec{kind: volumeKind, source: "v1", target: "/s"}},
 		{`type=volume,target=/s,volume-nocopy`, mountSpec{kind: volumeKind, target: "/s", noCopy: true}},
 		{`type=volume,src=big,dst=/b,volume-opt=size=200g,volume-driver=local,ro`, mountSpec{kind: volumeKind, source: "big", target: "/b", size: "200g", readOnly: true}},
+		{`type=bind,source=C:\o,target=/o,consistency=delegated`, mountSpec{kind: bindKind, source: `C:\o`, target: "/o", delegated: true}},
+		{`type=bind,source=C:\o,target=/o,consistency=cached`, mountSpec{kind: bindKind, source: `C:\o`, target: "/o"}},
+		{`type=bind,source=C:\o,target=/o,consistency=default`, mountSpec{kind: bindKind, source: `C:\o`, target: "/o"}},
 		{`type=tmpfs,target=/t`, mountSpec{kind: tmpfsKind, target: "/t", options: "noexec,nosuid,nodev,mode=1777"}},
 		{`type=tmpfs,dst=/t,tmpfs-size=1m,tmpfs-mode=700,readonly`, mountSpec{kind: tmpfsKind, target: "/t", readOnly: true, options: "noexec,nosuid,nodev,ro,mode=700,size=1048576"}},
 	} {
@@ -111,6 +119,7 @@ func TestParseMount(t *testing.T) {
 		`type=tmpfs,source=x,target=/t`:                           "no source",
 		`type=tmpfs,target=/t,tmpfs-mode=999`:                     "octal",
 		`type=tmpfs,target=/t,tmpfs-size=lots`:                    "invalid size",
+		`type=bind,source=C:\s,target=/s,consistency=eventual`:    "consistency=eventual is not supported",
 	} {
 		if _, err := parseMount(in, cwd); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("parseMount(%s) = %v, want an error about %q", in, err, want)
@@ -199,5 +208,44 @@ func TestParseMounts(t *testing.T) {
 	}
 	if _, err := parseMounts(nil, nil, []string{"/t", "/t"}); err == nil || !strings.Contains(err.Error(), "more than once") {
 		t.Errorf("a tmpfs mounted twice: %v", err)
+	}
+}
+
+// Delegated bind mounts go to a file system of their own, which numbers its
+// shares from 0 as the other does; a read-only one is not delegated.
+func TestParseMountsDelegated(t *testing.T) {
+	a, b, c, d := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	plan, err := parseMounts([]string{a + ":/a", b + ":/b:delegated", c + ":/c:ro,delegated"},
+		[]string{"type=bind,source=" + d + ",target=/d,consistency=delegated"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]struct {
+		share     int
+		delegated bool
+	}{"/a": {0, false}, "/b": {0, true}, "/c": {1, false}, "/d": {1, true}}
+	for _, m := range plan.mounts {
+		if w := want[m.Target]; m.Share != w.share || m.Delegated != w.delegated {
+			t.Errorf("mount %s: share %d delegated %v, want %d %v", m.Target, m.Share, m.Delegated, w.share, w.delegated)
+		}
+	}
+	var delegated []string
+	for _, s := range plan.shares {
+		if s.Delegated {
+			delegated = append(delegated, s.Target)
+		}
+	}
+	if strings.Join(delegated, " ") != "/b /d" {
+		t.Errorf("delegated shares %q, want /b and /d", delegated)
+	}
+
+	// The two file systems take an interrupt line each.
+	cfg := &container.Config{Shares: plan.shares, LayerFiles: make([]string, vm.MaxDevices-6)}
+	if err := checkDevices(cfg, 0); err != nil {
+		t.Errorf("layers that fit refused: %v", err)
+	}
+	cfg.LayerFiles = append(cfg.LayerFiles, "one more")
+	if err := checkDevices(cfg, 0); err == nil || !strings.Contains(err.Error(), "delegated bind mounts") {
+		t.Errorf("one layer too many: %v", err)
 	}
 }

@@ -686,3 +686,42 @@ func TestSlowFiles(t *testing.T) {
 		t.Error("an unknown node is slow")
 	}
 }
+
+// With Writeback, files opened only for writing can be read through their
+// handles, as the guest's page cache needs; without it they cannot.
+func TestWritebackOpensForReading(t *testing.T) {
+	for _, writeback := range []bool{false, true} {
+		dir := testDir(t)
+		write(t, filepath.Join(dir, "old"), "0123456789")
+		fs := newFS(t, Share{Path: dir})
+		fs.Writeback = writeback
+		share := walk(t, fs, "0")
+		old := walk(t, fs, "0/old")
+		e, cfh, err := fs.Create(ctx, share.Node, "new", fuse.OWronly|fuse.OCreat, 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ofh, err := fs.Open(ctx, old.Node, fuse.OWronly)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range []struct {
+			name     string
+			node, fh uint64
+			content  string
+		}{{"created", e.Node, cfh, "abc"}, {"opened", old.Node, ofh, "abc3456789"}} {
+			if _, err := fs.Write(ctx, f.node, f.fh, 0, []byte("abc")); err != nil {
+				t.Fatalf("writeback %v, %s: write: %v", writeback, f.name, err)
+			}
+			buf := make([]byte, 16)
+			n, err := fs.Read(ctx, f.node, f.fh, 0, buf)
+			switch {
+			case writeback && (err != nil || string(buf[:n]) != f.content):
+				t.Errorf("writeback, %s write-only: read %q, %v; want %q", f.name, buf[:n], err, f.content)
+			case !writeback && err == nil:
+				t.Errorf("no writeback, %s write-only: read %q succeeded", f.name, buf[:n])
+			}
+			fs.Release(f.node, f.fh)
+		}
+	}
+}

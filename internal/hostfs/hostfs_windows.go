@@ -75,6 +75,12 @@ type handle struct {
 
 // FS is a fuse.FileSystem over the shares.
 type FS struct {
+	// Writeback, set before the guest mounts the file system, serves a
+	// guest with FUSE's writeback cache: files opened only for writing are
+	// opened for reading as well, where Windows allows it, since the guest
+	// reads the pages it writes in part.
+	Writeback bool
+
 	shares []*share
 	root   *node
 	start  time.Time

@@ -25,10 +25,13 @@ type mountSpec struct {
 	source   string // bind: absolute host path; volume: its name
 	target   string // clean absolute container path
 	readOnly bool
-	create   bool   // bind: create a missing source directory, as -v does
-	noCopy   bool   // volume: leave a new volume empty
-	size     string // volume: its size, should it be created
-	options  string // tmpfs: mount options
+	create   bool // bind: create a missing source directory, as -v does
+	// delegated is set for a bind mount whose writes the guest may cache:
+	// consistency=delegated, as Docker Desktop for Mac named it.
+	delegated bool
+	noCopy    bool   // volume: leave a new volume empty
+	size      string // volume: its size, should it be created
+	options   string // tmpfs: mount options
 }
 
 // parseVolume reads -v SOURCE:CONTAINERPATH[:OPTIONS], where SOURCE is a
@@ -77,9 +80,11 @@ func parseVolume(s, cwd string) (mountSpec, error) {
 			m.readOnly = false
 		case o == "nocopy" && m.kind == guestspec.MountVolume:
 			m.noCopy = true
-		case o == "z", o == "Z", o == "consistent", o == "cached", o == "delegated", o == "private", o == "rprivate":
-			// SELinux labels, Docker Desktop's old consistency hints, and
-			// the propagation every mount here has.
+		case o == "delegated":
+			m.delegated = true
+		case o == "z", o == "Z", o == "consistent", o == "cached", o == "private", o == "rprivate":
+			// SELinux labels, the consistency every bind mount here has
+			// unless delegated, and the propagation every mount here has.
 		default:
 			return mountSpec{}, fmt.Errorf("-v %s: option %q is not supported", s, o)
 		}
@@ -94,7 +99,7 @@ func isVolumeName(s string) bool {
 }
 
 // parseMount reads --mount, Docker's long form of -v and --tmpfs:
-// type=bind,source=HOSTPATH,target=PATH[,readonly], type=volume[,source=NAME],
+// type=bind,source=HOSTPATH,target=PATH[,readonly][,consistency=delegated], type=volume[,source=NAME],
 // target=PATH[,readonly][,volume-nocopy][,volume-opt=size=SIZE], and
 // type=tmpfs,target=PATH[,tmpfs-size=SIZE][,tmpfs-mode=MODE].
 func parseMount(s, cwd string) (mountSpec, error) {
@@ -134,6 +139,13 @@ func parseMount(s, cwd string) (mountSpec, error) {
 				return mountSpec{}, err
 			}
 		case "consistency":
+			switch val {
+			case "delegated":
+				m.delegated = true
+			case "consistent", "cached", "default":
+			default:
+				return bad("consistency=%s is not supported; want consistent, cached, delegated or default", val)
+			}
 		case "bind-propagation":
 			only[key] = "bind"
 			if val != "private" && val != "rprivate" {
@@ -399,8 +411,18 @@ func parseMounts(volumes, mounts, tmpfs []string) (mountPlan, error) {
 			if err != nil {
 				return plan, fmt.Errorf("bind source %s: %w", m.source, err)
 			}
-			gm.Share, gm.File = len(plan.shares), !st.IsDir()
-			plan.shares = append(plan.shares, container.Share{Path: m.source, File: gm.File, ReadOnly: m.readOnly, Target: m.target, Create: m.create})
+			// A read-only mount writes nothing for the guest to cache.
+			delegated := m.delegated && !m.readOnly
+			// Delegated shares go to a file system of their own, and each
+			// file system numbers its shares from 0.
+			gm.Share, gm.File, gm.Delegated = 0, !st.IsDir(), delegated
+			for _, s := range plan.shares {
+				if s.Delegated == delegated {
+					gm.Share++
+				}
+			}
+			plan.shares = append(plan.shares, container.Share{Path: m.source, File: gm.File, ReadOnly: m.readOnly, Target: m.target,
+				Create: m.create, Delegated: delegated})
 		case m.kind == guestspec.MountVolume && m.source == "":
 			gm.Kind = guestspec.MountAnon
 		case m.kind == guestspec.MountVolume:

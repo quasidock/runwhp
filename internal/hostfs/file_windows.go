@@ -24,6 +24,18 @@ func dataAccess(flags uint32) uint32 {
 	return access
 }
 
+// openAccess is the access to open a file with for open(2) flags. With
+// Writeback, a write-only open asks to read as well, since the guest reads
+// the pages it writes in part; fallback is then the access to try should
+// Windows refuse that, and 0 otherwise.
+func (fs *FS) openAccess(flags uint32) (access, fallback uint32) {
+	access = dataAccess(flags)
+	if fs.Writeback && flags&fuse.OAccMode == fuse.OWronly {
+		return dataAccess(flags&^fuse.OAccMode | fuse.ORdwr), access
+	}
+	return access, 0
+}
+
 func writes(flags uint32) bool {
 	return flags&fuse.OAccMode != fuse.ORdonly || flags&fuse.OTrunc != 0
 }
@@ -85,7 +97,11 @@ func (fs *FS) Open(c fuse.Context, id uint64, flags uint32) (uint64, error) {
 	if writes(flags) && n.share.ReadOnly {
 		return 0, fuse.EROFS
 	}
-	h, err := openData(p, dataAccess(flags))
+	access, fallback := fs.openAccess(flags)
+	h, err := openData(p, access)
+	if err != nil && fallback != 0 && errors.Is(errno(err), fuse.EACCES) {
+		h, err = openData(p, fallback)
+	}
 	if err != nil {
 		return 0, errno(err)
 	}
@@ -111,8 +127,11 @@ func (fs *FS) Create(c fuse.Context, parent uint64, name string, flags, mode uin
 	if p.share.eas {
 		ea = lxMetadata(c.UID, c.GID, fuse.ModeFile|mode&0o7777)
 	}
-	h, created, err := open(target, dataAccess(flags), disposition, windows.FILE_NON_DIRECTORY_FILE,
-		windows.FILE_ATTRIBUTE_NORMAL, ea)
+	access, fallback := fs.openAccess(flags)
+	h, created, err := open(target, access, disposition, windows.FILE_NON_DIRECTORY_FILE, windows.FILE_ATTRIBUTE_NORMAL, ea)
+	if err != nil && fallback != 0 && errors.Is(errno(err), fuse.EACCES) {
+		h, created, err = open(target, fallback, disposition, windows.FILE_NON_DIRECTORY_FILE, windows.FILE_ATTRIBUTE_NORMAL, ea)
+	}
 	if err != nil {
 		return fuse.Entry{}, 0, errno(err)
 	}

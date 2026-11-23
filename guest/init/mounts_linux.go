@@ -16,9 +16,13 @@ import (
 	"github.com/quasidock/runwhp/internal/passwd"
 )
 
-// sharesDir is where init mounts the host's shares, in the initramfs. Once
-// enterRoot has moved the container's root over it, nothing can reach it.
-const sharesDir = "/shares"
+// sharesDir is where init mounts the host's shares, and delegatedDir the
+// delegated ones, in the initramfs. Once enterRoot has moved the
+// container's root over them, nothing can reach them.
+const (
+	sharesDir    = "/shares"
+	delegatedDir = "/shares-delegated"
+)
 
 // mountAll makes the container's mounts: binds of the host's shares, named
 // and anonymous volumes, and tmpfs mounts. Host files without an owner of
@@ -29,24 +33,24 @@ const sharesDir = "/shares"
 // what the host has. Then every mount is made in the spec's order, parents
 // first.
 func mountAll(spec *guestspec.Spec, user passwd.User) error {
-	binds := false
+	binds, delegated := false, false
 	for _, m := range spec.Mounts {
-		binds = binds || m.Kind == guestspec.MountBind
+		binds = binds || m.Kind == guestspec.MountBind && !m.Delegated
+		delegated = delegated || m.Kind == guestspec.MountBind && m.Delegated
 	}
 	if binds {
-		if err := os.MkdirAll(sharesDir, 0o755); err != nil {
+		fd, err := mountShares(guestspec.FSTag, sharesDir, user)
+		if err != nil {
 			return err
 		}
-		if err := syscall.Mount(guestspec.FSTag, sharesDir, "virtiofs", 0, ""); err != nil {
-			return fmt.Errorf("mounting the host's files: %w", err)
+		storage.shares = fd
+	}
+	if delegated {
+		fd, err := mountShares(guestspec.FSTagDelegated, delegatedDir, user)
+		if err != nil {
+			return err
 		}
-		if fd, err := syscall.Open(sharesDir, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0); err == nil {
-			storage.shares = fd
-		}
-		owner := fmt.Sprintf("%d:%d", user.UID, user.GID)
-		if err := syscall.Setxattr(sharesDir, guestspec.OwnerXattr, []byte(owner), 0); err != nil {
-			return fmt.Errorf("setting the owner of the host's files: %w", err)
-		}
+		storage.delegated = fd
 	}
 	if err := prepareVolumes(spec); err != nil {
 		return err
@@ -62,7 +66,10 @@ func mountAll(spec *guestspec.Spec, user passwd.User) error {
 		var source, what string
 		switch m.Kind {
 		case guestspec.MountBind:
-			source, what = filepath.Join(sharesDir, strconv.Itoa(m.Share)), fmt.Sprintf("share %d", m.Share)
+			source, what = shareSource(m), fmt.Sprintf("share %d", m.Share)
+			if m.Delegated {
+				what = fmt.Sprintf("delegated share %d", m.Share)
+			}
 		case guestspec.MountVolume:
 			source, what = filepath.Join(volumeDir(m.Volume), guestspec.VolumeData), "volume "+m.Name
 		case guestspec.MountAnon:
@@ -88,6 +95,37 @@ func mountAll(spec *guestspec.Spec, user passwd.User) error {
 		debugf("mounted %s on %s (read-only %v)", what, m.Target, m.ReadOnly)
 	}
 	return nil
+}
+
+// mountShares mounts the virtio-fs device tagged tag at dir and makes the
+// container's user the owner of host files without one of their own. It
+// returns a descriptor on the mount, for stopStorage to sync, or -1.
+func mountShares(tag, dir string, user passwd.User) (int, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return -1, err
+	}
+	if err := syscall.Mount(tag, dir, "virtiofs", 0, ""); err != nil {
+		return -1, fmt.Errorf("mounting the host's files (%s): %w", tag, err)
+	}
+	fd, err := syscall.Open(dir, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		fd = -1
+	}
+	owner := fmt.Sprintf("%d:%d", user.UID, user.GID)
+	if err := syscall.Setxattr(dir, guestspec.OwnerXattr, []byte(owner), 0); err != nil {
+		return fd, fmt.Errorf("setting the owner of the host's files (%s): %w", tag, err)
+	}
+	return fd, nil
+}
+
+// shareSource is where a bind mount's share is, under the mount of its
+// device.
+func shareSource(m guestspec.Mount) string {
+	dir := sharesDir
+	if m.Delegated {
+		dir = delegatedDir
+	}
+	return filepath.Join(dir, strconv.Itoa(m.Share))
 }
 
 // tmpfsFlags splits a tmpfs's options into mount flags and the options

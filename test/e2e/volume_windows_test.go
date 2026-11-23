@@ -242,3 +242,77 @@ func TestBindManyFiles(t *testing.T) {
 		fmt.Println(r.stderr)
 	}
 }
+
+// TestBindDelegated writes to a delegated bind mount, whose writes the guest
+// caches, in small pieces: everything is on the host after the run.
+func TestBindDelegated(t *testing.T) {
+	dir := shared(t, map[string]string{"old.txt": "old\n", "gone.txt": "x"})
+	r := run(t, "-v", dir+":/d:delegated", alpine, "sh", "-c", `
+		head -c 20971520 /dev/urandom > /tmp/data
+		dd if=/tmp/data of=/d/small bs=820 2>/dev/null
+		sha256sum /tmp/data | cut -d' ' -f1
+		echo one >> /d/log; echo two >> /d/log
+		mkdir /d/new && echo made > /d/new/file && mv /d/old.txt /d/renamed.txt && rm /d/gone.txt
+		cat /d/renamed.txt`)
+	if r.code != 0 {
+		t.Fatalf("exit %d: %s", r.code, r.stderr)
+	}
+	lines := strings.Fields(r.stdout)
+	if len(lines) != 2 || lines[1] != "old" {
+		t.Fatalf("stdout %q", r.stdout)
+	}
+	sum := sha256.Sum256([]byte(readHost(t, filepath.Join(dir, "small"))))
+	if hex.EncodeToString(sum[:]) != lines[0] {
+		t.Errorf("the host's copy has sha256 %x, the container wrote %s", sum, lines[0])
+	}
+	if got := readHost(t, filepath.Join(dir, "log")); got != "one\ntwo\n" {
+		t.Errorf("appended file on the host: %q", got)
+	}
+	if got := readHost(t, filepath.Join(dir, "new", "file")); got != "made\n" {
+		t.Errorf("new file on the host: %q", got)
+	}
+	if got := readHost(t, filepath.Join(dir, "renamed.txt")); got != "old\n" {
+		t.Errorf("renamed file on the host: %q", got)
+	}
+	for _, name := range []string{"old.txt", "gone.txt"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("%s still on the host: %v", name, err)
+		}
+	}
+}
+
+// TestBindDelegatedClose checks that a file the container closes reaches
+// the host while the container runs.
+func TestBindDelegatedClose(t *testing.T) {
+	dir := shared(t, nil)
+	name := running(t, "-v", dir+":/d:delegated")
+	expect(t, execIn(t, name, "sh", "-c", "echo closed > /d/f"), "", 0)
+	if got := readHost(t, filepath.Join(dir, "f")); got != "closed\n" {
+		t.Errorf("host reads %q while the container runs", got)
+	}
+	// So does what fsync pushes out of a file still open.
+	expect(t, execIn(t, name, "sh", "-c", "exec 3>/d/open; echo synced >&3; fsync /d/open; cat /d/open"), "synced\n", 0)
+	if got := readHost(t, filepath.Join(dir, "open")); got != "synced\n" {
+		t.Errorf("host reads %q after fsync", got)
+	}
+}
+
+// TestBindDelegatedMixed mounts a consistent and a delegated share in one
+// container, and a read-only one asked to be delegated, which is not.
+func TestBindDelegatedMixed(t *testing.T) {
+	a := shared(t, map[string]string{"a": "consistent\n"})
+	b := shared(t, map[string]string{"b": "delegated\n"})
+	c := shared(t, map[string]string{"c": "read-only\n"})
+	r := run(t, "--debug", "-v", a+":/a", "-v", b+":/b:delegated", "--mount", "type=bind,source="+c+",target=/c,readonly,consistency=delegated",
+		alpine, "sh", "-c", "cat /a/a /b/b /c/c; echo x > /a/new; echo y > /b/new; echo z > /c/new 2>/dev/null || echo refused")
+	if r.code != 0 || r.stdout != "consistent\ndelegated\nread-only\nrefused\n" {
+		t.Fatalf("exit %d, stdout %q, stderr:\n%s", r.code, r.stdout, r.stderr)
+	}
+	if readHost(t, filepath.Join(a, "new")) != "x\n" || readHost(t, filepath.Join(b, "new")) != "y\n" {
+		t.Error("writes did not reach the host")
+	}
+	// Two file systems: the read-only share is with the consistent one.
+	if !strings.Contains(r.stderr, `fs "runwhp"`) || !strings.Contains(r.stderr, `fs "runwhp-delegated"`) {
+		t.Errorf("want both virtio-fs devices in the VMM's statistics:\n%s", r.stderr)
+	}
+}
