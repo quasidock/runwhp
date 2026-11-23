@@ -13,14 +13,23 @@ import (
 	"time"
 )
 
+// otherKernel reports whether RUNWHP_E2E_RUN_FLAGS boots another kernel
+// than runwhp's.
+func otherKernel() bool {
+	for _, f := range runArgs() {
+		if strings.HasPrefix(strings.TrimLeft(f, "-"), "kernel") {
+			return true
+		}
+	}
+	return false
+}
+
 // ownKernel skips tests of runwhp's kernel when RUNWHP_E2E_RUN_FLAGS boots
 // another one.
 func ownKernel(t *testing.T) {
 	t.Helper()
-	for _, f := range runArgs() {
-		if strings.HasPrefix(strings.TrimLeft(f, "-"), "kernel") {
-			t.Skip("RUNWHP_E2E_RUN_FLAGS boots another kernel")
-		}
+	if otherKernel() {
+		t.Skip("RUNWHP_E2E_RUN_FLAGS boots another kernel")
 	}
 }
 

@@ -105,7 +105,11 @@ func TestMemoryCommittedLazily(t *testing.T) {
 	}
 	total, _ := strconv.ParseUint(m[1], 10, 64)
 	peak, _ := strconv.ParseUint(m[2], 10, 64)
-	if limit := total/64 + 128; peak > limit {
+	limit := total/64 + 128
+	if otherKernel() {
+		limit += 64 // WSL's kernel, for one, takes more of its own
+	}
+	if peak > limit {
 		t.Errorf("a %d MiB guest committed %d MiB to run true; want at most %d", total, peak, limit)
 	}
 	if !strings.Contains(r.stderr, "memfault=") {
