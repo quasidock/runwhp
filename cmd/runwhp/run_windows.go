@@ -527,9 +527,12 @@ type eventWriter struct {
 	ok     bool
 	// onReady, if set, is called when a container booted to wait for its
 	// start is ready; onStarted, when the container process starts, with
-	// its pid in the guest.
+	// its pid in the guest; onStats, with statistics init was asked for.
+	// They are called with mu held, on the console's output goroutine, so
+	// they must not block.
 	onReady   func()
 	onStarted func(pid int)
+	onStats   func(*guestspec.GuestStats)
 }
 
 func (w *eventWriter) Write(p []byte) (int, error) {
@@ -550,6 +553,8 @@ func (w *eventWriter) Write(p []byte) (int, error) {
 				w.onReady()
 			case ev.Started && w.onStarted != nil:
 				w.onStarted(ev.Pid)
+			case ev.Stats != nil && w.onStats != nil:
+				w.onStats(ev.Stats)
 			}
 		}
 		w.buf = w.buf[i+1:]

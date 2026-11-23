@@ -132,6 +132,7 @@ func start(begin time.Time, ctl *controller) (guestspec.Status, error) {
 	// Before the container's root covers the initramfs, where init mounts
 	// the cgroup hierarchy for itself.
 	mem := openMemFiles()
+	ctl.mem.Store(mem)
 	if err := enterRoot(); err != nil {
 		return none, err
 	}

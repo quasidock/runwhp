@@ -68,8 +68,18 @@ type bootHooks struct {
 	// failed, if set, is given the last kernel console lines when the VM
 	// failed, or stopped without saying how the container ended.
 	failed func(console []string)
-	// vsock, if set, is given the vsock device before the VM boots.
-	vsock func(*virtio.Vsock)
+	// attached, if set, is given what reaches into the VM before it boots.
+	attached func(*vmHandles)
+}
+
+// vmHandles are what the runwhp running a container reaches its VM
+// through while it runs.
+type vmHandles struct {
+	vsock *virtio.Vsock
+	nic   *virtio.Net // nil without a network
+	blks  []*virtio.Blk
+	probe *vm.Probe
+	guest *guestStats
 }
 
 // Page cache reclaim: once the guest has been idle for reclaimIdle, init
@@ -210,7 +220,8 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 			stdin = strings.NewReader("")
 		}
 	}
-	status := &eventWriter{onReady: hooks.ready, onStarted: hooks.started}
+	guest := newGuestStats(proxy)
+	status := &eventWriter{onReady: hooks.ready, onStarted: hooks.started, onStats: guest.deliver}
 	console := &virtio.Console{
 		Ports: []virtio.Port{
 			{Name: guestspec.PortStdout, Out: bio.stdout},
@@ -224,13 +235,12 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 	// The vsock device carries runwhp exec's connections to init.
 	vsock := &virtio.Vsock{CID: guestspec.GuestCID, Logf: logf}
 	defer func() { logf("%s", vsock.Stats()) }()
-	if hooks.vsock != nil {
-		hooks.vsock(vsock)
-	}
+	handles := &vmHandles{vsock: vsock, probe: &vm.Probe{}, guest: guest}
 	// The balloon gives back to Windows the memory the guest reports free.
 	devices := []virtio.Device{console, vsock, &virtio.Balloon{}}
 	if cfg.Network {
 		nic := &virtio.Net{MAC: netstack.GuestMAC, MTU: netstack.MTU}
+		handles.nic = nic
 		stack, err := netstack.New(netstack.Config{
 			Output:      nic.Deliver,
 			HostGateway: cfg.HostGateway,
@@ -283,6 +293,14 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 			Serial: guestspec.ScratchSerial})
 	}
 	devices = append(devices, volumeDevices...)
+	for _, d := range devices {
+		if b, ok := d.(*virtio.Blk); ok {
+			handles.blks = append(handles.blks, b)
+		}
+	}
+	if hooks.attached != nil {
+		hooks.attached(handles)
+	}
 
 	cmdline := baseCmdline + " quiet loglevel=3"
 	if cfg.Debug {
@@ -312,6 +330,7 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 		Memory:      cfg.Memory,
 		CPUs:        cfg.CPUs,
 		Devices:     devices,
+		Probe:       handles.probe,
 		ConsoleLine: consoleLine,
 		Logf:        logf,
 	})

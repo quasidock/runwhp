@@ -16,7 +16,7 @@ import (
 
 	"github.com/quasidock/runwhp/internal/container"
 	"github.com/quasidock/runwhp/internal/guestspec"
-	"github.com/quasidock/runwhp/internal/virtio"
+	"github.com/quasidock/runwhp/internal/whp"
 )
 
 // killGrace is how long the guest has to end a container after SIGKILL
@@ -51,7 +51,7 @@ type supervisor struct {
 	// files are closed before the container is removed: a file open in
 	// its directory would keep that from being renamed away.
 	files []io.Closer
-	vsock *virtio.Vsock // the VM's vsock device, once it has one
+	vm    *vmHandles // what reaches into the VM, once it has one
 }
 
 // supervise takes a container's lock, records that this process is
@@ -122,9 +122,9 @@ func (s *supervisor) status() container.Status {
 // hooks are what bootContainer tells the supervisor.
 func (s *supervisor) hooks(waitStart bool) bootHooks {
 	return bootHooks{waitStart: waitStart, ready: s.isReady, started: s.started, failed: s.failed,
-		vsock: func(v *virtio.Vsock) {
+		attached: func(h *vmHandles) {
 			s.mu.Lock()
-			s.vsock = v
+			s.vm = h
 			s.mu.Unlock()
 		}}
 }
@@ -342,12 +342,45 @@ func (s *supervisor) handle(c net.Conn) {
 		case container.OpConnect:
 			s.connect(c, r, req)
 			return
+		case container.OpStats:
+			rep = s.stats()
 		default:
 			rep = container.Reply{Error: fmt.Sprintf("this runwhp does not know the request %q", req.Op)}
 		}
 	}
 	data, _ := json.Marshal(rep)
 	c.Write(append(data, '\n'))
+}
+
+// stats reports what the running container uses: its VM's processor time
+// and memory, this process's memory, which holds the guest's, the bytes
+// its devices moved, and what init says of the guest.
+func (s *supervisor) stats() container.Reply {
+	s.mu.Lock()
+	h, status := s.vm, s.state.Status
+	s.mu.Unlock()
+	if status != container.Running || h == nil {
+		return container.Reply{Error: errNotRunning.Error()}
+	}
+	st := &container.Stats{Time: time.Now(), CPUs: s.rec.Config.CPUs, MemLimit: s.rec.Config.Memory}
+	if u, ok := h.probe.Usage(); ok {
+		st.CPUTime, st.Committed = u.CPUTime, u.Committed
+	}
+	if pm, err := whp.ProcessMemory(whp.CurrentProcess); err == nil {
+		st.HostCommit, st.HostWorkingSet = pm.Commit, pm.PrivateWorkingSet
+		if st.HostWorkingSet == 0 {
+			st.HostWorkingSet = pm.WorkingSet
+		}
+	}
+	if h.nic != nil {
+		st.NetRx, st.NetTx = h.nic.RxBytes.Load(), h.nic.TxBytes.Load()
+	}
+	for _, b := range h.blks {
+		st.BlockRead += b.BytesRead.Load()
+		st.BlockWrite += b.BytesWritten.Load()
+	}
+	st.Guest = h.guest.get(time.Second)
+	return container.Reply{OK: true, Stats: st}
 }
 
 // connect connects c to a vsock port in the guest, and carries bytes both
@@ -365,14 +398,14 @@ func (s *supervisor) connect(c net.Conn, r *bufio.Reader, req container.Request)
 		return
 	}
 	s.mu.Lock()
-	vs, status := s.vsock, s.state.Status
+	h, status := s.vm, s.state.Status
 	s.mu.Unlock()
-	if status != container.Running || vs == nil {
+	if status != container.Running || h == nil {
 		reply(container.Reply{Error: errNotRunning.Error()})
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	vc, err := vs.Dial(ctx, req.Port)
+	vc, err := h.vsock.Dial(ctx, req.Port)
 	cancel()
 	if err != nil {
 		reply(container.Reply{Error: fmt.Sprintf("connecting to the container's init: %v", err)})

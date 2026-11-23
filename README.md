@@ -11,7 +11,9 @@ HCS, and no administrator rights at run time.
 interactively or not, with a network, the host's files and volumes of their
 own, on a kernel of its own and on several processors. Containers are kept
 after they stop, can run in the background, and can be started again,
-stopped, signalled and run more commands in.
+stopped, signalled and run more commands in. A container has half the
+machine's memory by default, but takes only what it uses, and gives back
+what it frees.
 
 See [status](docs/status.md) for details.
 
@@ -170,6 +172,7 @@ its ID, its name, or any unique prefix of its ID.
 | `logs [-f] CONTAINER` | Print the output of a container in the background |
 | `list [-q] [--format table\|json]` | List containers, newest first |
 | `state CONTAINER` | Describe a container as JSON: runc's fields (`ociVersion`, `id`, `status`, `pid`, `bundle`), then runwhp's own |
+| `stats [--no-stream] [--format table\|json] [CONTAINER...]` | Show what running containers use, every second until Ctrl+C, or once with `--no-stream`; see [Memory](#memory) |
 | `delete [-f] CONTAINER...` | Remove containers, with their writable layers, logs and anonymous volumes. A running one needs `-f`, which kills it first |
 | `rename CONTAINER NAME` | Rename a container |
 
@@ -338,6 +341,13 @@ for the container's `runwhp.exe` shows what it has taken.
   reported only once all of it is free, and pages the guest keeps, its own
   kernel's especially, end up scattered over the RAM it has used, so some
   of what it frees stays with it.
+- **What a container uses.** `runwhp stats` shows, for each running
+  container, its processors' time as a share of one (`200%` is two vCPUs
+  kept busy), what its guest uses of its memory (all but what Linux counts
+  as available), what its runwhp holds of this machine's (`HOST MEM`, the
+  process's commit, guest RAM included), the network and disk bytes it has
+  moved, and its processes' threads. The guest's numbers come from
+  runwhp's init, the rest from runwhp itself.
 - **An idle guest gives back its page cache.** Files a container reads or
   writes stay cached in its guest's RAM, as on any Linux. Once the guest
   has kept its processors idle, below 5% of one, for a minute, runwhp's
@@ -529,13 +539,17 @@ bzImage.
    runwhp describes the vCPUs to the guest, in ACPI's MADT and in CPUID, as
    single-threaded cores of one package that share their last-level cache.
    The I/O APIC sends each device's interrupt to the CPU the guest's kernel
-   chose for it.
+   chose for it. Guest RAM is reserved, in one span of runwhp's address
+   space with the device hole left out, but nothing of it is committed:
+   each 2 MiB of it is committed, mapped into the guest and populated the
+   first time runwhp's loader, a device or the guest touches it, the last
+   as an exit for an unmapped address, after which the instruction runs
+   again.
 4. The guest gets one multiport virtio console, with ports named `stdout`,
    `stderr`, `stdin` and `control`; a virtio socket device; a virtio
    memory balloon; a virtio network device, unless `--network none`; a
-   virtio-fs device, with bind
-   mounts; one read-only virtio-blk disk per layer; the writable layer; and
-   one disk per named volume. Each disk's
+   virtio-fs device, with bind mounts; one read-only virtio-blk disk per
+   layer; the writable layer; and one disk per named volume. Each disk's
    serial number names it, so init does not depend on probe order. The vCPU
    that submits disk requests serves the first itself, without holding the
    device, and goroutines serve any others, up to 16 at a time per disk,
@@ -575,9 +589,13 @@ bzImage.
    and init relays them to and from the ports. A port can be open only once
    at a time, so handing the process the ports themselves would break
    `/dev/stdout` and similar paths.
-8. The `control` port carries JSON lines both ways: signals, terminal sizes
-   and the order to start from the host; from init, when the container is
-   ready, when the process has started and how it ended. When the process
+8. The `control` port carries JSON lines both ways: signals, terminal sizes,
+   requests for statistics and the order to start from the host; from
+   init, when the container is ready, when the process has started, the
+   statistics asked for, and how the process ended. While the process
+   runs, init gives page cache back once the guest is idle, and the
+   balloon hands the guest's free page reports to runwhp, which gives
+   those chunks back to Windows. When the process
    exits, init kills whatever is left, `runwhp exec`'s processes included,
    waits for the last output to reach the ports, reports how it ended, and
    resets the machine, which ends the VMM. First it freezes each volume's
@@ -601,9 +619,9 @@ bzImage.
 | --- | --- |
 | [`cmd/runwhp`](cmd/runwhp) | Command line |
 | [`internal/whp`](internal/whp) | Bindings for `WinHvPlatform.dll` and `WinHvEmulation.dll` |
-| [`internal/vm`](internal/vm) | Partition setup, vCPU loops, processor topology, serial port, RTC stub, I/O APIC |
+| [`internal/vm`](internal/vm) | Partition setup, guest memory committed as it is touched, vCPU loops, processor topology, serial port, RTC stub, I/O APIC |
 | [`internal/boot`](internal/boot) | Kernel loader, page tables, ACPI tables, initramfs builder. Builds on any OS |
-| [`internal/virtio`](internal/virtio) | virtio-mmio transport, block device, multiport console, network device, file system device, socket device. Builds on any OS |
+| [`internal/virtio`](internal/virtio) | virtio-mmio transport, block device, multiport console, network device, file system device, socket device, memory balloon. Builds on any OS |
 | [`internal/netstack`](internal/netstack) | The host end of the container's network: gVisor's netstack, TCP and UDP forwarding, DNS, published ports. Builds on any OS |
 | [`internal/fuse`](internal/fuse) | The FUSE protocol as virtio-fs speaks it, served from a file system interface. Builds on any OS |
 | [`internal/disk`](internal/disk) | The files behind virtual disks: overlapped I/O from many goroutines, sparse files, freeing ranges, exclusive and delete-on-close opens |
@@ -644,6 +662,7 @@ container's supervisor, with no daemon.
 | Interrupts | Hypervisor's local APIC plus an emulated 64-pin I/O APIC | Done, edge-triggered only |
 | Processors | One thread per vCPU; the guest starts the others through the hypervisor's local APIC; topology described in CPUID | Done, up to 64 |
 | Device discovery | Hardware-reduced ACPI with a generated DSDT | Done |
+| Memory | Guest RAM below the device hole and above 4 GiB, committed as the guest touches it; free page reporting through a virtio balloon gives back what it frees | Done; up to the host's RAM, half of it by default, given back 2 MiB at a time |
 | Root filesystem | One read-only ext4 image per layer on virtio-blk, overlayfs in the guest, writable layer on a disk of its own | Done; the writable layer is a sparse file, kept with the container, or with `--rm` formatted for each run |
 | Layer conversion | `tar2ext4`, cached per layer digest | Done |
 | Container I/O | Multiport virtio console with named ports for stdout, stderr, stdin and control; pipes or a pty in the guest | Done, including `-i`, `-t`, resize and signals |
@@ -651,7 +670,7 @@ container's supervisor, with no daemon.
 | Host to guest | Console ports for the main process; a virtio socket device for further connections | Done: `runwhp exec` uses vsock |
 | Bind mounts and volumes | virtio-fs, with a FUSE server in Go serving Windows files and keeping Unix metadata as WSL does; volumes as journaled ext4 disk images on virtio-blk | Done; a volume is used by one container at a time |
 | Networking | User-mode network stack in the VMM (gVisor netstack); published ports are loopback listeners | Done, IPv4 only, TCP ports only |
-| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | Done over runwhp's own images, plus `run`, `list`, `stop`, `restart`, `rename` and `logs`; no OCI bundles |
+| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | Done over runwhp's own images, plus `run`, `list`, `stats`, `stop`, `restart`, `rename` and `logs`; no OCI bundles |
 | Kernel | Our own build with virtio drivers built in, shipped as a signed OCI artifact | Done: Linux 6.18 LTS on ghcr.io, pinned by digest rather than signed |
 
 ### Out of scope for now

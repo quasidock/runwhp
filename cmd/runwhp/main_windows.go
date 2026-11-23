@@ -22,6 +22,7 @@ const usage = `Usage:
   runwhp logs [-f] CONTAINER                    print the output of a container in the background
   runwhp list [-q] [--format table|json]        list containers
   runwhp state CONTAINER                        describe a container's state as JSON
+  runwhp stats [--no-stream] [CONTAINER...]     show what running containers use
   runwhp delete [-f] CONTAINER...               remove containers
   runwhp rename CONTAINER NAME                  rename a container
   runwhp pull IMAGE                             pull an image, and runwhp's kernel, into the local store
@@ -54,6 +55,8 @@ func realMain(args []string) int {
 		return cmdList(args[1:], os.Stdout)
 	case "state":
 		return cmdState(args[1:], os.Stdout)
+	case "stats":
+		return cmdStats(args[1:], os.Stdout)
 	case "delete":
 		return cmdDelete(args[1:], os.Stdout)
 	case "rename":

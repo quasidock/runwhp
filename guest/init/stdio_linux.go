@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -207,6 +208,9 @@ type controller struct {
 	sendMu sync.Mutex
 	port   *os.File // the control port, once open
 
+	// mem is where statistics come from, once init has opened its files.
+	mem atomic.Pointer[memFiles]
+
 	// With Spec.WaitStart: whether the host has asked to start the
 	// process, the first signal it sent before that, and a wake-up for
 	// waitStart.
@@ -285,8 +289,26 @@ func (c *controller) listen(port *os.File) {
 		if m.Rows > 0 && m.Cols > 0 {
 			c.resize(m.Rows, m.Cols)
 		}
+		if m.Stats != 0 {
+			// Walking /proc takes a while; signals behind it should not wait.
+			go c.sendStats(m.Stats)
+		}
 	}
 	debugf("control port closed: %v", sc.Err())
+}
+
+// sendStats answers a request for statistics, with as much as init can
+// read.
+func (c *controller) sendStats(seq uint64) {
+	st := &guestspec.GuestStats{Seq: seq}
+	if mem := c.mem.Load(); mem != nil {
+		if data, err := read(mem.meminfo); err == nil {
+			f := parseMeminfo(data)
+			st.MemTotal, st.MemAvailable, st.Cached = f["MemTotal"], f["MemAvailable"], f["Cached"]
+		}
+		st.Tasks = mem.tasks()
+	}
+	c.send(guestspec.Event{Stats: st})
 }
 
 func (c *controller) signal(m guestspec.Control) {

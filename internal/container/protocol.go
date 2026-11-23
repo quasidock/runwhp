@@ -1,5 +1,11 @@
 package container
 
+import (
+	"time"
+
+	"github.com/quasidock/runwhp/internal/guestspec"
+)
+
 // The runwhp that runs a container serves requests from other runwhps on a
 // named pipe of the container's own: JSON lines, one request and one reply
 // per connection, except that a connect request is followed by the bytes
@@ -25,6 +31,8 @@ const (
 	// OpConnect connects to vsock port Port in the guest, and after the
 	// reply carries that connection's bytes both ways.
 	OpConnect = "connect"
+	// OpStats replies with what the running container uses, in Stats.
+	OpStats = "stats"
 )
 
 // Request is a request to a container's runwhp.
@@ -47,4 +55,32 @@ type Reply struct {
 	ExitCode int    `json:"exitCode,omitempty"`
 	// Console holds the last kernel console lines, when a start failed.
 	Console []string `json:"console,omitempty"`
+	// Stats answers OpStats.
+	Stats *Stats `json:"stats,omitempty"`
+}
+
+// Stats is what a running container uses, as its runwhp sees it.
+type Stats struct {
+	Time time.Time `json:"time"`
+	CPUs int       `json:"cpus"`
+	// CPUTime is how long the container's vCPUs have run, all together.
+	CPUTime time.Duration `json:"cpuTime"`
+	// MemLimit is the guest's RAM, and Committed how much of it Windows
+	// has committed to it now.
+	MemLimit  uint64 `json:"memLimit"`
+	Committed uint64 `json:"committed"`
+	// HostCommit and HostWorkingSet are what Windows holds for the
+	// container's runwhp process, guest RAM included: its commit and its
+	// private working set.
+	HostCommit     uint64 `json:"hostCommit"`
+	HostWorkingSet uint64 `json:"hostWorkingSet"`
+	// Network bytes the container received and sent, and disk bytes it
+	// read and wrote.
+	NetRx      uint64 `json:"netRx"`
+	NetTx      uint64 `json:"netTx"`
+	BlockRead  uint64 `json:"blockRead"`
+	BlockWrite uint64 `json:"blockWrite"`
+	// Guest is what init reported of the guest, or nil if it did not
+	// answer in time.
+	Guest *guestspec.GuestStats `json:"guest,omitempty"`
 }

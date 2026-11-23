@@ -34,10 +34,11 @@
 // unless one of those mounts is at that path or binds host files above it.
 //
 // The control port carries JSON lines both ways. The host sends Control
-// messages: signals for the container process, terminal sizes and, with
-// Spec.WaitStart, when to start the process. Init sends Events: when the
-// container is ready to start, when the process has started, and when it
-// has exited, after which init resets the machine.
+// messages: signals for the container process, terminal sizes, requests
+// for statistics and, with Spec.WaitStart, when to start the process. Init
+// sends Events: when the container is ready to start, when the process has
+// started, the statistics asked for, and when the process has exited,
+// after which init resets the machine.
 package guestspec
 
 import "fmt"
@@ -177,6 +178,9 @@ type Control struct {
 	// Rows and Cols, when both are set, are the terminal's new size.
 	Rows uint16 `json:"rows,omitempty"`
 	Cols uint16 `json:"cols,omitempty"`
+	// Stats, when not zero, asks init for the guest's statistics, which
+	// it sends back in an Event with GuestStats.Seq set to Stats.
+	Stats uint64 `json:"stats,omitempty"`
 }
 
 // Event is a message from init to the host.
@@ -193,6 +197,20 @@ type Event struct {
 	Exited bool   `json:"exited,omitempty"`
 	Exit   int    `json:"exit,omitempty"`
 	Error  string `json:"error,omitempty"`
+	// Stats answers Control.Stats.
+	Stats *GuestStats `json:"stats,omitempty"`
+}
+
+// GuestStats is what init reports of the guest when the host asks.
+type GuestStats struct {
+	Seq uint64 `json:"seq"`
+	// MemTotal, MemAvailable and Cached are /proc/meminfo's, in bytes.
+	MemTotal     uint64 `json:"memTotal"`
+	MemAvailable uint64 `json:"memAvailable"`
+	Cached       uint64 `json:"cached"`
+	// Tasks counts the threads of every process in the guest but init and
+	// the kernel's own, as a container's pids.current would.
+	Tasks int `json:"tasks"`
 }
 
 // Status is how the container ended.

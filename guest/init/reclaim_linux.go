@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -25,6 +26,8 @@ const cgroupDir = "/runwhp/cgroup"
 // start each time.
 type memFiles struct {
 	stat, meminfo *os.File
+	proc          *os.File // the /proc directory, read under procMu
+	procMu        sync.Mutex
 	reclaim       *os.File // the root cgroup's memory.reclaim, or nil
 }
 
@@ -38,6 +41,9 @@ func openMemFiles() *memFiles {
 	}
 	if m.meminfo, err = os.Open("/proc/meminfo"); err != nil {
 		logf("opening /proc/meminfo: %v", err)
+	}
+	if m.proc, err = os.Open("/proc"); err != nil {
+		logf("opening /proc: %v", err)
 	}
 	if err := os.MkdirAll(cgroupDir, 0o755); err != nil {
 		logf("making %s: %v", cgroupDir, err)

@@ -63,6 +63,9 @@ type Config struct {
 	// interrupt line, and declared to the guest in that order.
 	Devices []virtio.Device
 
+	// Probe, if set, reports on the guest while it runs.
+	Probe *Probe
+
 	// ConsoleLine receives the kernel console (COM1) a line at a time.
 	ConsoleLine func(line string)
 	// Logf receives VMM diagnostics. nil discards them.
@@ -215,6 +218,11 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 		m.cpus = append(m.cpus, &vcpu{m: m, index: uint32(i),
 			exits: map[uint32]int{}, ioPorts: map[uint16]int{}, unknownPages: map[uint64]bool{}})
 	}
+	if cfg.Probe != nil {
+		// Detached before the VPs and the partition go.
+		cfg.Probe.attach(m)
+		defer cfg.Probe.attach(nil)
+	}
 	apicIDs, err := m.prepareCPUs()
 	if err != nil {
 		return result, err
@@ -272,6 +280,44 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 	}
 	result.Stats = m.stats()
 	return result, err
+}
+
+// Probe reports what a running guest uses, from any goroutine.
+type Probe struct {
+	mu sync.Mutex
+	m  *machine
+}
+
+// Usage is what a guest has used of the host.
+type Usage struct {
+	// CPUTime is how long its vCPUs have run, all together.
+	CPUTime time.Duration
+	// Committed is the guest RAM committed to it now, and Peak the most
+	// there has been.
+	Committed, Peak uint64
+}
+
+func (p *Probe) attach(m *machine) {
+	p.mu.Lock()
+	p.m = m
+	p.mu.Unlock()
+}
+
+// Usage reports what the guest uses, or false if it is not running.
+func (p *Probe) Usage() (Usage, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.m == nil {
+		return Usage{}, false
+	}
+	var u Usage
+	for _, v := range p.m.cpus {
+		if total, _, err := p.m.part.VPRuntime(v.index); err == nil {
+			u.CPUTime += total
+		}
+	}
+	u.Committed, u.Peak = p.m.mem.Committed()
+	return u, true
 }
 
 // cancelOnStop waits until the guest is to stop, because a vCPU stopped it
