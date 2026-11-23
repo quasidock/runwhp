@@ -6,6 +6,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,8 +18,10 @@ import (
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/registry"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/tarball"
 )
 
 const busybox = "busybox:1.36"
@@ -104,9 +109,79 @@ func configDigest(t *testing.T, ref string) string {
 	return d.String()
 }
 
+// mirror is a registry in this process that serves images first fetched
+// from Docker Hub and kept under out\e2e-images. The tests of stores of
+// their own pull every image they use into each store, and some pull over
+// and over: from Docker Hub, which allows 100 anonymous pulls an hour, a
+// few runs of the suite would use them up.
+var mirror struct {
+	once   sync.Once
+	host   string
+	mu     sync.Mutex
+	pushed map[string]bool
+}
+
+// mirrored serves ref from the mirror and returns its reference there.
+func mirrored(t *testing.T, ref string) string {
+	t.Helper()
+	mirror.once.Do(func() {
+		srv := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
+		mirror.host = strings.Replace(strings.TrimPrefix(srv.URL, "http://"), "127.0.0.1", "localhost", 1)
+		mirror.pushed = map[string]bool{}
+	})
+	mirror.mu.Lock()
+	defer mirror.mu.Unlock()
+	there := mirror.host + "/" + ref
+	if mirror.pushed[ref] {
+		return there
+	}
+	dir, err := filepath.Abs(filepath.Join("..", "..", "out", "e2e-images"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, strings.NewReplacer("/", "_", ":", "_").Replace(ref)+".tar")
+	if _, err := os.Stat(path); err != nil {
+		img, err := remote.Image(parseRef(t, ref), remote.WithPlatform(v1.Platform{OS: "linux", Architecture: "amd64"}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		os.MkdirAll(dir, 0o755)
+		tmp := path + ".tmp"
+		if err := tarball.WriteToFile(tmp, parseRef(t, ref), img); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(tmp, path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	img, err := tarball.ImageFromPath(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.Write(parseRef(t, there), img); err != nil {
+		t.Fatal(err)
+	}
+	mirror.pushed[ref] = true
+	return there
+}
+
+// parseRef parses an image reference.
+func parseRef(t *testing.T, ref string) name.Reference {
+	t.Helper()
+	r, err := name.ParseReference(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// repoOf is a reference without its tag.
+func repoOf(ref string) string { return ref[:strings.LastIndex(ref, ":")] }
+
 // TestImages lists and inspects pulled images.
 func TestImages(t *testing.T) {
 	s := newOwnStore(t)
+	alpine, busybox := mirrored(t, alpine), mirrored(t, busybox)
 	s.ok("pull", alpine)
 	s.ok("pull", busybox)
 	alpineID, busyboxID := configDigest(t, alpine), configDigest(t, busybox)
@@ -116,7 +191,7 @@ func TestImages(t *testing.T) {
 	if len(lines) != 3 || !strings.HasPrefix(lines[0], "REPOSITORY") {
 		t.Fatalf("images:\n%s", r.stdout)
 	}
-	for _, want := range [][]string{{"alpine", "3.20", alpineID[7:19]}, {"busybox", "1.36", busyboxID[7:19]}} {
+	for _, want := range [][]string{{repoOf(alpine), "3.20", alpineID[7:19]}, {repoOf(busybox), "1.36", busyboxID[7:19]}} {
 		found := false
 		for _, l := range lines[1:] {
 			f := strings.Fields(l)
@@ -129,7 +204,7 @@ func TestImages(t *testing.T) {
 	if r := s.ok("images", "-q"); strings.Count(r.stdout, "\n") != 2 {
 		t.Errorf("images -q: %q", r.stdout)
 	}
-	if r := s.ok("image", "ls", "-q", "busybox"); r.stdout != busyboxID[7:19]+"\n" {
+	if r := s.ok("image", "ls", "-q", repoOf(busybox)); r.stdout != busyboxID[7:19]+"\n" {
 		t.Errorf("image ls -q busybox: %q", r.stdout)
 	}
 
@@ -141,7 +216,7 @@ func TestImages(t *testing.T) {
 		t.Fatalf("images --format json: %v, %+v", err, rows)
 	}
 	for _, row := range rows {
-		if row.Size < 1<<20 || row.ID != map[string]string{"alpine": alpineID, "busybox": busyboxID}[row.Repository] {
+		if row.Size < 1<<20 || row.ID != map[string]string{repoOf(alpine): alpineID, repoOf(busybox): busyboxID}[row.Repository] {
 			t.Errorf("json row %+v", row)
 		}
 	}
@@ -167,6 +242,7 @@ func TestImages(t *testing.T) {
 // that container's layers once it is gone.
 func TestRmi(t *testing.T) {
 	s := newOwnStore(t)
+	alpine, busybox := mirrored(t, alpine), mirrored(t, busybox)
 	s.ok("pull", alpine)
 	s.ok("pull", busybox)
 	before := len(s.layers())
@@ -206,6 +282,7 @@ func TestRmi(t *testing.T) {
 // running container uses.
 func TestImagePrune(t *testing.T) {
 	s := newOwnStore(t)
+	alpine, busybox := mirrored(t, alpine), mirrored(t, busybox)
 	s.ok("pull", alpine)
 	s.ok("pull", busybox)
 	id := strings.TrimSpace(s.ok(append([]string{"run", "-d"}, withFlags([]string{alpine, "sleep", "60"})...)...).stdout)
@@ -234,6 +311,7 @@ func TestImagePrune(t *testing.T) {
 // recorded its container with.
 func TestPruneRace(t *testing.T) {
 	s := newOwnStore(t)
+	alpine, python := mirrored(t, alpine), mirrored(t, "python:3.12-slim")
 	prune := func(stop chan struct{}, args ...string) *sync.WaitGroup {
 		var wg sync.WaitGroup
 		wg.Add(1)
@@ -256,13 +334,13 @@ func TestPruneRace(t *testing.T) {
 	// Layers nothing lists yet dangle, until the pull records its image.
 	stop := make(chan struct{})
 	wg := prune(stop, "image", "prune", "-f")
-	r := s.cli("", "pull", "python:3.12-slim")
+	r := s.cli("", "pull", python)
 	close(stop)
 	wg.Wait()
 	if r.code != 0 {
 		t.Fatalf("pull: exit %d, %s", r.code, r.stderr)
 	}
-	if r := s.cli("", runArgs("--pull", "never", "python:3.12-slim", "python3", "-c", "print(1)")...); r.code != 0 || r.stdout != "1\n" {
+	if r := s.cli("", runArgs("--pull", "never", python, "python3", "-c", "print(1)")...); r.code != 0 || r.stdout != "1\n" {
 		t.Errorf("the pulled image: exit %d, %q, %s", r.code, r.stdout, r.stderr)
 	}
 
@@ -291,6 +369,7 @@ func TestPruneRace(t *testing.T) {
 // VM is stopped, and keeps a running one.
 func TestContainerPrune(t *testing.T) {
 	s := newOwnStore(t)
+	alpine := mirrored(t, alpine)
 	id := func(args ...string) string { return strings.TrimSpace(s.ok(args...).stdout) }
 	s.ok(keepArgs("--name", "stopped", alpine, "true")...)
 	stopped := id("list", "-q")
@@ -331,6 +410,7 @@ func TestContainerPrune(t *testing.T) {
 // TestSystemDf counts a container's writable layer and its image.
 func TestSystemDf(t *testing.T) {
 	s := newOwnStore(t)
+	alpine := mirrored(t, alpine)
 	s.ok(keepArgs("--name", "big", alpine, "sh", "-c", "head -c 52428800 /dev/urandom > /big && sync")...)
 	r := s.ok("system", "df")
 	var containers []string
@@ -342,7 +422,7 @@ func TestSystemDf(t *testing.T) {
 	if len(containers) < 5 || containers[1] != "1" || containers[2] != "0" || !strings.HasSuffix(containers[3], "MiB") {
 		t.Errorf("system df:\n%s", r.stdout)
 	}
-	if r := s.ok("system", "df", "-v"); !strings.Contains(r.stdout, "Containers space usage:") || !hasRow(r.stdout, "alpine", "3.20", "1") {
+	if r := s.ok("system", "df", "-v"); !strings.Contains(r.stdout, "Containers space usage:") || !hasRow(r.stdout, repoOf(alpine), "3.20", "1") {
 		t.Errorf("system df -v:\n%s", r.stdout)
 	}
 	var js struct {
@@ -375,6 +455,7 @@ func hasRow(out, repo, tag, last string) bool {
 // container with its image and volume.
 func TestSystemPrune(t *testing.T) {
 	s := newOwnStore(t)
+	alpine, busybox := mirrored(t, alpine), mirrored(t, busybox)
 	old := filepath.Join(s.root, "kernels", "sha256", strings.Repeat("a", 64))
 	os.MkdirAll(old, 0o755)
 	os.WriteFile(filepath.Join(old, "bzImage"), make([]byte, 1<<20), 0o644)
