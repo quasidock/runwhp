@@ -1,8 +1,9 @@
 # Known gaps
 
-- Nothing attaches to a container in the background: there is no
-  `attach`, `start -a` or `wait`. Its output is in its log or the files it
-  was given, and its stdin can only be a file or a pipe.
+- `attach` to a container run in the foreground shows its output, but
+  cannot type into it: its input belongs to the runwhp that runs it. An
+  attached runwhp that falls 4 MiB behind the container's output is cut
+  off, rather than holding the output up.
 - There are no restart policies and no `container prune`; containers a
   plain `run` keeps stay until `delete`.
 - Logs grow until the container is deleted, carry no timestamps, and are
@@ -60,9 +61,10 @@
 - The cache only grows: there is no `images` or `rmi` yet.
 - Interrupts are edge-triggered only; level-triggered lines and EOI tracking
   are not implemented.
-- A guest that stops without resetting, as `halt -f` and `poweroff -f` make
-  it, runs on until Ctrl+C. The hypervisor keeps its halted processors to
-  itself, and runwhp has no ACPI power-off for it to use.
+- The container cannot reboot, halt or power off its VM: it lacks
+  CAP_SYS_BOOT, as Docker containers do, and `reboot -f` fails with EPERM.
+  There is no `--cap-add` to give it back. It shares init's PID namespace,
+  so it can see init and signal it, though init ignores the signals.
 - `--cpus` is a count, not Docker's quota, and there is no `--cpuset-cpus`.
 - Each device has one virtqueue, which every vCPU shares.
 - Every interrupt from a virtio device costs two exits beyond the one that
@@ -88,8 +90,10 @@
 - Every guest's kernel describes all of its RAM, in 1/64 of it, which
   each container holds for as long as it runs: 128 MiB with 8 GiB of
   RAM. Hot-plugging memory (virtio-mem) would avoid it.
-- The guest clock starts at whatever the RTC stub reports and is not kept in
-  step with the host afterwards.
+- The guest's clock follows the host's, but only every minute and when
+  Windows resumes: a container that sets its own clock has it put back.
+  The resume hook is untested: the test machine's Modern Standby never
+  paused a container, and it has no other sleep state.
 - String port I/O is not handled and stops the VMM with an error.
 - It is unknown whether hosted Windows CI runners expose WHP, so the
   end-to-end tests run only by hand.

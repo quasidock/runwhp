@@ -1,5 +1,16 @@
 # Status
 
+- **Iteration 11** (2026-11-23): containers that run for a long time
+  can be rejoined and keep good time. `attach` shows a running
+  container's output and, for one in the background run with `-i`, takes
+  input, with Docker's Ctrl+P Ctrl+Q to detach; `start -a` attaches from
+  the first byte, and `wait` prints how containers ended. The guest's
+  clock is set from the host's as init starts, every minute, and when
+  Windows resumes: it was 0-1 s behind from boot, and is now within
+  1 ms. The container can no longer reset, halt or power off its VM, as
+  `reboot -f` and `halt -f` did, and the ACPI tables offer a power-off.
+  See [Containers](../README.md#containers) and
+  [Iteration 11 results](#iteration-11-results).
 - **Iteration 10** (2026-11-23): I/O got faster. runwhp decodes the
   guest's accesses to device registers itself instead of through
   `WinHvEmulation.dll`, serves a bind mount's request on the vCPU that sent
@@ -839,6 +850,85 @@ The new tests cover:
   renames and removals reaching the host after the run, a file closed or
   synced reaching it while the container runs, and a consistent, a
   delegated and a read-only mount in one container
+
+The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
+the WSL kernel with its vsock modules passed with `--module`.
+
+## Iteration 11 results
+
+Measured on the test machine with runwhp's kernel, from Git Bash, with the
+store on NTFS (`C:`). "Iteration 10" is that iteration's build, run in turn
+with this one.
+
+Runs cost the same, over seven runs:
+
+| Measurement | Iteration 10 | Iteration 11 |
+| --- | --- | --- |
+| `run --rm alpine:3.20 true`, `-m 512m` | 173-184 ms | 175-189 ms |
+| the same, default memory | 239-258 ms | 243-251 ms |
+
+The guest's wall clock against the host's, read with busybox's
+`adjtimex` from an `exec`, whose 80-110 ms bounds each reading:
+
+| Measurement | Iteration 10 | Iteration 11 |
+| --- | --- | --- |
+| at boot, over eight runs | 0.10 s ahead to 0.94 s behind | within 50 ms, the test's bound |
+| a detached container, every 5 minutes for 45 minutes | 0.10-0.21 s behind, unchanged | -0.05 to +0.06 s, unchanged |
+| the same, after Windows stepped its own clock back 1.286 s | 1.07-1.17 s ahead, for the next 85 minutes | -0.05 to +0.06 s |
+| the host's time as init receives it, 120 messages, idle and busy | | 0.01-0.47 ms ahead of the guest's |
+
+The guest's clock does not drift from the host's, but Windows corrects its
+own: it stepped it back 1.286 s against time.windows.com while both ran.
+Otherwise, the offset a guest booted with in iteration 10 stayed with it
+for its life. Modern Standby, the only sleep this machine has, never
+paused either guest; see [Findings](findings.md).
+
+Attaching, over three runs. `start -a` boots the container, attaches,
+then starts it; its 200 MB go to the null device, and to the log, which
+`logs` then prints:
+
+| Measurement | Result |
+| --- | --- |
+| `start -a` of a container writing 200 MB to stdout, boot included | 0.91-1.11 s |
+| `logs` of the same 200 MB | 0.20-0.21 s |
+| `start -a -i` of `wc -c`, 200 MB of input from a file, boot included | 1.86-1.98 s |
+| `wait` for a container that sleeps 1 s | 1.035-1.040 s |
+
+Iteration 10 took 1.01-1.84 s to write 200 MB to stdout in the foreground,
+boot included, and iteration 8 1.71-1.76 s for 200 MB through `exec -i`.
+
+The new tests cover:
+
+- the ACPI tables: both sleep registers, `\_S5` ahead of `\_SB`, and the
+  sleep control register's values
+- frames both ways through the log's framing: each kind, empty ones, a
+  write larger than a frame, one too large refused, one cut short
+- the output hub: two attached runwhps in order, one attached midway, one
+  that stops reading cut off at 4 MiB while the output and the other go
+  on, and one that detaches
+- input from attached runwhps: in order, ended by the first only when the
+  container takes input once
+- the detach keys: split across reads, a Ctrl+P that is not followed by
+  Ctrl+Q, held keys at the end of the input, and parsing `--detach-keys`
+- the control queue taking the time as the console reads the message,
+  `RUNWHP_CLOCK_SYNC`, and init's choice to step, slew or leave the clock
+- end to end:
+  - `reboot -f`, `halt -f` and `poweroff -f` failing with EPERM in the
+    container and in an `exec`, which lack CAP_SYS_BOOT, and init
+    surviving `kill -TERM 1`, `reboot`, `halt` and `poweroff`
+  - the kernel taking the ACPI power-off
+  - a reset from a CPU other than the first, now init's own
+  - the guest's clock within 50 ms of the host's at boot, put back after
+    the container sets it back by years, and left alone with
+    `RUNWHP_CLOCK_SYNC=0`
+  - `wait`: two containers, one stopped already, one run with `--rm`, a
+    missing one, and one whose runwhp is killed meanwhile
+  - `attach`: two at once, a stopped container refused, a container run
+    in the foreground, input from two attaches in turn to a `run -d -i`
+    container, a pseudo console with keys, resizes, Ctrl+P Ctrl+Q and the
+    exit code
+  - `start -a` of a created container and again once stopped, and
+    `start -a -i` with input ending the container's
 
 The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
 the WSL kernel with its vsock modules passed with `--module`.

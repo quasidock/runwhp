@@ -278,3 +278,48 @@
   the container still read the old contents, and its append wrote back the
   whole page over the host's change. A file left open reached the host
   within a few seconds, well before the 30 s the kernel allows.
+- **The container could end its own VM.** It runs as root with every
+  capability, in init's PID namespace. `reboot -f` reset the VM with no
+  exit status, and `halt -f` and `poweroff -f` left it running until
+  Ctrl+C, the second because the ACPI tables offered no power-off.
+  busybox's `reboot` without `-f`, like `kill -TERM 1`, signals PID 1: Go
+  then ended init, and the kernel panicked; `halt` sends SIGUSR1, which
+  Go ignores when nothing listens. Dropping CAP_SYS_BOOT from init's
+  bounding set, on every thread with `AllThreadsSyscall`, keeps it from
+  every process init starts while init keeps it for its own reset.
+- **Hardware-reduced ACPI powers off through two FADT registers and
+  `\_S5`.** With the sleep control and status registers in the FADT and an
+  `\_S5` package in the DSDT, the kernel reports `ACPI: PM: (supports S0
+  S5)` and `poweroff -f` writes SLP_EN with sleep type 5 to the control
+  register. The kernel then also prepares S5 before every reset, which
+  costs about a millisecond.
+- **The guest's clock starts 0-1 s behind and stays there.** The kernel
+  reads the CMOS stub once, in whole seconds, so a guest's offset from the
+  host is a sawtooth over the second it booted in: -0.94 to +0.10 s over
+  eight runs. Idle for 45 minutes, it moved by no more than the 100 ms an
+  `exec` takes to read it: the reference TSC page keeps time with the
+  host's.
+- **A time stamped as the console takes it arrives in under 0.5 ms.** Over
+  120 messages a second apart, init found the host's time 0.01-0.47 ms
+  ahead of its own, idle and with four vCPUs busy alike, after the first
+  step at boot. Init leaves offsets under 1 ms alone, and slews up to
+  20 ms, what the kernel's 500 ppm makes up within a minute.
+- **`ADJ_NANO` is sticky.** Stepping the clock with `ADJ_SETOFFSET |
+  ADJ_NANO` sets `STA_NANO` in the kernel's status, and from then on
+  every `adjtimex` caller gets nanoseconds in `tv_usec`; busybox's
+  `adjtimex` printed `tv_usec: 678660900`. Init steps in microseconds.
+- **Modern Standby here does not pause a container.** The test machine
+  offers only S0 low power idle, network connected, and no hibernation.
+  It entered Modern Standby on its own twice while containers ran, for
+  20 minutes and then for hours, but nothing stopped: a detached
+  process logged every 30 s throughout, Windows' unbiased interrupt
+  time, which leaves out sleep, kept pace with its interrupt time, and a
+  guest's clock stayed where it was against the host's. No suspend or
+  resume notification came through
+  `PowerRegisterSuspendResumeNotification` either. A real suspend, and
+  so the resume hook, could not be tried here.
+- **Windows corrects its own clock, and a guest left alone does not
+  follow.** The Time Service stepped the host's clock back 1.286 s
+  against time.windows.com; iteration 10's guest, 0.2 s behind before,
+  was 1.1 s ahead from then on, while one syncing every minute stayed
+  within 50 ms.

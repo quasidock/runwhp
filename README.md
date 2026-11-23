@@ -11,7 +11,7 @@ HCS, and no administrator rights at run time.
 interactively or not, with a network, the host's files and volumes of their
 own, on a kernel of its own and on several processors. Containers are kept
 after they stop, can run in the background, and can be started again,
-stopped, signalled and run more commands in. A container has half the
+stopped, signalled, attached to and run more commands in. A container has half the
 machine's memory by default, but takes only what it uses, and gives back
 what it frees.
 
@@ -103,7 +103,7 @@ Containers that outlive the command, in the background:
 | `-d`, `--detach` | off | Run the container in the background and print its ID; see [Containers](#containers) |
 | `--rm` | off | Remove the container when it stops. Without it, the container is kept, with its writable layer, until `runwhp delete` |
 | `--name` | none | Name the container, as well as its 64-digit ID. Names are case-insensitive |
-| `-i`, `--interactive` | off | Pass stdin to the container. Without it, the container reads `/dev/null` |
+| `-i`, `--interactive` | off | Pass stdin to the container. Without it, the container reads `/dev/null`. In the background, without a file or pipe for stdin, the container's input is open to `attach` |
 | `-t`, `--tty` | off | Run the container on a pseudo-terminal of the console's size, with stderr merged into stdout. With `-i`, stdin must be a console, and keys go to the container raw. `-it` works as a shorthand |
 | `--entrypoint` | image's | Replace the entrypoint; `""` removes it. Also drops the image's command, as in Docker |
 | `-e`, `--env` | | `KEY=VALUE`, or `KEY` to copy it from the host; repeatable |
@@ -164,7 +164,9 @@ its ID, its name, or any unique prefix of its ID.
 | Command | |
 | --- | --- |
 | `create [run flags] IMAGE [COMMAND...]` | Make a container and boot it, but hold its process until `start`; prints its ID |
-| `start CONTAINER...` | Start a created container's process, or a stopped container again, in a new VM on the writable layer it left. A running one is left as it is |
+| `start [-a [-i]] CONTAINER...` | Start a created container's process, or a stopped container again, in a new VM on the writable layer it left. A running one is left as it is. `-a` attaches to it from its first byte of output, `-i` to its input too; see **Attaching** below |
+| `attach [--no-stdin] [--sig-proxy=false] [--detach-keys KEYS] CONTAINER` | Show a running container's output as it comes, and pass it input if it takes it; exit with its exit code, or 0 on detaching |
+| `wait CONTAINER...` | Wait for containers to stop, and print their exit codes |
 | `stop [-t SECONDS] CONTAINER...` | Send the image's stop signal, SIGTERM unless it names another, then SIGKILL after the timeout, 10 s by default |
 | `restart [-t SECONDS] CONTAINER...` | `stop`, then `start` |
 | `kill [-a] CONTAINER [SIGNAL]` | Send a signal, by name or number, to the container's process, or with `-a` to every process in it. The default is SIGTERM, as with runc; Docker's `kill` sends SIGKILL. A created container ends without starting |
@@ -202,8 +204,8 @@ the command that started it had for stdout and stderr, if they are files
 prints, stdout to stdout and stderr to stderr. Pipes are not handed over:
 capturing one, as `id=$(runwhp run -d ...)` does, would then wait for the
 container to end. With `-i`, its stdin is the caller's if that is a file
-or a pipe; a console is refused, since runwhp cannot attach one yet. With
-`-t` and no console, its terminal is 24 by 80. A log grows until the
+or a pipe, and otherwise open to `attach`. With `-t`, its terminal is 24 by
+80 until someone attaches. A log grows until the
 container is deleted. runwhp's own messages about a container in the
 background go to `runwhp.log` beside the log.
 
@@ -216,6 +218,29 @@ the store fails it. It binds the published ports again, failing if one is
 taken, and makes missing bind directories again, as `-v` did. runwhp's own
 kernel and `runwhp-init` are those of the runwhp that starts it. A created
 container holds its RAM, volumes and ports until it is started or deleted.
+
+**Attaching.** `runwhp attach` shows a running container's output from
+then on, wherever else it goes: its log, its files, or the console of the
+runwhp that runs it in the foreground. It exits with the container's exit
+code once it stops. A container in the background run with `-i` and no
+file or pipe for input takes the attached console's input: keys as they
+are pressed with `-t`, lines without. `run -d -it` keeps a shell for
+whoever attaches next, and `create -i` takes input once, so the first
+attached input to end, as `start -ai` with a file does, ends the
+container's. Ctrl+P Ctrl+Q, or `--detach-keys`, detach and leave it
+running; without `-t`, Ctrl+C sends it SIGINT. Several runwhps can attach
+at once, and the terminal takes the size of the last to change. A runwhp
+attached to a container run in the foreground gets its output only. The
+container's output never waits for an attached runwhp: one that falls
+4 MiB behind is cut off. `start -a` boots a stopped container, attaches,
+and only then starts its process, so its first output is not missed; it
+takes one container. `wait` prints how containers ended, once they have.
+
+```powershell
+.\out\runwhp.exe run -dit --name dev alpine:3.20 sh
+.\out\runwhp.exe attach dev       # Ctrl+P Ctrl+Q to leave it running
+.\out\runwhp.exe wait dev
+```
 
 **exec.** `runwhp exec` runs a command in a running container, with the
 container's environment, working directory and user unless `-e`, `-w` or
@@ -636,9 +661,19 @@ bzImage.
    at a time, so handing the process the ports themselves would break
    `/dev/stdout` and similar paths.
 8. The `control` port carries JSON lines both ways: signals, terminal sizes,
-   requests for statistics and the order to start from the host; from
-   init, when the container is ready, when the process has started, the
-   statistics asked for, and how the process ended. While the process
+   requests for statistics, the order to start and the host's time from
+   the host; from init, when the container is ready, when the process has
+   started, the statistics asked for, and how the process ended. The
+   kernel boots with the CMOS stub's whole seconds, so runwhp sends its
+   time as soon as init listens, every minute after that
+   (`RUNWHP_CLOCK_SYNC=SECONDS` changes it, and 0 turns it off), and as
+   Windows resumes from sleep; it reads the clock as the message leaves,
+   which then takes about 0.3 ms to arrive. Init steps the guest's clock
+   by more than 20 ms off, slews it within that, and leaves it within
+   1 ms. Init drops CAP_SYS_BOOT from everything it starts, and ignores
+   the signals that `reboot` and `halt` send it, so only init resets the
+   machine; the ACPI tables also offer a power-off, which stops the VM
+   as a reset does. While the process
    runs, init gives page cache back once the guest is idle, and the
    balloon hands the guest's free page reports to runwhp, which gives
    those chunks back to Windows. When the process
@@ -673,7 +708,7 @@ bzImage.
 | [`internal/disk`](internal/disk) | The files behind virtual disks: overlapped I/O from many goroutines, sparse files, freeing ranges, exclusive and delete-on-close opens |
 | [`internal/ext4`](internal/ext4) | Makes empty ext4 file systems as mke2fs would, and reads back whether one was left clean. Builds on any OS |
 | [`internal/volume`](internal/volume) | Named volumes in the store: names, making, listing and removing them |
-| [`internal/container`](internal/container) | Containers in the store: records, names, locks, state, logs, and the pipe of the runwhp running one |
+| [`internal/container`](internal/container) | Containers in the store: records, names, locks, state, logs, and the pipe of the runwhp running one, whose attach requests carry frames as logs hold them |
 | [`internal/hostfs`](internal/hostfs) | The host end of bind mounts: Windows files served as that file system, with WSL's metadata |
 | [`internal/image`](internal/image), [`internal/layer`](internal/layer) | Registry pulls, image records, layer conversion and cache |
 | [`internal/kernel`](internal/kernel) | The kernel artifact's format, the pinned build, and fetching it into the store |
@@ -705,7 +740,7 @@ container's supervisor, with no daemon.
 | Hypervisor | WHP from Go through `WinHvPlatform.dll`, no cgo | Done |
 | Device registers | Plain movs, all the guest uses, decoded by the VMM; `WinHvEmulation.dll` for anything else | Done |
 | Boot | Direct kernel boot (Linux 64-bit boot protocol), no firmware | Done |
-| Clock and timers | Hyper-V enlightenments supply TSC and APIC timer frequencies | Done |
+| Clock and timers | Hyper-V enlightenments supply TSC and APIC timer frequencies; init keeps the wall clock with the host's, which sends it its time | Done |
 | Interrupts | Hypervisor's local APIC plus an emulated 64-pin I/O APIC | Done, edge-triggered only |
 | Processors | One thread per vCPU; the guest starts the others through the hypervisor's local APIC; topology described in CPUID | Done, up to 64 |
 | Device discovery | Hardware-reduced ACPI with a generated DSDT | Done |
@@ -717,7 +752,7 @@ container's supervisor, with no daemon.
 | Host to guest | Console ports for the main process; a virtio socket device for further connections | Done: `runwhp exec` uses vsock |
 | Bind mounts and volumes | virtio-fs, with a FUSE server in Go serving Windows files and keeping Unix metadata as WSL does, and the writeback cache for delegated mounts; volumes as journaled ext4 disk images on virtio-blk | Done; a volume is used by one container at a time |
 | Networking | User-mode network stack in the VMM (gVisor netstack); published ports are loopback listeners | Done, IPv4 only, TCP ports only |
-| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | Done over runwhp's own images, plus `run`, `list`, `stats`, `stop`, `restart`, `rename` and `logs`; no OCI bundles |
+| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | Done over runwhp's own images, plus `run`, `list`, `stats`, `stop`, `restart`, `rename`, `logs`, `attach` and `wait`; no OCI bundles |
 | Kernel | Our own build with virtio drivers built in, shipped as a signed OCI artifact | Done: Linux 6.18 LTS on ghcr.io, pinned by digest rather than signed |
 
 ### Out of scope for now
