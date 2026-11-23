@@ -193,6 +193,10 @@ type Control struct {
 	// Stats, when not zero, asks init for the guest's statistics, which
 	// it sends back in an Event with GuestStats.Seq set to Stats.
 	Stats uint64 `json:"stats,omitempty"`
+	// Time, when not zero, is the host's wall clock as the message left
+	// it, in nanoseconds since the Unix epoch. Init brings the guest's
+	// clock to it: gradually when it is close, at once when not.
+	Time int64 `json:"time,omitempty"`
 }
 
 // Event is a message from init to the host.

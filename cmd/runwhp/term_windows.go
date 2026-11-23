@@ -190,25 +190,42 @@ func (r *consoleReader) decode(s []uint16) []byte {
 // JSON lines. The console reads it only once init has opened the port, so
 // send never blocks; it drops messages beyond a generous backlog.
 type controlQueue struct {
-	ch  chan []byte
+	ch  chan queuedControl
 	cur []byte
 }
 
-func newControlQueue() *controlQueue { return &controlQueue{ch: make(chan []byte, 64)} }
+type queuedControl struct {
+	m     guestspec.Control
+	stamp bool // set Time as the console takes it
+}
 
+func newControlQueue() *controlQueue { return &controlQueue{ch: make(chan queuedControl, 64)} }
+
+// Read is the console's: it takes one message at a time, so a time is read
+// from the clock just before the message goes to the guest, however long
+// it waited behind others.
 func (q *controlQueue) Read(p []byte) (int, error) {
 	if len(q.cur) == 0 {
-		q.cur = <-q.ch
+		item := <-q.ch
+		if item.stamp {
+			item.m.Time = time.Now().UnixNano()
+		}
+		line, _ := json.Marshal(item.m)
+		q.cur = append(line, '\n')
 	}
 	n := copy(p, q.cur)
 	q.cur = q.cur[n:]
 	return n, nil
 }
 
-func (q *controlQueue) send(m guestspec.Control) bool {
-	line, _ := json.Marshal(m)
+func (q *controlQueue) send(m guestspec.Control) bool { return q.put(queuedControl{m: m}) }
+
+// sendTime sends the host's time, taken as the console reads it.
+func (q *controlQueue) sendTime() bool { return q.put(queuedControl{stamp: true}) }
+
+func (q *controlQueue) put(item queuedControl) bool {
 	select {
-	case q.ch <- append(line, '\n'):
+	case q.ch <- item:
 		return true
 	default:
 		return false

@@ -289,6 +289,9 @@ func (c *controller) listen(port *os.File) {
 		if m.Rows > 0 && m.Cols > 0 {
 			c.resize(m.Rows, m.Cols)
 		}
+		if m.Time != 0 {
+			setClock(m.Time)
+		}
 		if m.Stats != 0 {
 			// Walking /proc takes a while; signals behind it should not wait.
 			go c.sendStats(m.Stats)

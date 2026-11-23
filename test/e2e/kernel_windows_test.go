@@ -72,16 +72,78 @@ echo ok
 	expect(t, r, "ok\n", 0)
 }
 
-// TestKernelClock checks that the guest's wall clock starts at the host's,
-// which the kernel reads from the VMM's CMOS stub.
-func TestKernelClock(t *testing.T) {
-	r := run(t, alpine, "date", "+%s")
-	guest, err := strconv.ParseInt(strings.TrimSpace(r.stdout), 10, 64)
-	if r.code != 0 || err != nil {
-		t.Fatalf("date: %q, exit %d, stderr %q", r.stdout, r.code, r.stderr)
+// guestClock reads the guest's wall clock, to the microsecond, from what
+// busybox's adjtimex prints. busybox's date has whole seconds only.
+func guestClock(t *testing.T, r result) time.Time {
+	t.Helper()
+	var sec, usec int64
+	var okSec, okUsec bool
+	for _, line := range strings.Split(r.stdout, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 2 {
+			continue
+		}
+		switch f[0] {
+		case "time.tv_sec:":
+			sec, _ = strconv.ParseInt(f[1], 10, 64)
+			okSec = true
+		case "time.tv_usec:":
+			usec, _ = strconv.ParseInt(f[1], 10, 64)
+			okUsec = true
+		}
 	}
-	if d := time.Now().Unix() - guest; d < -5 || d > 5 {
-		t.Errorf("guest clock is %d s off the host's", d)
+	if !okSec || !okUsec {
+		t.Fatalf("adjtimex: %+v", r)
+	}
+	return time.Unix(sec, usec*1000)
+}
+
+// TestKernelClock checks that the guest's wall clock is the host's, within
+// the time the message bringing it takes: the kernel boots with the CMOS
+// stub's whole seconds, and the host sends init its time as it starts.
+func TestKernelClock(t *testing.T) {
+	const slack = 50 * time.Millisecond
+	before := time.Now()
+	r := run(t, alpine, "adjtimex")
+	after := time.Now()
+	if guest := guestClock(t, r); guest.Before(before.Add(-slack)) || guest.After(after.Add(slack)) {
+		t.Errorf("guest clock %v, outside the run's %v to %v", guest.Format(time.StampMicro),
+			before.Format(time.StampMicro), after.Format(time.StampMicro))
+	}
+}
+
+// TestClockResync checks that the guest's clock is brought back to the
+// host's while the container runs, and is left alone when
+// RUNWHP_CLOCK_SYNC=0 turns that off.
+func TestClockResync(t *testing.T) {
+	offset := func(name string) time.Duration {
+		t.Helper()
+		before := time.Now()
+		r := execIn(t, name, "adjtimex")
+		after := time.Now()
+		return guestClock(t, r).Sub(before.Add(after.Sub(before) / 2))
+	}
+	t.Setenv("RUNWHP_CLOCK_SYNC", "1")
+	name := running(t)
+	if r := execIn(t, name, "date", "-s", "2020-01-01 00:00:00"); r.code != 0 {
+		t.Fatalf("date -s: %+v", r)
+	}
+	var d time.Duration
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(200 * time.Millisecond) {
+		if d = offset(name); d > -500*time.Millisecond && d < 500*time.Millisecond {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("guest clock still %v off the host's 5 s after it was set back", d)
+		}
+	}
+
+	t.Setenv("RUNWHP_CLOCK_SYNC", "0")
+	name = running(t)
+	execIn(t, name, "date", "-s", "2020-01-01 00:00:00")
+	time.Sleep(2 * time.Second)
+	if d := offset(name); d > -24*time.Hour {
+		t.Errorf("guest clock set back with syncing off was brought to %v off the host's", d)
 	}
 }
 

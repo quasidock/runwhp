@@ -106,6 +106,26 @@ func reclaimPolicy(logf func(string, ...any)) guestspec.Reclaim {
 	return r
 }
 
+// clockSync is how often the host sends the guest its time, besides once
+// as init starts listening and whenever Windows resumes from sleep.
+const clockSync = 60 * time.Second
+
+// clockPeriod is how often the guest's clock is set from the host's:
+// RUNWHP_CLOCK_SYNC, in seconds, overrides clockSync, and 0 turns setting
+// it off altogether, leaving the guest with the clock it booted with.
+func clockPeriod(logf func(string, ...any)) time.Duration {
+	v, ok := os.LookupEnv("RUNWHP_CLOCK_SYNC")
+	if !ok {
+		return clockSync
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		logf("RUNWHP_CLOCK_SYNC=%q is not a number of seconds; ignored", v)
+		return clockSync
+	}
+	return time.Duration(n) * time.Second
+}
+
 // detachedRows and detachedCols size the terminal of a container run with
 // -t but no console of runwhp's own.
 const detachedRows, detachedCols = 24, 80

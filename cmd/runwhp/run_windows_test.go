@@ -5,12 +5,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/quasidock/runwhp/internal/guestspec"
 	"github.com/quasidock/runwhp/internal/image"
@@ -251,6 +253,25 @@ func TestControlQueue(t *testing.T) {
 	}
 }
 
+// TestControlQueueTime checks that the time is taken when the console reads
+// the message, not when it was queued.
+func TestControlQueueTime(t *testing.T) {
+	q := newControlQueue()
+	q.sendTime()
+	time.Sleep(50 * time.Millisecond)
+	before := time.Now()
+	buf := make([]byte, 128)
+	n, _ := q.Read(buf)
+	after := time.Now()
+	var m guestspec.Control
+	if err := json.Unmarshal(buf[:n], &m); err != nil || buf[n-1] != '\n' {
+		t.Fatalf("read %q: %v", buf[:n], err)
+	}
+	if got := time.Unix(0, m.Time); got.Before(before.Truncate(time.Microsecond)) || got.After(after) {
+		t.Errorf("time %v, read between %v and %v", got, before, after)
+	}
+}
+
 // TestSignalProxyBeforeInit checks that a signal stops the VM at once while
 // init cannot take it yet.
 func TestSignalProxyBeforeInit(t *testing.T) {
@@ -337,6 +358,30 @@ func TestReclaimPolicy(t *testing.T) {
 		}
 		if r := reclaimPolicy(logf); r.IdleSeconds != c.idle || r.IntervalSeconds != c.interval {
 			t.Errorf("RUNWHP_RECLAIM_IDLE=%q: %+v", c.env, r)
+		}
+	}
+}
+
+func TestClockPeriod(t *testing.T) {
+	logf := func(string, ...any) {}
+	for _, c := range []struct {
+		env  string
+		set  bool
+		want time.Duration
+	}{
+		{set: false, want: time.Minute},
+		{env: "0", set: true, want: 0},
+		{env: "1", set: true, want: time.Second},
+		{env: "-3", set: true, want: time.Minute},
+		{env: "soon", set: true, want: time.Minute},
+	} {
+		if c.set {
+			t.Setenv("RUNWHP_CLOCK_SYNC", c.env)
+		} else {
+			os.Unsetenv("RUNWHP_CLOCK_SYNC")
+		}
+		if got := clockPeriod(logf); got != c.want {
+			t.Errorf("RUNWHP_CLOCK_SYNC=%q: %v, want %v", c.env, got, c.want)
 		}
 	}
 }

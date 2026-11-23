@@ -75,7 +75,51 @@ func supervise(root string, store *container.Store, rec *container.Container, ou
 		})
 	}
 	go s.serve()
+	go s.clockLoop(clockPeriod(proxy.logf))
 	return s, nil
+}
+
+// clockLoop keeps the guest's wall clock with the host's, for as long as
+// the container runs: the guest boots with the CMOS stub's whole seconds,
+// and nothing moves its clock on while the host sleeps. The time goes to
+// init as soon as it listens, every period, and as Windows resumes.
+func (s *supervisor) clockLoop(period time.Duration) {
+	if period <= 0 {
+		return
+	}
+	poll := time.NewTicker(5 * time.Millisecond)
+	for !s.proxy.listening() {
+		select {
+		case <-s.stopped:
+			poll.Stop()
+			return
+		case <-poll.C:
+		}
+	}
+	poll.Stop()
+	wake := make(chan struct{}, 1)
+	stopResume, err := onResume(func() {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	})
+	if err != nil {
+		s.proxy.logf("%v; the guest's clock follows the host's every %v only", err, period)
+	}
+	defer stopResume()
+	tick := time.NewTicker(period)
+	defer tick.Stop()
+	for {
+		s.proxy.queue.sendTime()
+		select {
+		case <-s.stopped:
+			return
+		case <-tick.C:
+		case <-wake:
+			s.proxy.logf("Windows resumed: setting the guest's clock")
+		}
+	}
 }
 
 // update changes the container's state and records it.
