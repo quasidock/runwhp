@@ -763,8 +763,8 @@ func (m *machine) stats() []string {
 		case *virtio.Balloon:
 			out = append(out, fmt.Sprintf("virtio %d: %s", i, d.Stats()))
 		case *virtio.Fs:
-			out = append(out, fmt.Sprintf("virtio %d: fs %q, %d requests, %d KiB from the guest, %d KiB to it",
-				i, d.Tag, d.Requests.Load(), d.BytesIn.Load()>>10, d.BytesOut.Load()>>10))
+			out = append(out, fmt.Sprintf("virtio %d: fs %q, %d requests (%d on the vCPU that sent them), %d KiB from the guest, %d KiB to it",
+				i, d.Tag, d.Requests.Load(), d.Inline.Load(), d.BytesIn.Load()>>10, d.BytesOut.Load()>>10))
 		}
 	}
 	return out

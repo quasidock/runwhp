@@ -58,6 +58,9 @@ type node struct {
 	// A link to a directory is not one: the guest resolves links itself,
 	// and the host must never follow one.
 	dir bool
+	// slow is set when the file's last stat said Windows may have to fetch
+	// its data before it can be opened or read.
+	slow bool
 }
 
 type nodeKey struct {
@@ -250,6 +253,7 @@ func (fs *FS) attachLocked(parent *node, name string, st *fileStat) *node {
 	k := nodeKey{parent.share, st.key}
 	if n := fs.byKey[k]; n != nil {
 		n.dir = st.isDir() && !st.isLink()
+		n.slow = st.recalls()
 		if n.parent == nil { // a share's root, seen through a link
 			return n
 		}
@@ -263,7 +267,8 @@ func (fs *FS) attachLocked(parent *node, name string, st *fileStat) *node {
 		n.name = name
 		return n
 	}
-	n := &node{id: fs.nextID, share: parent.share, parent: parent, name: name, key: st.key, dir: st.isDir() && !st.isLink()}
+	n := &node{id: fs.nextID, share: parent.share, parent: parent, name: name, key: st.key, dir: st.isDir() && !st.isLink(),
+		slow: st.recalls()}
 	fs.nextID++
 	parent.kids++
 	fs.nodes[n.id] = n
@@ -369,6 +374,9 @@ func (fs *FS) Getattr(c fuse.Context, id uint64) (fuse.Attr, error) {
 	if err != nil {
 		return fuse.Attr{}, errno(err)
 	}
+	fs.mu.Lock()
+	n.slow = st.recalls()
+	fs.mu.Unlock()
 	return fs.attr(&st), nil
 }
 
@@ -481,4 +489,14 @@ func (fs *FS) Statfs(c fuse.Context, id uint64) (fuse.Statfs, error) {
 	// Windows has no inode limit; report as many as there are blocks.
 	return fuse.Statfs{Blocks: total / bsize, Bfree: free / bsize, Bavail: avail / bsize,
 		Files: total / bsize, Ffree: free / bsize, Bsize: bsize, Frsize: bsize, Namelen: maxName}, nil
+}
+
+// Slow implements fuse.Slower: requests about a file Windows may have to
+// fetch from elsewhere before opening or reading it, as for a OneDrive
+// placeholder, may take seconds.
+func (fs *FS) Slow(id uint64) bool {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	n := fs.nodes[id]
+	return n != nil && n.slow
 }

@@ -648,3 +648,41 @@ func TestForget(t *testing.T) {
 	}
 	fs.Forget(12345, 1) // unknown nodes are ignored
 }
+
+// A file whose data Windows may have to fetch from elsewhere before it can
+// be opened or read is slow, from the stat that found it. Only the cloud
+// filter sets the recall attributes, but anyone may mark a file offline.
+func TestSlowFiles(t *testing.T) {
+	dir := testDir(t)
+	write(t, filepath.Join(dir, "cloud"), "data")
+	write(t, filepath.Join(dir, "local"), "data")
+	fs := newFS(t, Share{Path: dir, Target: "/s"})
+	local := walk(t, fs, "0/local")
+	if fs.Slow(local.Node) {
+		t.Error("an ordinary file is slow")
+	}
+	cloud := walk(t, fs, "0/cloud")
+	if fs.Slow(cloud.Node) {
+		t.Fatal("the file is slow before it is marked offline")
+	}
+	p, err := windows.UTF16PtrFromString(filepath.Join(dir, "cloud"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetFileAttributes(p, windows.FILE_ATTRIBUTE_OFFLINE); err != nil {
+		t.Fatal(err)
+	}
+	defer windows.SetFileAttributes(p, windows.FILE_ATTRIBUTE_NORMAL)
+	if _, err := fs.Getattr(ctx, cloud.Node); err != nil {
+		t.Fatal(err)
+	}
+	if !fs.Slow(cloud.Node) {
+		t.Error("a file marked offline is not slow after a getattr")
+	}
+	if !fs.Slow(walk(t, fs, "0/cloud").Node) {
+		t.Error("a file marked offline is not slow after a lookup")
+	}
+	if fs.Slow(12345) {
+		t.Error("an unknown node is slow")
+	}
+}

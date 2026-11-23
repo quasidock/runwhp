@@ -51,6 +51,14 @@ type FileSystem interface {
 	Setxattr(c Context, node uint64, name string, value []byte, flags uint32) error
 }
 
+// Slower is implemented by file systems some of whose files may take long
+// to reach, such as cloud files that Windows fetches from the network before
+// they can be opened or read.
+type Slower interface {
+	// Slow reports whether requests about node may take long.
+	Slow(node uint64) bool
+}
+
 // DefaultTimeout is how long the guest may cache names, attributes and the
 // absence of names, unless Server.Timeout says otherwise. Changes made on the
 // host show in the guest within this time.
@@ -136,6 +144,18 @@ func (s *Server) Serve(req []byte, reply [][]byte) uint32 {
 		s.logf("fuse: %s request too short", opName(op))
 	}
 	return s.reply(reply, unique, out, err, op)
+}
+
+// Inline reports whether req may be served on the vCPU that sent it, as
+// virtio.InlineHandler asks: unless its node, the file or the directory it
+// names, may be slow to reach, which the file system says if it implements
+// Slower.
+func (s *Server) Inline(req []byte) bool {
+	sl, ok := s.FS.(Slower)
+	if !ok || len(req) < inHeaderLen {
+		return true
+	}
+	return !sl.Slow(le.Uint64(req[16:])) // fuse_in_header's nodeid
 }
 
 func (s *Server) handle(c Context, op uint32, node uint64, r *reader, room int) ([]byte, error) {

@@ -25,6 +25,13 @@ type FsHandler interface {
 	Serve(req []byte, reply [][]byte) uint32
 }
 
+// InlineHandler is implemented by handlers that know which requests may take
+// long. Inline reports whether req may be served on the vCPU that sent it;
+// those it refuses go to a worker.
+type InlineHandler interface {
+	Inline(req []byte) bool
+}
+
 // Fs is a virtio-fs device with one request queue. It serves requests on
 // goroutines of its own, so the vCPU never waits for the host's file system,
 // and requests complete in whatever order they finish.
@@ -35,8 +42,9 @@ type Fs struct {
 	Workers int
 
 	// Requests counts requests, BytesIn the bytes they carried from the guest
-	// and BytesOut the bytes of their replies.
-	Requests, BytesIn, BytesOut atomic.Uint64
+	// and BytesOut the bytes of their replies, and Inline those served on the
+	// vCPU that sent them.
+	Requests, BytesIn, BytesOut, Inline atomic.Uint64
 
 	once     sync.Once
 	work     chan fsChain
@@ -86,11 +94,60 @@ func (f *Fs) init() {
 	})
 }
 
-// Notify hands every chain the driver made available to the workers.
+// Notify hands every chain the driver made available to the workers. The
+// transport calls NotifyDeferred instead; Notify is there for the Device
+// interface.
 func (f *Fs) Notify(t *Transport, qi int) {
+	for _, ch := range f.take(t, qi) {
+		f.dispatch(ch)
+	}
+}
+
+// NotifyDeferred takes every chain the driver made available. The vCPU that
+// kicked serves the first itself, once the transport's lock is released,
+// and the workers serve the rest, as Blk does: handing a request to a worker
+// leaves the vCPU halted until the worker's interrupt wakes it, which costs
+// more than most requests take. A request the handler says may take long,
+// such as one that would have Windows fetch a file from the network, goes to
+// a worker all the same, so as not to hold up the vCPU.
+func (f *Fs) NotifyDeferred(t *Transport, qi int) func() {
+	chains := f.take(t, qi)
+	first := -1
+	for i, ch := range chains {
+		if first < 0 && f.inline(ch.req) {
+			first = i
+			continue
+		}
+		f.dispatch(ch)
+	}
+	if first < 0 {
+		return nil
+	}
+	ch := chains[first]
+	f.inflight.Add(1)
+	return func() {
+		f.Inline.Add(1)
+		f.serve(ch)
+	}
+}
+
+// inline reports whether a request may be served on the vCPU.
+func (f *Fs) inline(req []byte) bool {
+	h, ok := f.Handler.(InlineHandler)
+	return !ok || h.Inline(req)
+}
+
+// take pops every chain the driver made available and returns those that
+// need serving, answering malformed ones at once. The transport's lock is
+// held.
+func (f *Fs) take(t *Transport, qi int) []fsChain {
 	f.init()
 	q := t.Queue(qi)
+	if q == nil {
+		return nil
+	}
 	bad := false
+	var chains []fsChain
 	for {
 		c, ok, err := q.Pop(t.Memory())
 		if !ok {
@@ -116,30 +173,40 @@ func (f *Fs) Notify(t *Transport, qi int) {
 				ch.req = append(ch.req, b.Data...)
 			}
 		}
-		f.inflight.Add(1)
-		f.work <- ch
+		chains = append(chains, ch)
 	}
 	if bad {
 		t.Interrupt(qi)
 	}
+	return chains
+}
+
+func (f *Fs) dispatch(ch fsChain) {
+	f.inflight.Add(1)
+	f.work <- ch
 }
 
 func (f *Fs) worker() {
 	for {
 		select {
 		case ch := <-f.work:
-			var written uint32
-			if f.Handler != nil {
-				written = f.Handler.Serve(ch.req, ch.reply)
-			}
-			f.Requests.Add(1)
-			f.BytesIn.Add(uint64(len(ch.req)))
-			f.BytesOut.Add(uint64(written))
-			f.complete(ch, written)
+			f.serve(ch)
 		case <-f.stop:
 			return
 		}
 	}
+}
+
+// serve handles a request counted in flight and returns it to the driver.
+func (f *Fs) serve(ch fsChain) {
+	var written uint32
+	if f.Handler != nil {
+		written = f.Handler.Serve(ch.req, ch.reply)
+	}
+	f.Requests.Add(1)
+	f.BytesIn.Add(uint64(len(ch.req)))
+	f.BytesOut.Add(uint64(written))
+	f.complete(ch, written)
 }
 
 func (f *Fs) complete(ch fsChain, written uint32) {

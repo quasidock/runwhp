@@ -157,6 +157,21 @@ func validID(id uint64) bool { return id != 0 && id != ^uint64(0) }
 
 func (s *fileStat) isDir() bool { return s.attrs&windows.FILE_ATTRIBUTE_DIRECTORY != 0 }
 
+// Attributes of files whose data Windows may have to fetch first, from the
+// network for a cloud file such as a OneDrive placeholder, when they are
+// opened or read.
+const (
+	attrOffline            = 0x1000
+	attrRecallOnOpen       = 0x40000
+	attrRecallOnDataAccess = 0x400000
+)
+
+// recalls reports whether opening or reading the file may have to wait for
+// Windows to fetch its data.
+func (s *fileStat) recalls() bool {
+	return s.attrs&(attrOffline|attrRecallOnOpen|attrRecallOnDataAccess) != 0
+}
+
 // isLink reports whether the guest sees the file as a symlink: a WSL
 // symlink, or a Windows symlink or junction. Other reparse points, such as
 // cloud files, are ordinary files to the guest.

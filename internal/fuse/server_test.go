@@ -352,3 +352,31 @@ func TestScatter(t *testing.T) {
 		t.Errorf("%q", dst)
 	}
 }
+
+// slowFS is a fakeFS some of whose nodes are slow.
+type slowFS struct {
+	fakeFS
+	slow map[uint64]bool
+}
+
+func (f *slowFS) Slow(node uint64) bool { return f.slow[node] }
+
+func TestInline(t *testing.T) {
+	s := &Server{FS: &fakeFS{}}
+	if !s.Inline(request(opRead, 5, uint64(7), uint64(0), uint32(4096))) {
+		t.Error("a file system that never says a node is slow had a request refused")
+	}
+	s = &Server{FS: &slowFS{slow: map[uint64]bool{5: true}}}
+	if s.Inline(request(opRead, 5, uint64(7), uint64(0), uint32(4096))) {
+		t.Error("a read of a slow node may be served on the vCPU")
+	}
+	if s.Inline(request(opLookup, 5, "child")) {
+		t.Error("a lookup in a slow directory may be served on the vCPU")
+	}
+	if !s.Inline(request(opGetattr, 6)) {
+		t.Error("a request about a node that is not slow was refused")
+	}
+	if !s.Inline([]byte{1, 2, 3}) {
+		t.Error("a request too short to name a node was refused; Serve answers those")
+	}
+}

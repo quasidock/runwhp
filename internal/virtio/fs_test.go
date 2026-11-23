@@ -71,7 +71,8 @@ func TestFsRequest(t *testing.T) {
 	}
 }
 
-// A slow request does not hold up a later one.
+// A slow request does not hold up a later one. The vCPU that kicks serves
+// the first request itself, and a worker the second.
 func TestFsOutOfOrder(t *testing.T) {
 	release := make(chan struct{})
 	f := &Fs{Tag: "t", Handler: fsHandlerFunc(func(req []byte, reply [][]byte) uint32 {
@@ -85,13 +86,78 @@ func TestFsOutOfOrder(t *testing.T) {
 	d.mem[a], d.mem[b] = 's', 'f'
 	slow := d.add(fsRequestQueue, buf{a, 1, false})
 	fast := d.add(fsRequestQueue, buf{b, 1, false})
-	d.kick(fsRequestQueue)
+	kicked := make(chan struct{})
+	go func() {
+		d.kick(fsRequestQueue)
+		close(kicked)
+	}()
 	if used := d.collectN(fsRequestQueue, 1); used[0].head != fast {
 		t.Fatalf("first completion is head %d, want the fast request %d", used[0].head, fast)
 	}
+	select {
+	case <-kicked:
+		t.Fatal("the kick returned before the first request, which it serves, was done")
+	default:
+	}
 	close(release)
+	<-kicked
 	if used := d.collectN(fsRequestQueue, 1); used[0].head != slow {
 		t.Fatalf("second completion is head %d, want %d", used[0].head, slow)
+	}
+	if f.Inline.Load() != 1 {
+		t.Errorf("%d requests served on the kicking goroutine, want 1", f.Inline.Load())
+	}
+}
+
+// inlineFunc is an fsHandlerFunc that also says which requests may be
+// served on the vCPU.
+type inlineFunc struct {
+	fsHandlerFunc
+	inline func(req []byte) bool
+}
+
+func (h inlineFunc) Inline(req []byte) bool { return h.inline(req) }
+
+// The kick serves the first request before it returns, unless the handler
+// says the request may take long.
+func TestFsInline(t *testing.T) {
+	release := make(chan struct{})
+	h := inlineFunc{
+		fsHandlerFunc: func(req []byte, reply [][]byte) uint32 {
+			if req[0] == 'w' {
+				<-release
+			}
+			return 0
+		},
+		inline: func(req []byte) bool { return req[0] != 'w' },
+	}
+	f := &Fs{Tag: "t", Handler: h}
+	d := newDriver(t, f)
+	a := d.alloc(1)
+	d.mem[a] = 'q'
+	quick := d.add(fsRequestQueue, buf{a, 1, false})
+	d.kick(fsRequestQueue)
+	if used := d.collect(fsRequestQueue); len(used) != 1 || used[0].head != quick {
+		t.Fatalf("after the kick returned, used = %+v; want the request served by then", used)
+	}
+
+	// A request the handler refuses goes to a worker: the kick returns
+	// while it is still being served, and the next one in the batch is
+	// served by the kick instead.
+	b, c := d.alloc(1), d.alloc(1)
+	d.mem[b], d.mem[c] = 'w', 'q'
+	slow := d.add(fsRequestQueue, buf{b, 1, false})
+	next := d.add(fsRequestQueue, buf{c, 1, false})
+	d.kick(fsRequestQueue)
+	if used := d.collect(fsRequestQueue); len(used) != 1 || used[0].head != next {
+		t.Fatalf("after the second kick, used = %+v; want only head %d", used, next)
+	}
+	close(release)
+	if used := d.collectN(fsRequestQueue, 1); used[0].head != slow {
+		t.Fatalf("then head %d, want %d", used[0].head, slow)
+	}
+	if f.Inline.Load() != 2 || f.Requests.Load() != 3 {
+		t.Errorf("inline %d of %d requests, want 2 of 3", f.Inline.Load(), f.Requests.Load())
 	}
 }
 
@@ -125,52 +191,70 @@ func TestFsHiprio(t *testing.T) {
 // Requests still being served when the driver resets the device are not
 // returned to the new driver.
 func TestFsResetDropsInflight(t *testing.T) {
-	release := make(chan struct{})
-	served := make(chan struct{}, 1)
-	f := &Fs{Tag: "t", Handler: fsHandlerFunc(func(req []byte, reply [][]byte) uint32 {
-		<-release
-		served <- struct{}{}
-		return 0
-	})}
-	d := newDriver(t, f)
-	a := d.alloc(1)
-	d.add(fsRequestQueue, buf{a, 1, false})
-	d.kick(fsRequestQueue)
-	d.tr.Write(regStatus, 4, 0) // reset
-	for i := 0; i < f.NumQueues(); i++ {
-		d.setupQueue(i, 16)
-	}
-	close(release)
-	<-served
-	if !f.Drain(context.Background()) {
-		t.Fatal("Drain reported busy")
-	}
-	if used := d.collect(fsRequestQueue); len(used) != 0 {
-		t.Errorf("a request from before the reset was returned: %+v", used)
+	for _, inline := range []bool{true, false} {
+		release := make(chan struct{})
+		started, served := make(chan struct{}, 1), make(chan struct{}, 1)
+		h := inlineFunc{
+			fsHandlerFunc: func(req []byte, reply [][]byte) uint32 {
+				started <- struct{}{}
+				<-release
+				served <- struct{}{}
+				return 0
+			},
+			inline: func([]byte) bool { return inline },
+		}
+		f := &Fs{Tag: "t", Handler: h}
+		d := newDriver(t, f)
+		a := d.alloc(1)
+		d.add(fsRequestQueue, buf{a, 1, false})
+		go d.kick(fsRequestQueue)
+		<-started
+		d.tr.Write(regStatus, 4, 0) // reset
+		for i := 0; i < f.NumQueues(); i++ {
+			d.setupQueue(i, 16)
+		}
+		close(release)
+		<-served
+		if !f.Drain(context.Background()) {
+			t.Fatalf("inline %v: Drain reported busy", inline)
+		}
+		if used := d.collect(fsRequestQueue); len(used) != 0 {
+			t.Errorf("inline %v: a request from before the reset was returned: %+v", inline, used)
+		}
 	}
 }
 
+// Drain waits for requests in progress, whether a worker or the vCPU that
+// sent them serves them.
 func TestFsDrain(t *testing.T) {
-	release := make(chan struct{})
-	f := &Fs{Tag: "t", Handler: fsHandlerFunc(func(req []byte, reply [][]byte) uint32 {
-		<-release
-		return 0
-	})}
-	d := newDriver(t, f)
-	a := d.alloc(1)
-	d.add(fsRequestQueue, buf{a, 1, false})
-	d.kick(fsRequestQueue)
+	for _, inline := range []bool{true, false} {
+		release, started := make(chan struct{}), make(chan struct{}, 1)
+		h := inlineFunc{
+			fsHandlerFunc: func(req []byte, reply [][]byte) uint32 {
+				started <- struct{}{}
+				<-release
+				return 0
+			},
+			inline: func([]byte) bool { return inline },
+		}
+		f := &Fs{Tag: "t", Handler: h}
+		d := newDriver(t, f)
+		a := d.alloc(1)
+		d.add(fsRequestQueue, buf{a, 1, false})
+		go d.kick(fsRequestQueue)
+		<-started
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	if f.Drain(ctx) {
-		t.Fatal("Drain reported idle with a request in progress")
-	}
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		close(release)
-	}()
-	if !f.Drain(context.Background()) {
-		t.Fatal("Drain reported busy after the request finished")
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		if f.Drain(ctx) {
+			t.Fatalf("inline %v: Drain reported idle with a request in progress", inline)
+		}
+		cancel()
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			close(release)
+		}()
+		if !f.Drain(context.Background()) {
+			t.Fatalf("inline %v: Drain reported busy after the request finished", inline)
+		}
 	}
 }
