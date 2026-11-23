@@ -83,9 +83,15 @@ func (s *consoleState) restore() {
 }
 
 // watchSize sends the console's size to the guest whenever it changes, until
-// done is closed. Windows reports no resize to a program reading VT input,
-// so this polls, as the Docker CLI does.
+// done is closed.
 func watchSize(done <-chan struct{}, rows, cols uint16, q *controlQueue) {
+	followSize(done, rows, cols, func(m guestspec.Control) { q.send(m) })
+}
+
+// followSize sends the console's size whenever it changes from rows by
+// cols, until done is closed. Windows reports no resize to a program
+// reading VT input, so this polls, as the Docker CLI does.
+func followSize(done <-chan struct{}, rows, cols uint16, send func(guestspec.Control)) {
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
 	for {
@@ -94,9 +100,9 @@ func watchSize(done <-chan struct{}, rows, cols uint16, q *controlQueue) {
 			return
 		case <-tick.C:
 			r, c, ok := terminalSize(os.Stdout)
-			if ok && (r != rows || c != cols) {
+			if ok && r > 0 && (r != rows || c != cols) {
 				rows, cols = r, c
-				q.send(guestspec.Control{Rows: r, Cols: c})
+				send(guestspec.Control{Rows: r, Cols: c})
 			}
 		}
 	}

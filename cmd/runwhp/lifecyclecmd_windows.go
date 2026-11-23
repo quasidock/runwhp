@@ -45,7 +45,8 @@ The container runs in a runwhp process of its own, which outlives this
 one and the terminal. Its output goes to the files this command's stdout
 and stderr are redirected to, if they are files, and otherwise to its
 log, which runwhp logs shows. With -i, its input is this command's, if
-that is a file or a pipe.
+that is a file or a pipe; otherwise it comes from runwhp start -ai or
+runwhp attach, and ends when the first of them ends it.
 `
 
 func cmdCreate(args []string) int {
@@ -66,7 +67,7 @@ func cmdCreate(args []string) int {
 	fs.Visit(func(f *flag.Flag) { entrypointSet = entrypointSet || f.Name == "entrypoint" })
 	ctx, stop := interruptible()
 	defer stop()
-	rec, code, err := createDetached(ctx, &o, entrypointSet, fs.Args())
+	rec, code, err := createDetached(ctx, &o, entrypointSet, fs.Args(), true)
 	if err != nil {
 		errorf("%v", err)
 		return code
@@ -76,12 +77,11 @@ func cmdCreate(args []string) int {
 }
 
 // createDetached makes a container and has a background runwhp boot it,
-// up to the point of starting its process.
-func createDetached(ctx context.Context, o *runOptions, entrypointSet bool, args []string) (*container.Container, int, error) {
+// up to the point of starting its process. With -i and no file or pipe for
+// input, the container's input is open to attached runwhps: for create,
+// until the first of them ends its own, as docker create -i does.
+func createDetached(ctx context.Context, o *runOptions, entrypointSet bool, args []string, create bool) (*container.Container, int, error) {
 	const fail = guestspec.ExitRuntime
-	if o.interactive && classify(os.Stdin) == handleConsole {
-		return nil, fail, errors.New("-i takes a file or a pipe for a container in the background; runwhp cannot attach a console to one")
-	}
 	root, err := storeRoot()
 	if err != nil {
 		return nil, fail, err
@@ -100,12 +100,13 @@ func createDetached(ctx context.Context, o *runOptions, entrypointSet bool, args
 		return nil, fail, err
 	}
 	cfg.AutoRemove = o.rm
+	cfg.StdinOnce = create && cfg.Stdin
 	store := container.Open(root)
 	rec, err := store.Create(cfg, o.name)
 	if err != nil {
 		return nil, fail, err
 	}
-	rep, err := spawnSupervisor(ctx, root, rec, true)
+	rep, err := spawnSupervisor(ctx, root, rec, true, true)
 	if err != nil {
 		if ctx.Err() != nil {
 			store.Remove(rec)
@@ -124,7 +125,7 @@ func createDetached(ctx context.Context, o *runOptions, entrypointSet bool, args
 func runDetached(o *runOptions, entrypointSet bool, args []string) int {
 	ctx, stop := interruptible()
 	defer stop()
-	rec, code, err := createDetached(ctx, o, entrypointSet, args)
+	rec, code, err := createDetached(ctx, o, entrypointSet, args, false)
 	if err != nil {
 		errorf("%v", err)
 		return code
@@ -160,17 +161,34 @@ func printConsole(lines []string) {
 	(&ring{lines: lines}).print(os.Stderr)
 }
 
-const startUsage = `Usage: runwhp start CONTAINER...
+const startUsage = `Usage: runwhp start [-a [-i]] CONTAINER...
 
 Start containers: a created one's process, or a stopped one again, in a
 new VM on the writable layer it left. A container that is running is left
 as it is. Its output goes as for runwhp create.
+
+  -a, --attach            attach to the container's output, from its first
+                          byte, as runwhp attach does, and exit with its exit
+                          code; one container only
+  -i, --interactive       with -a, attach its input as well
+      --detach-keys KEYS  with -a, the keys that detach (default ctrl-p,ctrl-q)
 `
 
 func cmdStart(args []string, stdout io.Writer) int {
 	fs := newFlags("start", startUsage)
+	var attach, interactive bool
+	var keys string
+	fs.BoolVar(&attach, "a", false, "")
+	fs.BoolVar(&attach, "attach", false, "")
+	fs.BoolVar(&interactive, "i", false, "")
+	fs.BoolVar(&interactive, "interactive", false, "")
+	fs.StringVar(&keys, "detach-keys", defaultDetachKeys, "")
 	if fs.Parse(args) != nil || fs.NArg() == 0 {
 		fs.Usage()
+		return 2
+	}
+	if attach && fs.NArg() > 1 {
+		errorf("start -a attaches to one container at a time")
 		return 2
 	}
 	store, ok := openContainers()
@@ -178,6 +196,20 @@ func cmdStart(args []string, stdout io.Writer) int {
 		return 1
 	}
 	ctx, stop := interruptible()
+	if attach {
+		o := attachOptions{noStdin: !interactive, sigProxy: true}
+		var err error
+		if o.detachKeys, err = parseDetachKeys(keys); err != nil {
+			stop()
+			errorf("%v", err)
+			return 2
+		}
+		code, err := startAttached(ctx, stop, store, fs.Arg(0), o)
+		if err != nil {
+			errorf("%v", err)
+		}
+		return code
+	}
 	defer stop()
 	code := 0
 	for _, ref := range fs.Args() {
@@ -216,7 +248,7 @@ func startContainer(ctx context.Context, store *container.Store, ref string) err
 		if _, err := resolveKernel(ctx, root, c.Config.Kernel, image.PullMissing); err != nil {
 			return err
 		}
-		if rep, err = spawnSupervisor(ctx, root, c, false); err != nil {
+		if rep, err = spawnSupervisor(ctx, root, c, false, true); err != nil {
 			return err
 		}
 		if errors.Is(errFromReply(rep), container.ErrRunning) {
@@ -228,6 +260,60 @@ func startContainer(ctx context.Context, store *container.Store, ref string) err
 		return fmt.Errorf("container %s: %s", c.Short(), rep.Error)
 	}
 	return nil
+}
+
+// startAttached is start -a: it boots a stopped container to wait for its
+// start, attaches to it, and only then starts its process, so that none of
+// its output is missed. A created container is attached to and started; a
+// running one, attached to. done gives up ctx's Ctrl+C handling before the
+// attach takes Ctrl+C over.
+func startAttached(ctx context.Context, done func(), store *container.Store, ref string, o attachOptions) (int, error) {
+	const fail = 1
+	defer done()
+	c, err := store.Resolve(ref)
+	if err != nil {
+		return fail, err
+	}
+	root, _ := storeRoot()
+	start := func() error {
+		rep, err := container.Ask(context.Background(), root, c.ID, container.Request{Op: container.OpStart})
+		if err != nil {
+			return fmt.Errorf("starting container %s: %w", c.Short(), err)
+		}
+		if !rep.OK && !strings.HasPrefix(rep.Error, "the container exited with") {
+			// The attach goes on, to report how the container ended.
+			printConsole(rep.Console)
+			errorf("container %s: %s", c.Short(), rep.Error)
+		}
+		return nil
+	}
+	switch c.State.Status {
+	case container.Running:
+		start = nil
+	case container.Creating:
+		return fail, fmt.Errorf("container %s is still being created", c.Short())
+	case container.Stopped:
+		if c.Config.AutoRemove {
+			return fail, fmt.Errorf("container %s was run with --rm, and cannot be started again", c.Short())
+		}
+		if _, err := resolveKernel(ctx, root, c.Config.Kernel, image.PullMissing); err != nil {
+			return fail, err
+		}
+		// Its input comes through the attach, not from this process.
+		rep, err := spawnSupervisor(ctx, root, c, true, false)
+		if err != nil {
+			return fail, err
+		}
+		switch {
+		case errors.Is(errFromReply(rep), container.ErrRunning):
+			start = nil // another runwhp started it first
+		case !rep.OK:
+			printConsole(rep.Console)
+			return replyCode(rep), fmt.Errorf("container %s: %s", c.Short(), rep.Error)
+		}
+	}
+	done()
+	return attachContainer(store, c, o, start)
 }
 
 const waitUsage = `Usage: runwhp wait CONTAINER...

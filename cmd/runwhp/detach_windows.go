@@ -72,10 +72,10 @@ var breakawayWarning sync.Once
 // spawnSupervisor starts a runwhp to run the container in the background,
 // and waits until it reports the container created (with waitStart) or
 // running. Its output goes to this process's stdout and stderr if they are
-// files, and otherwise to the container's log; its stdin, if it has one,
-// is this process's, if that is a file or a pipe. If ctx ends first, the
-// runwhp is killed.
-func spawnSupervisor(ctx context.Context, root string, rec *container.Container, waitStart bool) (container.Reply, error) {
+// files, and otherwise to the container's log. With withStdin, its stdin,
+// if it has one, is this process's, if that is a file or a pipe; otherwise
+// it is open to attached runwhps. If ctx ends first, the runwhp is killed.
+func spawnSupervisor(ctx context.Context, root string, rec *container.Container, waitStart, withStdin bool) (container.Reply, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return container.Reply{}, err
@@ -104,7 +104,7 @@ func spawnSupervisor(ctx context.Context, root string, rec *container.Container,
 	if classify(os.Stderr) == handleFile {
 		cmd.Stderr = os.Stderr
 	}
-	if k := classify(os.Stdin); rec.Config.Stdin && (k == handleFile || k == handlePipe) {
+	if k := classify(os.Stdin); withStdin && rec.Config.Stdin && (k == handleFile || k == handlePipe) {
 		cmd.Stdin = os.Stdin
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -246,6 +246,8 @@ func cmdSupervise(args []string) int {
 		return 1
 	}
 	sup.files = files
+	// With -i and no file or pipe for input, the input is attached runwhps'.
+	sup.streams(&bio, cfg.Stdin && bio.stdin == nil, cfg.StdinOnce)
 	hooks := sup.hooks(waitStart)
 	if waitStart {
 		hooks.ready = func() {

@@ -248,7 +248,9 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 		return fail, err
 	}
 	logf("%4d ms  container %s recorded: %d layers", time.Since(start).Milliseconds(), rec.Short(), max(len(cfg.Layers), len(cfg.LayerFiles)))
-	code, err := bootContainer(ctx, root, rec, layer, policy, proxy, foregroundIO(cfg), sup.hooks(false), logf, start)
+	bio := foregroundIO(cfg)
+	sup.streams(&bio, false, false) // its input stays this console's
+	code, err := bootContainer(ctx, root, rec, layer, policy, proxy, bio, sup.hooks(false), logf, start)
 	layer.close()
 	sup.finish(code, err)
 	return code, err

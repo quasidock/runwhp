@@ -38,7 +38,11 @@ type Config struct {
 	User       string   `json:"user,omitempty"`
 	StopSignal string   `json:"stopSignal,omitempty"` // the image's STOPSIGNAL
 	Stdin      bool     `json:"stdin,omitempty"`
-	TTY        bool     `json:"tty,omitempty"`
+	// StdinOnce, for a container in the background whose input is open to
+	// attached runwhps, ends that input when the first of them ends its
+	// own, as docker create -i does. Without it, the input stays open.
+	StdinOnce bool `json:"stdinOnce,omitempty"`
+	TTY       bool `json:"tty,omitempty"`
 
 	Hostname string `json:"hostname"`
 	// Hosts are extra /etc/hosts lines, "ADDRESS NAME".

@@ -33,6 +33,30 @@ const (
 	OpConnect = "connect"
 	// OpStats replies with what the running container uses, in Stats.
 	OpStats = "stats"
+	// OpAttach attaches to the container's standard streams; after the
+	// reply, frames go both ways, as Attach* describes.
+	OpAttach = "attach"
+)
+
+// After the reply to OpAttach, both ends send frames in the log's framing
+// (see AppendFrame): the container's runwhp sends output as it comes, as
+// AttachStdout and AttachStderr, and AttachExit once the container has
+// stopped, last; the attached runwhp sends AttachStdin, which goes to the
+// container's input if the reply's Stdin says it may, and AttachControl.
+// An attached runwhp that closes its connection detaches.
+const (
+	// AttachStdin carries input. An empty one ends it, for a container
+	// that takes input once (Config.StdinOnce); others ignore that.
+	AttachStdin = 0
+	// AttachStdout and AttachStderr carry output. With a terminal, all of
+	// it comes as AttachStdout.
+	AttachStdout = Stdout
+	AttachStderr = Stderr
+	// AttachExit holds a Reply, as JSON: how the container ended.
+	AttachExit = 3
+	// AttachControl holds a guestspec.Control, as JSON, of which only a
+	// terminal size and a signal are taken.
+	AttachControl = 4
 )
 
 // Request is a request to a container's runwhp.
@@ -43,6 +67,8 @@ type Request struct {
 	All     bool    `json:"all,omitempty"`
 	Timeout float64 `json:"timeout,omitempty"` // seconds
 	Port    uint32  `json:"port,omitempty"`
+	// Stdin asks OpAttach to pass on the attached runwhp's input.
+	Stdin bool `json:"stdin,omitempty"`
 }
 
 // Reply is a container's runwhp's answer to a Request.
@@ -57,6 +83,10 @@ type Reply struct {
 	Console []string `json:"console,omitempty"`
 	// Stats answers OpStats.
 	Stats *Stats `json:"stats,omitempty"`
+	// Stdin, in answer to OpAttach, says that the container's input is
+	// open to attached runwhps: it was run in the background with -i and
+	// neither a file nor a pipe for input.
+	Stdin bool `json:"stdin,omitempty"`
 }
 
 // Stats is what a running container uses, as its runwhp sees it.

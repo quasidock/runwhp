@@ -218,20 +218,7 @@ func runExec(root string, c *container.Container, ex *guestspec.Exec) (int, erro
 		defer term.restore()
 		done := make(chan struct{})
 		defer close(done)
-		go func() {
-			rows, cols := ex.Rows, ex.Cols
-			for {
-				select {
-				case <-done:
-					return
-				case <-time.After(250 * time.Millisecond):
-				}
-				if r, c, ok := terminalSize(os.Stdout); ok && r > 0 && (r != rows || c != cols) {
-					rows, cols = r, c
-					send(guestspec.Control{Rows: r, Cols: c})
-				}
-			}
-		}()
+		go followSize(done, ex.Rows, ex.Cols, send)
 	}
 	sigs := make(chan os.Signal, 2)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)

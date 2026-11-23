@@ -52,6 +52,24 @@ type supervisor struct {
 	// its directory would keep that from being renamed away.
 	files []io.Closer
 	vm    *vmHandles // what reaches into the VM, once it has one
+	// hub passes the container's output on to attached runwhps, and stdin,
+	// if set, is its input, open to them.
+	hub   *outputHub
+	stdin *attachStdin
+}
+
+// streams has the container's output pass through the hub to attached
+// runwhps, and, with openStdin, makes its input theirs: stdinOnce ends it
+// with the first of them to end its own.
+func (s *supervisor) streams(bio *bootIO, openStdin, stdinOnce bool) {
+	bio.stdout = s.hub.wrap(container.Stdout, bio.stdout)
+	bio.stderr = s.hub.wrap(container.Stderr, bio.stderr)
+	if openStdin {
+		s.mu.Lock()
+		s.stdin = newAttachStdin(stdinOnce)
+		s.mu.Unlock()
+		bio.stdin = s.stdin
+	}
 }
 
 // supervise takes a container's lock, records that this process is
@@ -63,7 +81,7 @@ func supervise(root string, store *container.Store, rec *container.Container, ou
 		return nil, err
 	}
 	s := &supervisor{root: root, store: store, rec: rec, lock: lock, proxy: proxy, state: rec.State,
-		ready: make(chan struct{}), running: make(chan struct{}), stopped: make(chan struct{})}
+		ready: make(chan struct{}), running: make(chan struct{}), stopped: make(chan struct{}), hub: newOutputHub()}
 	if s.ln, err = container.Listen(root, rec.ID); err != nil {
 		lock.Close()
 		return nil, fmt.Errorf("serving container %s's pipe: %w", rec.Short(), err)
@@ -219,6 +237,9 @@ func (s *supervisor) finish(code int, err error) {
 		s.persist()
 	}
 	close(s.stopped)
+	if s.stdin != nil {
+		s.stdin.close() // for attached runwhps still sending input
+	}
 	s.ln.Close()
 	// Let the answers to stop and wait requests go out.
 	done := make(chan struct{})
@@ -388,6 +409,9 @@ func (s *supervisor) handle(c net.Conn) {
 			return
 		case container.OpStats:
 			rep = s.stats()
+		case container.OpAttach:
+			s.attach(c, r, req)
+			return
 		default:
 			rep = container.Reply{Error: fmt.Sprintf("this runwhp does not know the request %q", req.Op)}
 		}

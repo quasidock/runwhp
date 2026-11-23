@@ -14,7 +14,8 @@ import (
 const usage = `Usage:
   runwhp run [flags] IMAGE [COMMAND [ARG...]]   run a command in a new container
   runwhp create [flags] IMAGE [COMMAND...]      create a container, ready to start
-  runwhp start CONTAINER...                     start created or stopped containers
+  runwhp start [-a [-i]] CONTAINER...           start created or stopped containers
+  runwhp attach CONTAINER                       attach this console to a running container
   runwhp wait CONTAINER...                      wait for containers to stop, and print their exit codes
   runwhp exec [flags] CONTAINER COMMAND...      run a command in a running container
   runwhp kill [-a] CONTAINER [SIGNAL]           send a signal to a container
@@ -66,6 +67,8 @@ func realMain(args []string) int {
 		return cmdCreate(args[1:])
 	case "start":
 		return cmdStart(args[1:], os.Stdout)
+	case "attach":
+		return cmdAttach(args[1:])
 	case "wait":
 		return cmdWait(args[1:], os.Stdout)
 	case "kill":

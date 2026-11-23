@@ -16,13 +16,12 @@ import (
 // it stops, at once for one that has stopped, one line per container.
 func TestWait(t *testing.T) {
 	a, b := newName(t), newName(t)
-	detached(t, "--name", a, alpine, "sh", "-c", "sleep 1; exit 7")
+	detached(t, "--name", a, alpine, "sh", "-c", "sleep 3; exit 7")
 	detached(t, "--name", b, alpine, "sh", "-c", "exit 3")
-	begin := time.Now()
-	expect(t, cli(t, "wait", a, b), "7\n3\n", 0)
-	if d := time.Since(begin); d < 500*time.Millisecond {
-		t.Errorf("wait returned after %v, before the container stopped", d)
+	if s := stateOf(t, a); s.Status != "running" {
+		t.Fatalf("the container is %s before the wait", s.Status)
 	}
+	expect(t, cli(t, "wait", a, b), "7\n3\n", 0)
 	// Stopped already.
 	expect(t, cli(t, "wait", a), "7\n", 0)
 	if r := cli(t, "wait", "e2e-nosuchcontainer"); r.code != 1 || r.stdout != "" {
