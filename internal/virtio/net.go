@@ -7,9 +7,11 @@ import (
 
 // Network device feature bits (virtio spec 5.1.3).
 const (
-	netFeatMTU      = 1 << 3
-	netFeatMAC      = 1 << 5
-	netFeatMrgRxbuf = 1 << 15
+	netFeatCsum      = 1 << 0
+	netFeatGuestCsum = 1 << 1
+	netFeatMTU       = 1 << 3
+	netFeatMAC       = 1 << 5
+	netFeatMrgRxbuf  = 1 << 15
 )
 
 const (
@@ -20,12 +22,20 @@ const (
 	// VIRTIO_F_VERSION_1 always includes num_buffers.
 	NetHeaderLen = 12
 
+	// netHdrDataValid is VIRTIO_NET_HDR_F_DATA_VALID: the frame's
+	// checksums need no checking.
+	netHdrDataValid = 2
+
 	defaultNetBacklog = 4 << 20
 )
 
 // Net is a virtio network device with one queue pair and no control queue.
-// It moves Ethernet frames between the guest and the host and offers no
-// offloads: the guest computes its own checksums and segments to its MTU.
+// It moves Ethernet frames between the guest and the host. It offers
+// checksum offload both ways, since every frame ends in the host's stack:
+// the guest may send frames with partial checksums, and frames for the
+// guest come marked valid, whatever their checksums say, when the guest
+// takes that. It offers no segmentation offload; the link's MTU is large
+// enough as it is.
 //
 // Transmitted frames are copied out on the vCPU thread and handed to Recv.
 // Frames for the guest go through Deliver from any goroutine; while the
@@ -49,6 +59,10 @@ type Net struct {
 
 	t atomic.Pointer[Transport]
 
+	// guestChecksums is set while the driver takes frames whose checksums
+	// were not filled in, marked valid.
+	guestChecksums atomic.Bool
+
 	// Guarded by the transport's lock.
 	pending      [][]byte
 	pendingBytes int
@@ -59,8 +73,16 @@ func (n *Net) DeviceID() uint32 { return 1 }
 func (n *Net) NumQueues() int   { return 2 }
 
 func (n *Net) Features() uint64 {
-	return FeatVersion1 | netFeatMAC | netFeatMTU | netFeatMrgRxbuf
+	return FeatVersion1 | netFeatCsum | netFeatGuestCsum | netFeatMAC | netFeatMTU | netFeatMrgRxbuf
 }
+
+// GuestChecksums reports whether the guest's driver takes frames whose
+// checksums were left out, which the device marks valid: the host's stack
+// need not compute them. It turns true when the driver first notifies the
+// device after taking the feature, which it does before the first frame
+// is due to it, and false when the driver resets the device, which drops
+// the frames waiting for it.
+func (n *Net) GuestChecksums() bool { return n.guestChecksums.Load() }
 
 func (n *Net) Config() []byte {
 	cfg := make([]byte, 12) // mac, status, max_virtqueue_pairs, mtu
@@ -74,10 +96,12 @@ func (n *Net) Config() []byte {
 func (n *Net) Attach(t *Transport) { n.t.Store(t) }
 
 func (n *Net) Reset() {
+	n.guestChecksums.Store(false)
 	n.dropPending()
 }
 
 func (n *Net) Notify(t *Transport, q int) {
+	n.guestChecksums.Store(t.DriverFeatures()&netFeatGuestCsum != 0)
 	switch q {
 	case netTxQueue:
 		n.transmit(t)
@@ -244,6 +268,9 @@ func (n *Net) fill(t *Transport, q *Queue, frame []byte, merge bool) (used, ok b
 	}
 
 	var hdr [NetHeaderLen]byte
+	if t.DriverFeatures()&netFeatGuestCsum != 0 {
+		hdr[0] = netHdrDataValid
+	}
 	le.PutUint16(hdr[10:], uint16(len(chains))) // num_buffers
 	src := [][]byte{hdr[:], frame}
 	for _, c := range chains {

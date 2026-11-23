@@ -40,7 +40,7 @@ func postRx(d *driver, count, size int) []uint64 {
 
 func TestNetConfig(t *testing.T) {
 	dev, d, _ := newNet(t)
-	if dev.Features()&netFeatMrgRxbuf == 0 || dev.Features()&netFeatMTU == 0 || dev.Features()&netFeatMAC == 0 {
+	if want := uint64(netFeatMrgRxbuf | netFeatMTU | netFeatMAC | netFeatCsum | netFeatGuestCsum); dev.Features()&want != want {
 		t.Errorf("features = %#x", dev.Features())
 	}
 	var mac []byte
@@ -254,5 +254,42 @@ func TestNetReceivePublishesFrameWhole(t *testing.T) {
 	}
 	if u := d.collect(netRxQueue); len(u) != 3 {
 		t.Fatalf("used = %+v", u)
+	}
+}
+
+// Frames for a guest that takes them without checksums come marked valid,
+// and GuestChecksums says so from the driver's first notification until it
+// resets the device.
+func TestNetChecksumOffload(t *testing.T) {
+	dev, d, _ := newNet(t)
+	if dev.GuestChecksums() {
+		t.Error("GuestChecksums before the driver notified the device")
+	}
+	rx := postRx(d, 2, 1000)
+	d.kick(netRxQueue)
+	if !dev.GuestChecksums() {
+		t.Error("GuestChecksums false for a driver that took VIRTIO_NET_F_GUEST_CSUM")
+	}
+	dev.Deliver(pattern(100, 1))
+	if flags := d.mem[rx[0]]; flags != netHdrDataValid {
+		t.Errorf("header flags %#x, want DATA_VALID", flags)
+	}
+	d.tr.Write(regStatus, 4, 0)
+	if dev.GuestChecksums() {
+		t.Error("GuestChecksums still true after a reset")
+	}
+
+	// A driver that does not take them gets frames with no flags.
+	dev2, d2, _ := newNet(t)
+	d2.tr.Write(regDrvFeatSel, 4, 0)
+	d2.tr.Write(regDrvFeatures, 4, uint64(uint32(dev2.Features()&^netFeatGuestCsum)))
+	rx2 := postRx(d2, 1, 1000)
+	d2.kick(netRxQueue)
+	if dev2.GuestChecksums() {
+		t.Error("GuestChecksums true for a driver that did not take VIRTIO_NET_F_GUEST_CSUM")
+	}
+	dev2.Deliver(pattern(100, 2))
+	if flags := d2.mem[rx2[0]]; flags != 0 {
+		t.Errorf("header flags %#x for a driver without GUEST_CSUM", flags)
 	}
 }

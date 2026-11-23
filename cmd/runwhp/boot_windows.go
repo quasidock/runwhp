@@ -242,10 +242,11 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 		nic := &virtio.Net{MAC: netstack.GuestMAC, MTU: netstack.MTU}
 		handles.nic = nic
 		stack, err := netstack.New(netstack.Config{
-			Output:      nic.Deliver,
-			HostGateway: cfg.HostGateway,
-			Publish:     cfg.Publish,
-			Logf:        logf,
+			Output:         nic.Deliver,
+			GuestChecksums: nic.GuestChecksums,
+			HostGateway:    cfg.HostGateway,
+			Publish:        cfg.Publish,
+			Logf:           logf,
 		})
 		if err != nil {
 			return fail, err

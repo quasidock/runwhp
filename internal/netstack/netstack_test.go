@@ -18,6 +18,7 @@ import (
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
+	"gvisor.dev/gvisor/pkg/tcpip/checksum"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
 	"gvisor.dev/gvisor/pkg/tcpip/link/ethernet"
@@ -36,9 +37,14 @@ type guest struct {
 	stack *stack.Stack
 }
 
-func newGuest(t *testing.T, cfg Config) *guest {
+func newGuest(t *testing.T, cfg Config) *guest { return newGuestWith(t, cfg, 0, nil) }
+
+// newGuestWith is newGuest with the guest's link offering caps, and tap
+// seeing each frame for the guest.
+func newGuestWith(t *testing.T, cfg Config, caps stack.LinkEndpointCapabilities, tap func(frame []byte)) *guest {
 	t.Helper()
 	link := channel.New(512, MTU+header.EthernetMinimumSize, tcpip.LinkAddress(GuestMAC[:]))
+	link.LinkEPCapabilities = caps
 	gs := stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, arp.NewProtocol},
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
@@ -56,6 +62,9 @@ func newGuest(t *testing.T, cfg Config) *guest {
 	})
 
 	cfg.Output = func(frame []byte) {
+		if tap != nil {
+			tap(frame)
+		}
 		pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(frame)})
 		link.InjectInbound(0, pkt)
 		pkt.DecRef()
@@ -565,6 +574,74 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	for deadline := time.Now().Add(5 * time.Second); !cond(); time.Sleep(time.Millisecond) {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for %s", what)
+		}
+	}
+}
+
+// tcpChecksums counts the TCP segments in frames for the guest whose
+// checksums are right, and those whose checksums are not.
+type tcpChecksums struct {
+	mu          sync.Mutex
+	good, wrong int
+}
+
+func (c *tcpChecksums) tap(frame []byte) {
+	if len(frame) < header.EthernetMinimumSize || header.Ethernet(frame).Type() != header.IPv4ProtocolNumber {
+		return
+	}
+	ip := header.IPv4(frame[header.EthernetMinimumSize:])
+	if !ip.IsValid(len(ip)) || ip.TransportProtocol() != header.TCPProtocolNumber {
+		return
+	}
+	seg := header.TCP(ip.Payload())
+	payload := seg[seg.DataOffset():]
+	ok := seg.IsChecksumValid(ip.SourceAddress(), ip.DestinationAddress(), checksum.Checksum(payload, 0), uint16(len(payload)))
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if ok {
+		c.good++
+	} else {
+		c.wrong++
+	}
+}
+
+// The guest may leave its checksums unfilled, and the stack leaves out
+// those of frames for a guest that takes them so.
+func TestChecksumOffload(t *testing.T) {
+	ln := upperServer(t)
+	for _, guestChecksums := range []bool{false, true} {
+		var sums tcpChecksums
+		r := &redirect{target: ln.Addr().String()}
+		// The guest stand-in sends without checksums, as Linux does with
+		// VIRTIO_NET_F_CSUM, and, if it takes frames without them, skips
+		// checking, as Linux does for frames marked valid.
+		caps := stack.CapabilityTXChecksumOffload
+		if guestChecksums {
+			caps |= stack.CapabilityRXChecksumOffload
+		}
+		g := newGuestWith(t, Config{Dial: r.dial, GuestChecksums: func() bool { return guestChecksums }}, caps, sums.tap)
+		c, err := g.dialTCP(netip.MustParseAddrPort("93.184.216.34:80"), 5*time.Second)
+		if err != nil {
+			t.Fatalf("guest checksums %v: %v", guestChecksums, err)
+		}
+		payload := bytes.Repeat([]byte("abcdefgh"), 64<<10)
+		go func() {
+			c.Write(payload)
+			c.CloseWrite()
+		}()
+		got, err := io.ReadAll(c)
+		c.Close()
+		if err != nil || !bytes.Equal(got, bytes.ToUpper(payload)) {
+			t.Fatalf("guest checksums %v: got %d bytes back, %v", guestChecksums, len(got), err)
+		}
+		sums.mu.Lock()
+		good, wrong := sums.good, sums.wrong
+		sums.mu.Unlock()
+		switch {
+		case !guestChecksums && (wrong != 0 || good == 0):
+			t.Errorf("%d segments to the guest with wrong checksums, %d right; want all right", wrong, good)
+		case guestChecksums && wrong == 0:
+			t.Errorf("all %d segments to a guest that takes them without checksums had them computed", good)
 		}
 	}
 }

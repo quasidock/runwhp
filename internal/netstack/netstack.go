@@ -84,6 +84,9 @@ type Config struct {
 	// Resolver answers DNS queries; nil means net.DefaultResolver, which on
 	// Windows asks the system resolver.
 	Resolver Resolver
+	// GuestChecksums, if set, reports whether the guest takes frames
+	// without TCP and UDP checksums, which the stack then leaves out.
+	GuestChecksums func() bool
 	// Logf receives diagnostics. nil discards them.
 	Logf func(format string, a ...any)
 }
@@ -165,7 +168,7 @@ func New(cfg Config) (*Stack, error) {
 
 func (s *Stack) setup() error {
 	st := s.stack
-	if err := st.CreateNIC(nicID, ethernet.New(s.link)); err != nil {
+	if err := st.CreateNIC(nicID, ethernet.New(&link{s.link, s.cfg.GuestChecksums})); err != nil {
 		return fmt.Errorf("netstack: creating the NIC: %s", err)
 	}
 	// Promiscuous: take packets for any address, since every destination
@@ -204,6 +207,26 @@ func (s *Stack) setup() error {
 }
 
 func addr(a netip.Addr) tcpip.Address { return tcpip.AddrFrom4(a.As4()) }
+
+// link is the NIC's end of the guest's link, whose checksum offloads follow
+// the guest's driver.
+type link struct {
+	*channel.Endpoint
+	guestChecksums func() bool
+}
+
+// Capabilities tells the stack not to check the checksums of frames from
+// the guest: the guest is the only sender on the link, every frame ends in
+// this stack, and a guest that may leave checksums partial does. Nor does
+// the stack compute them for a guest that takes frames without them. The
+// stack asks for every packet, so this follows the driver as it changes.
+func (l *link) Capabilities() stack.LinkEndpointCapabilities {
+	c := l.Endpoint.Capabilities() | stack.CapabilityRXChecksumOffload
+	if l.guestChecksums != nil && l.guestChecksums() {
+		c |= stack.CapabilityTXChecksumOffload
+	}
+	return c
+}
 
 // logEmitter passes gVisor's log messages to a Logf.
 type logEmitter func(format string, a ...any)
