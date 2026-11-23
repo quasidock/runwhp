@@ -3,7 +3,9 @@
 package e2e
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -110,10 +112,25 @@ func TestStartAttach(t *testing.T) {
 			t.Errorf("start -a: %+v", r)
 		}
 	}
+	// Output redirected to files comes once, through the attach, not also
+	// from the runwhp that start -a starts, which once inherited them.
+	dir := t.TempDir()
+	stdout, _ := os.Create(filepath.Join(dir, "stdout"))
+	stderr, _ := os.Create(filepath.Join(dir, "stderr"))
+	cmd := exec.Command(runwhp(t), "start", "-a", name)
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	err := cmd.Run()
+	stdout.Close()
+	stderr.Close()
+	gotOut, _ := os.ReadFile(filepath.Join(dir, "stdout"))
+	gotErr, _ := os.ReadFile(filepath.Join(dir, "stderr"))
+	if exitCode(err) != 2 || string(gotOut) != "hi\n" || string(gotErr) != "there\n" {
+		t.Errorf("start -a to files: exit %d, stdout %q, stderr %q", exitCode(err), gotOut, gotErr)
+	}
 
 	cat := newName(t)
 	created(t, "-i", "--name", cat, alpine, "sh", "-c", "cat; echo input ended")
-	cmd := exec.Command(runwhp(t), "start", "-a", "-i", cat)
+	cmd = exec.Command(runwhp(t), "start", "-a", "-i", cat)
 	cmd.Stdin = strings.NewReader("hello\n")
 	out, err := cmd.Output()
 	if err != nil || string(out) != "hello\ninput ended\n" {

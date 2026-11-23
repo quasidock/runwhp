@@ -71,11 +71,14 @@ var breakawayWarning sync.Once
 
 // spawnSupervisor starts a runwhp to run the container in the background,
 // and waits until it reports the container created (with waitStart) or
-// running. Its output goes to this process's stdout and stderr if they are
-// files, and otherwise to the container's log. With withStdin, its stdin,
-// if it has one, is this process's, if that is a file or a pipe; otherwise
-// it is open to attached runwhps. If ctx ends first, the runwhp is killed.
-func spawnSupervisor(ctx context.Context, root string, rec *container.Container, waitStart, withStdin bool) (container.Reply, error) {
+// running. With ownIO, its output goes to this process's stdout and stderr
+// if they are files, and otherwise to the container's log, and its stdin,
+// if it has one, is this process's, if that is a file or a pipe, and
+// otherwise open to attached runwhps. Without ownIO, as for start -a,
+// which attaches and carries the container's input and output itself, its
+// output goes to the log and its input is open to attached runwhps. If
+// ctx ends first, the runwhp is killed.
+func spawnSupervisor(ctx context.Context, root string, rec *container.Container, waitStart, ownIO bool) (container.Reply, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return container.Reply{}, err
@@ -98,13 +101,13 @@ func spawnSupervisor(ctx context.Context, root string, rec *container.Container,
 	// there would keep from being removed or renamed.
 	cmd.Dir = abs
 	cmd.Env = append(os.Environ(), "RUNWHP_ROOT="+abs)
-	if classify(os.Stdout) == handleFile {
+	if ownIO && classify(os.Stdout) == handleFile {
 		cmd.Stdout = os.Stdout
 	}
-	if classify(os.Stderr) == handleFile {
+	if ownIO && classify(os.Stderr) == handleFile {
 		cmd.Stderr = os.Stderr
 	}
-	if k := classify(os.Stdin); withStdin && rec.Config.Stdin && (k == handleFile || k == handlePipe) {
+	if k := classify(os.Stdin); ownIO && rec.Config.Stdin && (k == handleFile || k == handlePipe) {
 		cmd.Stdin = os.Stdin
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{
