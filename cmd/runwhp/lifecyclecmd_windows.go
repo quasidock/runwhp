@@ -17,6 +17,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/quasidock/runwhp/internal/container"
+	"github.com/quasidock/runwhp/internal/gc"
 	"github.com/quasidock/runwhp/internal/guestspec"
 	"github.com/quasidock/runwhp/internal/image"
 )
@@ -95,14 +96,21 @@ func createDetached(ctx context.Context, o *runOptions, entrypointSet bool, args
 		return nil, fail, err
 	}
 	sweepStore(root, logf)
+	// A prune waits until the container is recorded, and keeps its layers.
+	release, err := gc.Hold(root)
+	if err != nil {
+		return nil, fail, err
+	}
 	cfg, err := resolveConfig(ctx, root, o, entrypointSet, args, policy, logf)
 	if err != nil {
+		release()
 		return nil, fail, err
 	}
 	cfg.AutoRemove = o.rm
 	cfg.StdinOnce = create && cfg.Stdin
 	store := container.Open(root)
 	rec, err := store.Create(cfg, o.name)
+	release()
 	if err != nil {
 		return nil, fail, err
 	}

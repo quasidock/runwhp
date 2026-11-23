@@ -87,8 +87,9 @@ const staleTemp = time.Hour
 
 // sweepStore removes what runs that did not end normally left in the store:
 // scratch disks, which Windows deletes itself unless the machine stopped
-// first, and old temporary files. A scratch disk still in use cannot be
-// removed, since its runwhp holds it open exclusively, and is skipped.
+// first, old temporary files, and image records a pull stopped writing. A
+// scratch disk still in use cannot be removed, since its runwhp holds it
+// open exclusively, and is skipped.
 func sweepStore(root string, logf func(string, ...any)) {
 	if entries, err := os.ReadDir(filepath.Join(root, "scratch")); err == nil {
 		for _, e := range entries {
@@ -102,6 +103,16 @@ func sweepStore(root string, logf func(string, ...any)) {
 		for _, e := range entries {
 			if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > staleTemp {
 				os.RemoveAll(filepath.Join(root, "tmp", e.Name()))
+			}
+		}
+	}
+	if entries, err := os.ReadDir(filepath.Join(root, "images")); err == nil {
+		for _, e := range entries {
+			if !strings.HasSuffix(e.Name(), ".json.tmp") {
+				continue
+			}
+			if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > staleTemp {
+				os.Remove(filepath.Join(root, "images", e.Name()))
 			}
 		}
 	}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 
+	"github.com/quasidock/runwhp/internal/gc"
 	"github.com/quasidock/runwhp/internal/image"
 	"github.com/quasidock/runwhp/internal/kernel"
 )
@@ -32,6 +33,13 @@ func cmdPull(args []string) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	// A prune waits until the image is recorded, and keeps its layers.
+	release, err := gc.Hold(root)
+	if err != nil {
+		errorf("%v", err)
+		return 1
+	}
+	defer release()
 	store := image.Open(root)
 	store.Progress = os.Stderr
 	img, err := store.Pull(ctx, fs.Arg(0))

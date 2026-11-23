@@ -3,11 +3,9 @@
 package main
 
 import (
-	"bufio"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -17,6 +15,7 @@ import (
 	"time"
 
 	"github.com/quasidock/runwhp/internal/container"
+	"github.com/quasidock/runwhp/internal/gc"
 	"github.com/quasidock/runwhp/internal/volume"
 )
 
@@ -169,42 +168,28 @@ func cmdVolume(args []string, stdin io.Reader, stdout io.Writer) int {
 			fmt.Fprintln(stdout, "Total reclaimed space: 0B (runwhp's anonymous volumes go with their containers; -a removes unused named ones)")
 			return 0
 		}
-		if !force {
-			fmt.Fprint(os.Stderr, "WARNING! This will remove every volume no container uses, and all the data in them.\nAre you sure you want to continue? [y/N] ")
-			line, _ := bufio.NewReader(stdin).ReadString('\n')
-			if a := strings.ToLower(strings.TrimSpace(line)); a != "y" && a != "yes" {
-				return 0
-			}
+		if !force && !confirm(stdin, "This will remove every volume no container uses, and all the data in them.") {
+			return 0
 		}
-		vs, err := store.List()
+		// A run makes the volumes it names before it records its
+		// container, under the store's lock.
+		release, err := exclusive(root)
 		if err != nil {
 			errorf("%v", err)
 			return 1
 		}
-		var freed int64
-		var removed []string
-		for _, v := range vs {
-			if busy, _ := v.InUse(); busy || volumeUsers(root, v.Name) != "" {
-				continue
-			}
-			onDisk, _ := v.OnDisk()
-			if err := store.Remove(v.Name); err != nil {
-				if !errors.Is(err, volume.ErrInUse) {
-					errorf("%v", err)
-				}
-				continue
-			}
-			freed += onDisk
-			removed = append(removed, v.Name)
+		defer release()
+		u, err := gc.Load(root)
+		if err != nil {
+			errorf("%v", err)
+			return 1
 		}
-		if len(removed) > 0 {
-			fmt.Fprintln(stdout, "Deleted Volumes:")
-			for _, name := range removed {
-				fmt.Fprintln(stdout, name)
-			}
-			fmt.Fprintln(stdout)
+		r := u.Apply(u.UnusedVolumes())
+		printSection(stdout, "Deleted Volumes:", r.Volumes)
+		fmt.Fprintf(stdout, "Total reclaimed space: %s\n", humanSize(r.Freed))
+		if printReport(r) > 0 {
+			return 1
 		}
-		fmt.Fprintf(stdout, "Total reclaimed space: %s\n", humanSize(freed))
 	case "help", "-h", "-help", "--help":
 		fmt.Fprint(stdout, volumeUsage)
 	default:

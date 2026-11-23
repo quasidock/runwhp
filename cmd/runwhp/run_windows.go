@@ -23,6 +23,7 @@ import (
 
 	"github.com/quasidock/runwhp/internal/boot"
 	"github.com/quasidock/runwhp/internal/container"
+	"github.com/quasidock/runwhp/internal/gc"
 	"github.com/quasidock/runwhp/internal/guestspec"
 	"github.com/quasidock/runwhp/internal/image"
 	"github.com/quasidock/runwhp/internal/kernel"
@@ -227,13 +228,20 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 		layer = startLayer(scratchPath(root), size, true)
 		defer layer.close()
 	}
+	// A prune waits until the container is recorded, and keeps its layers.
+	release, err := gc.Hold(root)
+	if err != nil {
+		return fail, err
+	}
 	cfg, err := resolveConfig(ctx, root, o, entrypointSet, args, policy, logf)
 	if err != nil {
+		release()
 		return fail, err
 	}
 	cfg.AutoRemove = o.rm
 	store := container.Open(root)
 	rec, err := store.CreateWith(cfg, o.name, container.State{Pid: os.Getpid(), Output: container.OutputTerminal})
+	release()
 	if err != nil {
 		return fail, err
 	}

@@ -64,7 +64,7 @@ func TestParseStorageOpts(t *testing.T) {
 
 func TestSweepStore(t *testing.T) {
 	root := t.TempDir()
-	for _, d := range []string{"scratch", "tmp"} {
+	for _, d := range []string{"scratch", "tmp", "images"} {
 		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -81,10 +81,20 @@ func TestSweepStore(t *testing.T) {
 	os.WriteFile(old, nil, 0o644)
 	os.WriteFile(young, nil, 0o644)
 	os.Chtimes(old, time.Now().Add(-2*staleTemp), time.Now().Add(-2*staleTemp))
+	// Image records a pull stopped writing go once they are old; records
+	// themselves stay, however old.
+	oldRecord := filepath.Join(root, "images", "abc.json.tmp")
+	youngRecord := filepath.Join(root, "images", "def.json.tmp")
+	oldDone := filepath.Join(root, "images", "ghi.json")
+	for _, p := range []string{oldRecord, youngRecord, oldDone} {
+		os.WriteFile(p, nil, 0o644)
+	}
+	os.Chtimes(oldRecord, time.Now().Add(-2*staleTemp), time.Now().Add(-2*staleTemp))
+	os.Chtimes(oldDone, time.Now().Add(-2*staleTemp), time.Now().Add(-2*staleTemp))
 
 	var logged []string
 	sweepStore(root, func(f string, a ...any) { logged = append(logged, f) })
-	for path, want := range map[string]bool{left: false, busy.Name(): true, old: false, young: true} {
+	for path, want := range map[string]bool{left: false, busy.Name(): true, old: false, young: true, oldRecord: false, youngRecord: true, oldDone: true} {
 		if _, err := os.Stat(path); (err == nil) != want {
 			t.Errorf("%s: exists %v, want %v", filepath.Base(path), err == nil, want)
 		}
