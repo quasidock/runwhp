@@ -22,6 +22,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 
 	"github.com/quasidock/runwhp/internal/layer"
+	"github.com/quasidock/runwhp/internal/storefile"
 )
 
 // Platform is the only platform runwhp runs.
@@ -160,7 +161,7 @@ func (s *Store) Get(ref string) (*Image, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(s.recordPath(r))
+	data, err := storefile.Read(s.recordPath(r))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrNotPresent
 	} else if err != nil {
@@ -306,9 +307,7 @@ func (s *Store) writeRecord(r name.Reference, img *Image) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	// Runs pulling the same image at once each write a record of their
+	// own, and others may be reading the one they replace.
+	return storefile.Replace(path, data)
 }

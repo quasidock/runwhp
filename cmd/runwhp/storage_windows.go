@@ -17,6 +17,7 @@ import (
 
 	"github.com/quasidock/runwhp/internal/disk"
 	"github.com/quasidock/runwhp/internal/ext4"
+	"github.com/quasidock/runwhp/internal/storefile"
 )
 
 // defaultDiskSize is the size of a scratch disk or volume unless asked
@@ -108,7 +109,7 @@ func sweepStore(root string, logf func(string, ...any)) {
 	}
 	if entries, err := os.ReadDir(filepath.Join(root, "images")); err == nil {
 		for _, e := range entries {
-			if !strings.HasSuffix(e.Name(), ".json.tmp") {
+			if !strings.HasSuffix(e.Name(), ".json.tmp") && !strings.Contains(e.Name(), ".json"+storefile.TempSuffix) {
 				continue
 			}
 			if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > staleTemp {

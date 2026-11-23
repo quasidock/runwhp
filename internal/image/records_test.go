@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -176,5 +177,45 @@ func TestDisplay(t *testing.T) {
 		if repo, tag := Display(c.ref); repo != c.repo || tag != c.tag {
 			t.Errorf("Display(%s) = %s %s, want %s %s", c.ref, repo, tag, c.repo, c.tag)
 		}
+	}
+}
+
+// TestPutAtOnce records one reference from many goroutines, as runs pulling
+// the same image at once do, while others list the records.
+func TestPutAtOnce(t *testing.T) {
+	s := Open(t.TempDir())
+	cfg := json.RawMessage(`{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}`)
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for range 10 {
+				if err := s.Put("alpine:3.20", &Image{Ref: "index.docker.io/library/alpine:3.20", Config: cfg}); err != nil {
+					t.Error(err)
+				}
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for range 10 {
+				if _, err := s.Get("alpine:3.20"); err != nil && !errors.Is(err, ErrNotPresent) {
+					t.Error(err)
+				}
+				recs, err := s.List()
+				for _, r := range recs {
+					if r.Err != nil {
+						t.Error(r.Err)
+					}
+				}
+				if err != nil {
+					t.Error(err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if recs, _ := s.List(); len(recs) != 1 {
+		t.Errorf("%d records", len(recs))
 	}
 }

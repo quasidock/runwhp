@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/name"
+
+	"github.com/quasidock/runwhp/internal/storefile"
 )
 
 // Record is an image record as the store holds it.
@@ -71,7 +73,7 @@ func (s *Store) readRecord(path string) *Record {
 	if info, err := os.Stat(path); err == nil {
 		r.Pulled = info.ModTime()
 	}
-	data, err := os.ReadFile(path)
+	data, err := storefile.Read(path)
 	if err != nil {
 		r.Err = err
 		return r

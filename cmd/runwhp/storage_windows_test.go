@@ -12,6 +12,7 @@ import (
 
 	"github.com/quasidock/runwhp/internal/disk"
 	"github.com/quasidock/runwhp/internal/ext4"
+	"github.com/quasidock/runwhp/internal/storefile"
 )
 
 func TestParseSize(t *testing.T) {
@@ -83,8 +84,8 @@ func TestSweepStore(t *testing.T) {
 	os.Chtimes(old, time.Now().Add(-2*staleTemp), time.Now().Add(-2*staleTemp))
 	// Image records a pull stopped writing go once they are old; records
 	// themselves stay, however old.
-	oldRecord := filepath.Join(root, "images", "abc.json.tmp")
-	youngRecord := filepath.Join(root, "images", "def.json.tmp")
+	oldRecord := filepath.Join(root, "images", "abc.json.tmp") // as iteration 11 named them
+	youngRecord := filepath.Join(root, "images", "def.json"+storefile.TempSuffix+"0a1b2c")
 	oldDone := filepath.Join(root, "images", "ghi.json")
 	for _, p := range []string{oldRecord, youngRecord, oldDone} {
 		os.WriteFile(p, nil, 0o644)
