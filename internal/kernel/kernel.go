@@ -180,3 +180,39 @@ func (s *Store) progressf(format string, a ...any) {
 }
 
 func bytesReader(b []byte) io.Reader { return bytes.NewReader(b) }
+
+// List returns the digests of the kernels in the store, as "sha256:HEX".
+func (s *Store) List() ([]string, error) {
+	entries, err := os.ReadDir(filepath.Join(s.Root, "kernels", "sha256"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, e := range entries {
+		if h, err := v1.NewHash("sha256:" + e.Name()); err == nil && e.IsDir() {
+			out = append(out, h.String())
+		}
+	}
+	return out, nil
+}
+
+// Dir is the directory that holds the kernel with the given digest.
+func (s *Store) Dir(digest string) (string, error) {
+	h, err := v1.NewHash(digest)
+	if err != nil || h.Algorithm != "sha256" {
+		return "", fmt.Errorf("unsupported kernel digest %q", digest)
+	}
+	return filepath.Join(s.Root, "kernels", "sha256", h.Hex), nil
+}
+
+// Remove removes a kernel from the store. A runwhp booting it reads it
+// whole first, and does not hold it open.
+func (s *Store) Remove(digest string) error {
+	dir, err := s.Dir(digest)
+	if err != nil {
+		return err
+	}
+	return os.RemoveAll(dir)
+}

@@ -4,6 +4,7 @@
 package image
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -48,9 +50,41 @@ func Open(root string) *Store {
 
 // Image is a pulled image.
 type Image struct {
-	Ref    string          `json:"ref"`    // normalized reference it was pulled by
-	Digest string          `json:"digest"` // manifest digest
-	Config json.RawMessage `json:"config"` // the image configuration blob
+	Ref    string `json:"ref"`    // normalized reference it was pulled by
+	Digest string `json:"digest"` // manifest digest
+	// ConfigDigest is the configuration blob's digest, as the manifest names
+	// it: the image's ID, as Docker shows it. Records written before
+	// iteration 12 lack it.
+	ConfigDigest string `json:"configDigest,omitempty"`
+	// Config is the image configuration. The record holds it re-indented,
+	// so its bytes are not the blob's.
+	Config json.RawMessage `json:"config"`
+}
+
+// ID is the image's ID: its configuration's digest. A record without one
+// has it worked out from the configuration it holds, compacted, which gives
+// the blob's bytes back for every configuration written compactly with
+// nothing JSON escapes for HTML, as registries' images are.
+func (img *Image) ID() string {
+	if img.ConfigDigest != "" {
+		return img.ConfigDigest
+	}
+	var b bytes.Buffer
+	if json.Compact(&b, img.Config) != nil {
+		b.Reset()
+		b.Write(img.Config)
+	}
+	sum := sha256.Sum256(b.Bytes())
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// Created is when the image was built, as its configuration says, or zero.
+func (img *Image) Created() time.Time {
+	cf, err := img.ConfigFile()
+	if err != nil {
+		return time.Time{}
+	}
+	return cf.Created.Time
 }
 
 // ConfigFile parses the image configuration.
@@ -187,7 +221,11 @@ func (s *Store) Pull(ctx context.Context, ref string) (*Image, error) {
 	if err != nil {
 		return nil, fmt.Errorf("pulling %s: configuration: %w", r.Name(), err)
 	}
-	img := &Image{Ref: r.Name(), Digest: digest.String(), Config: raw}
+	configDigest, err := remoteImg.ConfigName()
+	if err != nil {
+		return nil, fmt.Errorf("pulling %s: configuration: %w", r.Name(), err)
+	}
+	img := &Image{Ref: r.Name(), Digest: digest.String(), ConfigDigest: configDigest.String(), Config: raw}
 	cf, err := img.ConfigFile()
 	if err != nil {
 		return nil, err

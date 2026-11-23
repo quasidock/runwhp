@@ -323,3 +323,37 @@ func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
 }
+
+func TestListAndRemove(t *testing.T) {
+	s := Open(t.TempDir())
+	if got, err := s.List(); err != nil || len(got) != 0 {
+		t.Errorf("List of an empty store: %v, %v", got, err)
+	}
+	a, b := "sha256:"+strings.Repeat("a", 64), "sha256:"+strings.Repeat("b", 64)
+	for _, d := range []string{a, b} {
+		dir, err := s.Dir(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		os.MkdirAll(dir, 0o755)
+		os.WriteFile(filepath.Join(dir, "bzImage"), []byte("kernel"), 0o644)
+	}
+	// Neither a stray file nor a directory not named by a digest is a kernel.
+	os.WriteFile(filepath.Join(s.Root, "kernels", "sha256", "stray"), nil, 0o644)
+	os.MkdirAll(filepath.Join(s.Root, "kernels", "sha256", "nothex"), 0o755)
+	if got, err := s.List(); err != nil || strings.Join(got, " ") != a+" "+b {
+		t.Errorf("List = %v, %v", got, err)
+	}
+	if p, _ := s.Path(Pin{Digest: a}); filepath.Dir(p) != func() string { d, _ := s.Dir(a); return d }() {
+		t.Errorf("Path %s is not in Dir", p)
+	}
+	if err := s.Remove(a); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.List(); strings.Join(got, " ") != b {
+		t.Errorf("List after Remove = %v", got)
+	}
+	if _, err := s.Dir("md5:00"); err == nil {
+		t.Error("Dir of a digest that is not sha256")
+	}
+}

@@ -1,12 +1,14 @@
 // Package layer converts OCI image layers to ext4 images and keeps them in a
 // cache keyed by diffID (the digest of the uncompressed layer tar). A cached
 // file is never modified once it is in place, so any number of guests can
-// attach it read-only at the same time.
+// attach it read-only at the same time. Files are removed only once no image
+// record or container lists them, which package gc works out.
 package layer
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -105,4 +107,46 @@ func (s *Store) Put(diffID string, tarStream io.Reader) (string, error) {
 		return "", err
 	}
 	return dst, nil
+}
+
+// ErrInUse means a layer could not be removed because a guest has it open.
+var ErrInUse = errors.New("layer is in use")
+
+// List returns the diffIDs of the layers in the store.
+func (s *Store) List() ([]string, error) {
+	entries, err := os.ReadDir(filepath.Join(s.Dir, "sha256"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, e := range entries {
+		h, ok := strings.CutSuffix(e.Name(), ".ext4")
+		if !ok || e.IsDir() {
+			continue
+		}
+		if _, err := parseDiffID("sha256:" + h); err == nil {
+			out = append(out, "sha256:"+h)
+		}
+	}
+	return out, nil
+}
+
+// Remove removes a layer's file. A layer a running guest has open cannot be
+// removed, since guests open layers without sharing delete, and gives
+// ErrInUse. A layer that is not there is not an error.
+func (s *Store) Remove(diffID string) error {
+	p, err := s.Path(diffID)
+	if err != nil {
+		return err
+	}
+	err = os.Remove(p)
+	switch {
+	case err == nil, errors.Is(err, os.ErrNotExist):
+		return nil
+	case inUse(err):
+		return fmt.Errorf("%w: %s", ErrInUse, diffID)
+	}
+	return err
 }
