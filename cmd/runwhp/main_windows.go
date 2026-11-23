@@ -27,6 +27,7 @@ const usage = `Usage:
   runwhp stats [--no-stream] [CONTAINER...]     show what running containers use
   runwhp delete [-f] CONTAINER...               remove containers
   runwhp rename CONTAINER NAME                  rename a container
+  runwhp container prune [-f]                   remove stopped and created containers
   runwhp pull IMAGE                             pull an image, and runwhp's kernel, into the local store
   runwhp images [-q] [REPOSITORY[:TAG]]         list images
   runwhp rmi [-f] IMAGE...                      remove images
@@ -58,6 +59,8 @@ func realMain(args []string) int {
 		return cmdVolume(args[1:], os.Stdin, os.Stdout)
 	case "image":
 		return cmdImage(args[1:], os.Stdin, os.Stdout)
+	case "container":
+		return cmdContainer(args[1:], os.Stdin, os.Stdout)
 	case "images":
 		return cmdImages(args[1:], os.Stdout)
 	case "rmi":

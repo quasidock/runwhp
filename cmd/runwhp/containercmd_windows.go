@@ -8,12 +8,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/quasidock/runwhp/internal/container"
+	"github.com/quasidock/runwhp/internal/gc"
 )
 
 // The container commands return 1 when they fail and 2 for a usage error,
@@ -145,6 +147,93 @@ func cmdDelete(args []string, stdout io.Writer) int {
 		fmt.Fprintln(stdout, ref)
 	}
 	return code
+}
+
+const containerUsage = `Usage:
+  runwhp container ls [-q] [--format table|json]   list containers (also: runwhp list)
+  runwhp container rm [-f] CONTAINER...             remove containers (also: runwhp delete)
+  runwhp container prune [-f]                       remove stopped and created containers
+`
+
+// cmdContainer runs runwhp container, Docker's names for runwhp's
+// container commands, and container prune.
+func cmdContainer(args []string, stdin io.Reader, stdout io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprint(os.Stderr, containerUsage)
+		return 2
+	}
+	sub, args := args[0], args[1:]
+	switch sub {
+	case "ls", "list", "ps":
+		return cmdList(args, stdout)
+	case "rm", "remove", "delete":
+		return cmdDelete(args, stdout)
+	case "prune":
+		return cmdContainerPrune(args, stdin, stdout)
+	case "help", "-h", "-help", "--help":
+		fmt.Fprint(stdout, containerUsage)
+		return 0
+	}
+	fmt.Fprintf(os.Stderr, "runwhp: unknown container command %q\n\n%s", sub, containerUsage)
+	return 2
+}
+
+func cmdContainerPrune(args []string, stdin io.Reader, stdout io.Writer) int {
+	fs := newFlags("container prune", containerUsage)
+	var force bool
+	fs.BoolVar(&force, "f", false, "")
+	fs.BoolVar(&force, "force", false, "")
+	if fs.Parse(args) != nil || fs.NArg() > 0 {
+		return 2
+	}
+	if !force && !confirm(stdin, "This will remove all stopped containers, and created ones, stopping their VMs.") {
+		return 0
+	}
+	root, err := storeRoot()
+	if err != nil {
+		errorf("%v", err)
+		return 1
+	}
+	ids, freed, errs := pruneContainers(root)
+	printSection(stdout, "Deleted Containers:", ids)
+	fmt.Fprintf(stdout, "Total reclaimed space: %s\n", humanSize(freed))
+	for _, err := range errs {
+		errorf("%v", err)
+	}
+	if len(errs) > 0 {
+		return 1
+	}
+	return 0
+}
+
+// pruneContainers removes every stopped and created container, a created
+// one's VM stopped first, and returns their IDs and the space they took.
+// A container that starts meanwhile is left.
+func pruneContainers(root string) (ids []string, freed int64, errs []error) {
+	u, err := gc.Load(root)
+	if err != nil {
+		return nil, 0, []error{err}
+	}
+	store := container.Open(root)
+	for _, c := range u.Containers {
+		if !gc.Removable(c.Container) {
+			continue
+		}
+		// deleteContainer reads the state again, and refuses a container
+		// that has started since, without -f.
+		if now, err := store.Get(c.ID); err != nil || !gc.Removable(now) {
+			continue
+		}
+		if err := deleteContainer(store, c.ID, false); err != nil {
+			if !errors.Is(err, container.ErrNotFound) {
+				errs = append(errs, err)
+			}
+			continue
+		}
+		ids = append(ids, c.ID)
+		freed += c.Size
+	}
+	return ids, freed, errs
 }
 
 func deleteContainer(store *container.Store, ref string, force bool) error {

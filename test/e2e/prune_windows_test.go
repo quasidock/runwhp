@@ -5,12 +5,14 @@ package e2e
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -283,4 +285,45 @@ func TestPruneRace(t *testing.T) {
 	runs.Wait()
 	close(stop)
 	wg.Wait()
+}
+
+// TestContainerPrune removes a stopped container and a created one, whose
+// VM is stopped, and keeps a running one.
+func TestContainerPrune(t *testing.T) {
+	s := newOwnStore(t)
+	id := func(args ...string) string { return strings.TrimSpace(s.ok(args...).stdout) }
+	s.ok(keepArgs("--name", "stopped", alpine, "true")...)
+	stopped := id("list", "-q")
+	created := id(append([]string{"create", "--name", "created"}, withFlags([]string{alpine, "sleep", "60"})...)...)
+	running := id(append([]string{"run", "-d", "--name", "running"}, withFlags([]string{alpine, "sleep", "60"})...)...)
+	var st struct{ Pid int }
+	json.Unmarshal([]byte(s.ok("state", created).stdout), &st)
+	if st.Pid == 0 {
+		t.Fatal("the created container has no runwhp")
+	}
+
+	if r := s.cli("n\n", "container", "prune"); r.code != 0 || r.stdout != "" || len(strings.Fields(s.ok("list", "-q").stdout)) != 3 {
+		t.Errorf("declined: exit %d, %q", r.code, r.stdout)
+	}
+	r := s.ok("container", "prune", "-f")
+	if !strings.HasPrefix(r.stdout, "Deleted Containers:\n") || !strings.Contains(r.stdout, stopped+"\n") || !strings.Contains(r.stdout, created+"\n") ||
+		strings.Contains(r.stdout, running) || strings.Contains(r.stdout, "Total reclaimed space: 0B") {
+		t.Errorf("prune -f:\n%s", r.stdout)
+	}
+	if left := strings.Fields(s.ok("list", "-q").stdout); len(left) != 1 || left[0] != running {
+		t.Errorf("left: %v", left)
+	}
+	if r := s.ok("exec", "running", "echo", "alive"); r.stdout != "alive\n" {
+		t.Errorf("the running container: %q", r.stdout)
+	}
+	// The created container's runwhp is gone with it.
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		out, _ := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", st.Pid), "/NH").Output()
+		if !strings.Contains(string(out), "runwhp") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the created container's runwhp, %d, is still running", st.Pid)
+		}
+	}
 }
