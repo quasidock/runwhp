@@ -26,6 +26,12 @@ type Queue struct {
 
 	lastAvail   uint16
 	unpublished uint16 // chains added but not yet published
+
+	// With VIRTIO_RING_F_EVENT_IDX, the driver says through the rings when
+	// it wants interrupts, and the device when it wants notifications.
+	eventIdx       bool
+	signalled      uint16 // the used index at the last interrupt check
+	signalledValid bool
 }
 
 func (q *Queue) ready() bool { return q.Ready && q.Size > 0 && q.Size <= MaxQueueSize }
@@ -90,11 +96,19 @@ func (q *Queue) PopRanges(mem Memory) (head uint16, ranges []Range, ok bool, err
 	return head, ranges, true, err
 }
 
-// next takes the head of the next chain from the available ring.
+// next takes the head of the next chain from the available ring. Finding
+// it empty, with EVENT_IDX, it asks the driver to notify the device of the
+// next chain it adds, and looks once more, for a chain the driver added
+// before it could see the request. Until a device runs out, the driver adds
+// chains without notifying it: a guest refills a receive queue, say,
+// without an exit.
 func (q *Queue) next(mem Memory) (head uint16, ok bool) {
 	n := uint64(q.Size)
 	avail, okA := mem.Slice(q.Avail, 4+2*n)
-	if !okA || q.lastAvail == loadIdx(avail) {
+	if !okA {
+		return 0, false
+	}
+	if q.lastAvail == loadIdx(avail) && (!q.eventIdx || !q.askForNotify(mem) || q.lastAvail == loadIdx(avail)) {
 		return 0, false
 	}
 	head = le.Uint16(avail[4+2*(uint64(q.lastAvail)%n):])
@@ -200,8 +214,55 @@ func word(ring []byte) (*uint32, bool) {
 	return (*uint32)(p), uintptr(p)%4 == 0
 }
 
-// interruptsSuppressed reports whether the driver set VIRTQ_AVAIL_F_NO_INTERRUPT.
-func (q *Queue) interruptsSuppressed(mem Memory) bool {
-	avail, ok := mem.Slice(q.Avail, 2)
-	return ok && le.Uint16(avail)&1 != 0
+// askForNotify sets avail_event, at the end of the used ring, to the next
+// chain the device will take: a driver using EVENT_IDX notifies the device
+// only when it adds that chain. It reports false if the ring is out of
+// reach.
+func (q *Queue) askForNotify(mem Memory) bool {
+	n := uint64(q.Size)
+	used, ok := mem.Slice(q.Used, 6+8*n)
+	if !ok {
+		return false
+	}
+	// A 16-bit store, which the processor makes at once: the two bytes
+	// after the field may not be the ring's.
+	le.PutUint16(used[4+8*n:], q.lastAvail)
+	// The driver may add a chain and read avail_event between the two: it
+	// would not notify, so the device must see the chain when it looks
+	// again. The store has to reach memory before that load.
+	fence()
+	return true
 }
+
+// needInterrupt reports whether the driver wants an interrupt for what was
+// pushed since it was last asked. Without EVENT_IDX it does unless it set
+// VIRTQ_AVAIL_F_NO_INTERRUPT; with it, once the used index passes the
+// used_event at the end of the available ring, as vring_need_event decides.
+func (q *Queue) needInterrupt(mem Memory) bool {
+	n := uint64(q.Size)
+	if !q.eventIdx {
+		avail, ok := mem.Slice(q.Avail, 2)
+		return !ok || le.Uint16(avail)&1 == 0
+	}
+	avail, okA := mem.Slice(q.Avail, 6+2*n)
+	used, okU := mem.Slice(q.Used, 4)
+	if !okA || !okU {
+		return true
+	}
+	// storeIdx published the used index with a locked store, so used_event
+	// is read after it, as the driver requires.
+	idx, old := loadIdx(used), q.signalled
+	q.signalled = idx
+	if !q.signalledValid {
+		q.signalledValid = true
+		return true
+	}
+	event := le.Uint16(avail[4+2*n:])
+	return idx-event-1 < idx-old
+}
+
+// fence orders a plain store to guest memory before the loads after it. Any
+// locked instruction does that on x86-64, the only processor runwhp runs on.
+func fence() { fenceWord.Add(0) }
+
+var fenceWord atomic.Uint32

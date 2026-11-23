@@ -27,6 +27,8 @@ type driver struct {
 	next   uint64 // bump allocator for rings and buffers
 	queues map[int]*driverQueue
 	irqs   int
+	// eventIdx is set when the driver took VIRTIO_RING_F_EVENT_IDX.
+	eventIdx bool
 }
 
 type driverQueue struct {
@@ -34,6 +36,7 @@ type driverQueue struct {
 	desc, avail, used uint64
 	nextDesc          uint16
 	availIdx, usedIdx uint16
+	kicked            uint16 // availIdx when kickIfNeeded last looked
 }
 
 type usedElem struct {
@@ -41,12 +44,22 @@ type usedElem struct {
 	len  uint32
 }
 
+// testEventIdx makes newDriver and newDriverWrapped take EVENT_IDX, so that
+// device tests can run both ways.
+var testEventIdx bool
+
 func newDriver(t *testing.T, dev Device) *driver { return newDriverWrapped(t, dev, nil) }
 
 // newDriverWrapped is newDriver with the device seeing guest memory
 // through wrap.
 func newDriverWrapped(t *testing.T, dev Device, wrap func(testMem) Memory) *driver {
-	d := &driver{t: t, mem: make(testMem, 1<<20), next: 0x1000, queues: map[int]*driverQueue{}}
+	return newDriverOpts(t, dev, wrap, testEventIdx)
+}
+
+// newDriverOpts sets up a driver, which takes EVENT_IDX if eventIdx is set,
+// and every other feature the device offers.
+func newDriverOpts(t *testing.T, dev Device, wrap func(testMem) Memory, eventIdx bool) *driver {
+	d := &driver{t: t, mem: make(testMem, 1<<20), next: 0x1000, queues: map[int]*driverQueue{}, eventIdx: eventIdx}
 	var mem Memory = d.mem
 	if wrap != nil {
 		mem = wrap(d.mem)
@@ -60,8 +73,11 @@ func newDriverWrapped(t *testing.T, dev Device, wrap func(testMem) Memory) *driv
 	hi := d.tr.Read(regDevFeatures, 4)
 	d.tr.Write(regDevFeatSel, 4, 0)
 	lo := d.tr.Read(regDevFeatures, 4)
-	if hi<<32|lo != dev.Features() {
-		t.Fatalf("features read back as %#x, want %#x", hi<<32|lo, dev.Features())
+	if want := dev.Features() | FeatRingEventIdx; hi<<32|lo != want {
+		t.Fatalf("features read back as %#x, want %#x", hi<<32|lo, want)
+	}
+	if !eventIdx {
+		lo &^= FeatRingEventIdx
 	}
 	d.tr.Write(regDrvFeatSel, 4, 1)
 	d.tr.Write(regDrvFeatures, 4, hi)
@@ -148,7 +164,29 @@ func (d *driver) collect(qi int) []usedElem {
 		out = append(out, usedElem{uint16(le.Uint32(e[0:])), le.Uint32(e[4:])})
 		q.usedIdx++
 	}
+	if d.eventIdx {
+		// used_event: interrupt again once there is something new, as
+		// Linux asks when it has taken what was there.
+		le.PutUint16(d.mem[q.avail+4+2*uint64(q.size):], q.usedIdx)
+	}
 	return out
+}
+
+// kickIfNeeded notifies the device of chains added to queue qi as a driver
+// with EVENT_IDX does: only if one of them is the chain avail_event names.
+// It reports whether it notified.
+func (d *driver) kickIfNeeded(qi int) bool {
+	d.tr.mu.Lock()
+	q := d.queues[qi]
+	event := le.Uint16(d.mem[q.used+4+8*uint64(q.size):])
+	old, idx := q.kicked, q.availIdx
+	q.kicked = idx
+	d.tr.mu.Unlock()
+	if idx-event-1 >= idx-old {
+		return false
+	}
+	d.kick(qi)
+	return true
 }
 
 // interrupts returns how many interrupts the device has raised.

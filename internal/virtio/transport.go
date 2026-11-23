@@ -7,6 +7,11 @@
 // Do, through which a device works on its queues from other goroutines while
 // the guest runs: the console, for instance, writes output and delivers input
 // without holding up the vCPU.
+//
+// Every device offers VIRTIO_RING_F_EVENT_IDX. A driver that takes it, as
+// Linux does, asks through the rings for interrupts only once it has taken
+// what it had, and the device asks for notifications only once it has run
+// out of chains, so neither side causes VM exits the other does not need.
 package virtio
 
 import (
@@ -49,8 +54,12 @@ type Device interface {
 	Reset()
 }
 
-// Feature bits common to all devices.
-const FeatVersion1 = 1 << 32
+// Feature bits common to all devices. The transport offers
+// FeatRingEventIdx for every device.
+const (
+	FeatRingEventIdx = 1 << 29
+	FeatVersion1     = 1 << 32
+)
 
 // WindowSize is the size of one device's MMIO register window.
 const WindowSize = 0x1000
@@ -136,10 +145,11 @@ func (t *Transport) Queue(i int) *Queue {
 	return &t.queues[i]
 }
 
-// Interrupt reports used buffers to the driver unless queue q asked for no
-// interrupts. The lock must be held.
+// Interrupt reports used buffers to the driver, unless it asked for no
+// interrupts on queue q, or, with EVENT_IDX, none yet. The lock must be
+// held.
 func (t *Transport) Interrupt(q int) {
-	if qu := t.Queue(q); qu != nil && qu.interruptsSuppressed(t.mem) {
+	if qu := t.Queue(q); qu != nil && !qu.needInterrupt(t.mem) {
 		return
 	}
 	t.intStatus |= 1
@@ -210,7 +220,7 @@ func (t *Transport) Read(off uint64, size int) uint64 {
 		if t.devFeatureSel > 1 {
 			return 0
 		}
-		return t.dev.Features() >> (32 * t.devFeatureSel) & 0xffffffff
+		return (t.dev.Features() | FeatRingEventIdx) >> (32 * t.devFeatureSel) & 0xffffffff
 	case regQueueNumMax:
 		if t.selected() != nil {
 			return MaxQueueSize
@@ -271,6 +281,7 @@ func (t *Transport) write(off uint64, val uint64) (after func()) {
 	case regQueueReady:
 		if q != nil {
 			q.Ready = v32&1 != 0
+			q.eventIdx = t.drvFeatures&FeatRingEventIdx != 0
 		}
 	case regQueueNotify:
 		if int(v32) < len(t.queues) && t.queues[v32].ready() {

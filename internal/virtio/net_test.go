@@ -215,16 +215,17 @@ func TestNetResetAndDrain(t *testing.T) {
 	}
 }
 
-// usedWatcher records a ring's used index each time the device slices that
-// ring, as it does to return each chain.
+// usedWatcher records a ring's used index each time the device slices the
+// whole ring, as it does to return each chain.
 type usedWatcher struct {
 	testMem
 	ring *uint64
+	size uint64 // the ring's entries
 	seen []uint16
 }
 
 func (w *usedWatcher) Slice(addr, n uint64) ([]byte, bool) {
-	if w.ring != nil && addr == *w.ring {
+	if w.ring != nil && addr == *w.ring && n == 4+8*w.size {
 		w.seen = append(w.seen, le.Uint16(w.testMem[addr+2:]))
 	}
 	return w.testMem.Slice(addr, n)
@@ -240,6 +241,7 @@ func TestNetReceivePublishesFrameWhole(t *testing.T) {
 	postRx(d, 4, 1000)
 	d.kick(netRxQueue)
 	w.ring = &d.queues[netRxQueue].used
+	w.size = uint64(d.queues[netRxQueue].size)
 
 	dev.Deliver(pattern(2500, 5))
 	for i, idx := range w.seen {
