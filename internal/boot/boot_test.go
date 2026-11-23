@@ -184,6 +184,13 @@ func testDevices(virtio int) []Device {
 // the MADT, checks every table's checksum and length, and returns the MADT.
 func acpiTables(t *testing.T, devices []Device, apicIDs []uint32) (madt []byte) {
 	t.Helper()
+	_, _, madt = allACPITables(t, devices, apicIDs)
+	return madt
+}
+
+// allACPITables is acpiTables, returning the FADT and the DSDT as well.
+func allACPITables(t *testing.T, devices []Device, apicIDs []uint32) (fadt, dsdt, madt []byte) {
+	t.Helper()
 	mem := make([]byte, acpiEnd)
 	rsdp, err := writeACPI(mem[acpiAddr:], acpiAddr, devices, apicIDs)
 	if err != nil {
@@ -208,9 +215,59 @@ func acpiTables(t *testing.T, devices []Device, apicIDs []uint32) (madt []byte) 
 		return tbl
 	}
 	xsdt := table(le.Uint64(mem[rsdp+24:]), "XSDT")
-	fadt := table(le.Uint64(xsdt[36:]), "FACP")
-	table(le.Uint64(fadt[140:]), "DSDT")
-	return table(le.Uint64(xsdt[44:]), "APIC")
+	fadt = table(le.Uint64(xsdt[36:]), "FACP")
+	dsdt = table(le.Uint64(fadt[140:]), "DSDT")
+	return fadt, dsdt, table(le.Uint64(xsdt[44:]), "APIC")
+}
+
+// TestPowerOff checks what Linux needs to offer ACPI power-off on
+// hardware-reduced ACPI: both sleep registers in the FADT, and an \_S5
+// package in the DSDT's root scope, ahead of \_SB.
+func TestPowerOff(t *testing.T) {
+	fadt, dsdt, _ := allACPITables(t, testDevices(3), []uint32{0})
+	for _, r := range []struct {
+		off  int
+		port uint64
+	}{{244, SleepControlPort}, {256, SleepStatusPort}} {
+		gas := fadt[r.off : r.off+12]
+		if gas[0] != 1 || gas[1] != 8 || le.Uint64(gas[4:]) != r.port {
+			t.Errorf("FADT register at %d is % x, want system I/O, 8 bits, port %#x", r.off, gas, r.port)
+		}
+	}
+	if le.Uint32(fadt[112:])&(1<<20) == 0 {
+		t.Error("FADT does not declare hardware-reduced ACPI")
+	}
+	aml := dsdt[36:]
+	// NameOp "_S5_" PackageOp PkgLength NumElements BytePrefix 5 Zero
+	if aml[0] != 0x08 || string(aml[1:5]) != "_S5_" || aml[5] != 0x12 {
+		t.Fatalf("DSDT does not start with Name(_S5, Package): % x", aml[:8])
+	}
+	n, size := decodePkgLength(aml[6:])
+	pkg := aml[6 : 6+n]
+	if !bytes.Equal(pkg[size:], []byte{2, 0x0a, SleepTypeS5, 0}) {
+		t.Errorf("\\_S5 package is % x", pkg)
+	}
+	if next := aml[6+n]; next != 0x10 {
+		t.Errorf("\\_SB scope does not follow \\_S5: %#x", next)
+	}
+}
+
+func TestSleepRequest(t *testing.T) {
+	for _, c := range []struct {
+		val   byte
+		typ   int
+		enter bool
+	}{
+		{SleepTypeS5<<2 | 1<<5, SleepTypeS5, true},
+		{SleepTypeS5 << 2, SleepTypeS5, false}, // SLP_EN clear: not yet
+		{3<<2 | 1<<5, 3, true},
+		{0, 0, false},
+		{0xff, 7, true},
+	} {
+		if typ, enter := SleepRequest(c.val); typ != c.typ || enter != c.enter {
+			t.Errorf("SleepRequest(%#x) = %d, %v; want %d, %v", c.val, typ, enter, c.typ, c.enter)
+		}
+	}
 }
 
 func TestACPIChecksums(t *testing.T) {

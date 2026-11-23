@@ -20,9 +20,10 @@ type Device struct {
 
 // writeACPI emits RSDP -> XSDT -> {FADT -> DSDT, MADT} into dst, which sits
 // at guest address base, and returns the RSDP address. The FADT declares
-// hardware-reduced ACPI, so Linux assumes no PIC, PIT, RTC or i8042. The MADT
-// lists a local APIC for each of apicIDs, the boot processor first, and one
-// I/O APIC; the DSDT declares the devices.
+// hardware-reduced ACPI, so Linux assumes no PIC, PIT, RTC or i8042, and
+// gives it a reset register and the sleep registers it powers off through.
+// The MADT lists a local APIC for each of apicIDs, the boot processor first,
+// and one I/O APIC; the DSDT declares \_S5 and the devices.
 func writeACPI(dst []byte, base uint64, devices []Device, apicIDs []uint32) (uint64, error) {
 	if len(apicIDs) == 0 || len(apicIDs) > 255 {
 		return 0, fmt.Errorf("%d processors requested; between 1 and 255 fit", len(apicIDs))
@@ -41,7 +42,7 @@ func writeACPI(dst []byte, base uint64, devices []Device, apicIDs []uint32) (uin
 	if err != nil {
 		return 0, err
 	}
-	dsdt := place(sdt("DSDT", 2, aml))
+	dsdt := place(sdt("DSDT", 2, append(s5AML(), aml...)))
 
 	fadt := make([]byte, 276-36)
 	f := func(off int) []byte { return fadt[off-36:] }
@@ -52,6 +53,12 @@ func writeACPI(dst []byte, base uint64, devices []Device, apicIDs []uint32) (uin
 	f(128)[0] = ResetValue            // reset value
 	f(131)[0] = 5                     // FADT minor version
 	le.PutUint64(f(140), dsdt)        // X_DSDT
+	// Hardware-reduced ACPI powers off through the sleep registers, and
+	// Linux offers ACPI power-off only when both are there.
+	f(244)[0], f(244)[1] = 1, 8            // sleep control register: system I/O, 8 bits
+	le.PutUint64(f(248), SleepControlPort) //   port
+	f(256)[0], f(256)[1] = 1, 8            // sleep status register: system I/O, 8 bits
+	le.PutUint64(f(260), SleepStatusPort)  //   port
 	fadtAt := place(sdt("FACP", 6, fadt))
 
 	// MADT body: local APIC address and flags, then one processor local APIC
@@ -103,6 +110,30 @@ const (
 	ResetPort  = 0x64
 	ResetValue = 0xfe
 )
+
+// The FADT's sleep registers. The guest powers off by writing SleepTypeS5,
+// as SLP_TYP, with SLP_EN to SleepControlPort; the VMM treats it as the
+// guest stopping. SleepStatusPort always reads SleepWakeStatus, awake.
+const (
+	SleepControlPort = 0x605
+	SleepStatusPort  = 0x604
+	SleepTypeS5      = 5
+	SleepWakeStatus  = 0x80 // WAK_STS
+)
+
+// SleepRequest decodes a write to the sleep control register: the sleep
+// state it names (SLP_TYP, bits 2-4), and whether it enters it (SLP_EN,
+// bit 5).
+func SleepRequest(val byte) (typ int, enter bool) {
+	return int(val>>2) & 7, val&(1<<5) != 0
+}
+
+// s5AML is Name (\_S5, Package () { SleepTypeS5, Zero }): the SLP_TYP value
+// for soft-off, which the kernel must find before it offers to power off.
+// It is in the root scope, ahead of \_SB.
+func s5AML() []byte {
+	return []byte{0x08, '_', 'S', '5', '_', 0x12, 5, 2, 0x0a, SleepTypeS5, 0x00}
+}
 
 func sdt(sig string, rev byte, body []byte) []byte {
 	t := make([]byte, 36+len(body))

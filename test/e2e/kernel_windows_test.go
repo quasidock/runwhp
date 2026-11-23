@@ -85,6 +85,17 @@ func TestKernelClock(t *testing.T) {
 	}
 }
 
+// TestACPIPowerOff checks that the kernel takes the ACPI tables' soft-off:
+// the sleep registers and \_S5. The container cannot power off itself, so
+// the kernel's boot message is the test.
+func TestACPIPowerOff(t *testing.T) {
+	ownKernel(t)
+	r := run(t, "--debug", alpine, "true")
+	if r.code != 0 || !strings.Contains(r.stderr, "ACPI: PM: (supports S0 S5)") {
+		t.Errorf("exit %d; the kernel does not offer S5:\n%s", r.code, r.stderr)
+	}
+}
+
 // TestKernelFetch starts from an empty store: runwhp fetches its kernel,
 // does not fetch it under --pull never, and runwhp pull brings it back.
 func TestKernelFetch(t *testing.T) {

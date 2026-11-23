@@ -7,7 +7,7 @@ import "sync"
 const haltedReason = "guest halted with interrupts disabled"
 
 // stopper decides when the guest stops. Any processor stops it at once by
-// asking for a reset, by faulting, or by failing. A processor that halts
+// asking for a reset, powering off, faulting or failing. A processor that halts
 // with interrupts disabled is only parked: Linux parks the others that way
 // before one of them resets the machine, and takes processors offline that
 // way, so a single parked processor must not end the guest. Once every
@@ -16,7 +16,7 @@ const haltedReason = "guest halted with interrupts disabled"
 //
 // With the local APIC emulated by the hypervisor, as runwhp runs it, WHP
 // keeps halted processors to itself and has not been seen to report such a
-// halt, so in practice a guest stops by resetting or failing.
+// halt, so in practice a guest stops by resetting, powering off or failing.
 //
 // All methods are safe to call from any goroutine.
 type stopper struct {

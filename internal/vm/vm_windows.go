@@ -13,6 +13,9 @@
 // own, through virtio.Transport.Do, and raise interrupts from there:
 // WHvRequestInterrupt wakes a vCPU even while the hypervisor holds it halted,
 // which it does without exiting to us when the guest idles.
+//
+// The guest stops by writing the FADT's reset register, or its sleep control
+// register to power off.
 package vm
 
 import (
@@ -576,6 +579,8 @@ func (m *machine) portIn(port uint16) uint32 {
 		return uint32(m.uart.read(port - uartBase))
 	case port == 0x71:
 		return uint32(m.rtcRead())
+	case port == boot.SleepStatusPort:
+		return boot.SleepWakeStatus
 	}
 	return 0xffffffff // nothing there: PIC, PIT, PCI and i8042 all read as absent
 }
@@ -589,6 +594,12 @@ func (m *machine) portOut(port uint16, val uint32) {
 	case port == boot.ResetPort && byte(val) == boot.ResetValue:
 		// The FADT reset register, which is also the i8042 reset pulse.
 		m.stop.stop("guest requested reset", true, nil)
+	case port == boot.SleepControlPort:
+		// The FADT sleep control register: soft-off is the only state the
+		// DSDT names, so whatever state is entered stops the guest.
+		if typ, enter := boot.SleepRequest(byte(val)); enter {
+			m.stop.stop(fmt.Sprintf("guest powered off (sleep type %d)", typ), false, nil)
+		}
 	}
 }
 
