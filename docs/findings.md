@@ -232,3 +232,49 @@
   over every chunk the build had used. Compaction, built into a test
   kernel and run once the guest was idle, moved little: kernel pages do
   not move.
+- **Go's monotonic clock steps by about 100 µs on Windows.** Of a million
+  pairs of `time.Now()` calls, all but eleven read the same time, and the
+  smallest step was 96 µs. `QueryPerformanceCounter` counts in 100 ns and
+  costs about 60 ns a call, so runwhp times exits with it.
+- **WinHvEmulation spends most of an MMIO exit translating an address.**
+  For each access it emulated, it read 31 registers (0.5 µs), wrote 18
+  (0.4 µs) and translated the instruction's virtual address (4-7 µs),
+  around a device access of 1.3 µs: 10 µs an exit at boot, 15-20 µs under
+  I/O. Every access the guest's kernel made, in a boot and under I/O, was a
+  plain mov between a register and memory (`89`, `8B`, `8A`, some with REX),
+  whose bytes come with the exit, and decoding it in Go takes one or two
+  register calls: 2.3 µs an exit.
+- **A network frame over several receive buffers has to arrive whole.**
+  With mergeable buffers, the first buffer's header says how many the frame
+  takes. runwhp published each buffer as it filled it, and a guest polling
+  the ring on another vCPU could find the first before the rest; Linux then
+  drops the frame ("buffers missing", counted as a length error on eth0).
+  About 120 frames of 200 MB were lost so, and the host's stack retransmitted
+  them, with backoff: downloads through host-gateway took 0.7-6.6 s, and
+  once stalled for minutes. Published together, they take 0.6-0.75 s.
+- **Most of a small FUSE request was the vCPU waiting to be woken.** Of
+  about 190 µs per 820-byte write to a bind mount, Windows took 18 µs and
+  the three MMIO exits, through the emulator, 55 µs. Serving the request on
+  the vCPU that sent it, as blk does, took the write to about 140 µs, the
+  fast path to about 100 µs, and the rest of this iteration's changes to
+  about 85 µs.
+- **EVENT_IDX matters for the network, not the console.** With it, a
+  200 MB upload took 30-45% fewer interrupts and a download 60% fewer, and
+  the guest no longer notified the device each time it posted receive
+  buffers (256 times a boot before). Console output made as many exits
+  either way; it takes either about 1.0 s or about 1.75 s for 200 MB,
+  run to run, with or without it.
+- **Checksum offload is worth little with 64 KiB frames.** With the
+  guest leaving its checksums partial and the stack trusting them, a
+  200 MB upload took 0.37-0.39 s instead of 0.41-0.59 s and a little less
+  system time in the guest; a download took as long. gVisor decides for
+  each packet whether to compute a checksum, from the link's capabilities,
+  so they can follow the guest's driver.
+- **FUSE's writeback cache gathers small writes as a disk would.** On a
+  delegated bind mount, 20 MB written in 820-byte pieces went to the host
+  as 44 FUSE writes, with 13 setattrs for the times, and took 0.13 s
+  instead of 2.4 s. The kernel then trusts its own size and times for the
+  files it caches: after the host replaced a file the container had read,
+  the container still read the old contents, and its append wrote back the
+  whole page over the host's change. A file left open reached the host
+  within a few seconds, well before the 30 s the kernel allows.

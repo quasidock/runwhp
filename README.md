@@ -115,8 +115,8 @@ Containers that outlive the command, in the background:
 | `--network`, `--net` | `user` | `user` gives the container a network through runwhp; `none` leaves it only loopback |
 | `-p`, `--publish` | | `[IP:]HOSTPORT:PORT[/tcp]`: listen on the host and forward to the container's TCP port; repeatable. IP defaults to `127.0.0.1` |
 | `--add-host` | | `NAME:IP` or `NAME=IP`, added to `/etc/hosts`; repeatable. `NAME:host-gateway` also lets the container reach the host's `127.0.0.1` at that name |
-| `-v`, `--volume` | | `HOSTPATH:PATH[:ro]`: bind a host directory or file at `PATH`; a missing `HOSTPATH` is made as a directory. `NAME:PATH[:ro][,nocopy]`: mount the named volume `NAME`, made if missing. `PATH` alone: an anonymous volume, removed with the container. Repeatable. See [Host files](#host-files) and [Volumes](#volumes) |
-| `--mount` | | Docker's long form of `-v` and `--tmpfs`: `type=bind,source=HOSTPATH,target=PATH[,readonly]`, where `HOSTPATH` must exist; `type=volume[,source=NAME],target=PATH[,readonly][,volume-nocopy][,volume-opt=size=SIZE]`; `type=tmpfs,target=PATH[,tmpfs-size=SIZE][,tmpfs-mode=MODE]` |
+| `-v`, `--volume` | | `HOSTPATH:PATH[:ro][,delegated]`: bind a host directory or file at `PATH`; a missing `HOSTPATH` is made as a directory, and `delegated` lets the guest cache writes; see [Delegated mounts](#delegated-mounts). `NAME:PATH[:ro][,nocopy]`: mount the named volume `NAME`, made if missing. `PATH` alone: an anonymous volume, removed with the container. Repeatable. See [Host files](#host-files) and [Volumes](#volumes) |
+| `--mount` | | Docker's long form of `-v` and `--tmpfs`: `type=bind,source=HOSTPATH,target=PATH[,readonly][,consistency=delegated]`, where `HOSTPATH` must exist; `type=volume[,source=NAME],target=PATH[,readonly][,volume-nocopy][,volume-opt=size=SIZE]`; `type=tmpfs,target=PATH[,tmpfs-size=SIZE][,tmpfs-mode=MODE]` |
 | `--tmpfs` | | `PATH[:OPTIONS]`: mount a tmpfs, `noexec`, `nosuid` and `nodev` unless the options say `exec`, `suid` or `dev`; repeatable. See [Volumes](#volumes) |
 | `--storage-opt` | `size=64g` | `size=SIZE`: how large the container's writable layer may grow, `1g` to `16t`. See [Storage](#storage) |
 | `--pull` | `missing` | When to pull the image: `missing`, `always` or `never`. `never` also keeps runwhp from fetching its kernel |
@@ -280,8 +280,11 @@ container. Changes either side makes show on the other.
   the image, such as alpine's `/var/run`, the mount goes where the link
   leads. Mounts inside mounts work whatever order they are given in. A file
   bound over one runwhp writes, such as `/etc/hosts`, wins.
-- `:ro` makes the mount read-only, and `:rw`, the default, writable. `z`,
-  `Z`, `cached`, `delegated` and `consistent` are accepted and ignored.
+- `:ro` makes the mount read-only, and `:rw`, the default, writable.
+  `:delegated`, or `consistency=delegated` with `--mount`, lets the guest
+  cache writes; see [Delegated mounts](#delegated-mounts). `z`, `Z`,
+  `cached` and `consistent` are accepted and ignored. Options combine with
+  commas, as in `:ro,z`.
 
 **Owners and modes.** Windows has no Unix owners or modes. A file that has
 never had them shows as belonging to the container's user, the one `-u` or
@@ -317,6 +320,33 @@ events in the container, so file watchers there must poll.
 Removing a file that is open works as on Linux: the name goes at once and
 the open file stays readable. A rename replaces the target, even a read-only
 one. File locks are kept in the guest and are invisible to host programs.
+
+#### Delegated mounts
+
+Each `write()` to a bind mount reaches the host as it is made, which costs
+a program writing in small pieces dearly: about 100 µs a write on the test
+machine. `-v C:\out:/out:delegated` lets the guest gather writes in its page
+cache, as it does for its own disks, and send them in large pieces: when a
+file is closed or synced, when the guest's kernel writes back dirty pages,
+which it does within about 30 seconds, and when the container stops.
+Writing 200 MB in 820-byte pieces took 1.2 s on a delegated mount, against
+22-28 s on an ordinary one, but large writes followed by an `fsync` take
+about twice as long, since they go through the page cache first. The
+guest then trusts what it has cached:
+
+- A host program sees the container's writes to a file only once the
+  container closes or syncs it.
+- A container stopped hard, by a second Ctrl+C or a killed runwhp, loses
+  what it had not written back.
+- The guest keeps its own idea of the size and times of files it has
+  cached, so a host program's change to a file the container has used may
+  go unseen there, and the container's later writes can overwrite it.
+
+Delegate trees the container owns while it runs, such as build output,
+caches and installed dependencies, not files edited on the host at the same
+time. A read-only mount is never delegated. Delegated mounts are served by a
+second virtio-fs device, which takes one more interrupt line; see
+[Known gaps](docs/gaps.md).
 
 ### Memory
 
@@ -545,12 +575,20 @@ bzImage.
    each 2 MiB of it is committed, mapped into the guest and populated the
    first time runwhp's loader, a device or the guest touches it, the last
    as an exit for an unmapped address, after which the instruction runs
-   again.
+   again. Each access to a device's registers is an exit to runwhp, on the
+   vCPU's thread; the guest's kernel makes them with plain movs, which
+   runwhp decodes itself, from the instruction bytes the exit carries.
+   Anything else goes to `WinHvEmulation.dll`, several times slower.
 4. The guest gets one multiport virtio console, with ports named `stdout`,
    `stderr`, `stdin` and `control`; a virtio socket device; a virtio
    memory balloon; a virtio network device, unless `--network none`; a
-   virtio-fs device, with bind mounts; one read-only virtio-blk disk per
-   layer; the writable layer; and one disk per named volume. Each disk's
+   virtio-fs device, with bind mounts, and a second for delegated ones; one
+   read-only virtio-blk disk per layer; the writable layer; and one disk
+   per named volume. Every device offers notification suppression
+   (`VIRTIO_RING_F_EVENT_IDX`): the guest asks for interrupts only once it
+   has taken what it had, and runwhp for notifications only once it has run
+   out of buffers, so a guest refills its receive queues without an exit.
+   Each disk's
    serial number names it, so init does not depend on probe order. The vCPU
    that submits disk requests serves the first itself, without holding the
    device, and goroutines serve any others, up to 16 at a time per disk,
@@ -564,15 +602,22 @@ bzImage.
    of the vCPU that sent them and processed on other goroutines; frames for
    the guest go into receive buffers it has posted, or wait in a bounded
    backlog. The link's MTU is 65520, so bulk data crosses in few, large
-   frames. The stack takes packets for any address, and for each new TCP
-   connection or UDP flow it opens a host socket to the same destination
-   and copies between the two. Published ports are host listeners whose
-   connections the stack opens towards the guest.
+   frames, and neither side computes TCP and UDP checksums: the guest sends
+   frames with them left partial, and frames for it come marked valid,
+   since every frame ends in the stack. The stack takes packets for any
+   address, and for each new TCP connection or UDP flow it opens a host
+   socket to the same destination and copies between the two. Published
+   ports are host listeners whose connections the stack opens towards the
+   guest.
 6. The virtio-fs device's far end is a FUSE server inside runwhp, which
    serves every mount at once: its root, which only init sees, holds them as
-   entries `0`, `1`, and so on. Requests are served on goroutines, up to 16
-   at a time, through Windows' native API, and complete in whatever order
-   they finish. A read or write carries up to 512 KiB.
+   entries `0`, `1`, and so on. The vCPU that submits requests serves the
+   first itself, as for disks, and goroutines any others, up to 16 at a
+   time, through Windows' native API; requests complete in whatever order
+   they finish. A request about a file Windows may have to fetch first, such
+   as a OneDrive placeholder, always goes to a goroutine. A read or write
+   carries up to 512 KiB. Delegated mounts have a FUSE server of their own,
+   whose connection takes the kernel's writeback cache.
 7. `runwhp-init` mounts the layers under an overlay whose upper layer is on
    the writable layer, adds `/proc`, `/sys`, a minimal `/dev` and a
    hostname, configures `eth0` when there is a network, resolves the
@@ -601,7 +646,7 @@ bzImage.
    waits for the last output to reach the ports, reports how it ended, and
    resets the machine, which ends the VMM. First it freezes each volume's
    file system, and a kept writable layer's, which writes it back and
-   empties its journal, and writes back the bind mounts' file system, but
+   empties its journal, and writes back the bind mounts' file systems, but
    not a scratch disk's, which is about to be thrown away.
 9. `runwhp exec` asks the container's runwhp, on its pipe, to connect it
    to init's exec server, on vsock port 1024; runwhp dials it over the
@@ -620,7 +665,7 @@ bzImage.
 | --- | --- |
 | [`cmd/runwhp`](cmd/runwhp) | Command line |
 | [`internal/whp`](internal/whp) | Bindings for `WinHvPlatform.dll` and `WinHvEmulation.dll` |
-| [`internal/vm`](internal/vm) | Partition setup, guest memory committed as it is touched, vCPU loops, processor topology, serial port, RTC stub, I/O APIC |
+| [`internal/vm`](internal/vm) | Partition setup, guest memory committed as it is touched, vCPU loops, decoding of device register accesses, processor topology, serial port, RTC stub, I/O APIC |
 | [`internal/boot`](internal/boot) | Kernel loader, page tables, ACPI tables, initramfs builder. Builds on any OS |
 | [`internal/virtio`](internal/virtio) | virtio-mmio transport, block device, multiport console, network device, file system device, socket device, memory balloon. Builds on any OS |
 | [`internal/netstack`](internal/netstack) | The host end of the container's network: gVisor's netstack, TCP and UDP forwarding, DNS, published ports. Builds on any OS |
@@ -658,6 +703,7 @@ container's supervisor, with no daemon.
 | Concern | Approach | State |
 | --- | --- | --- |
 | Hypervisor | WHP from Go through `WinHvPlatform.dll`, no cgo | Done |
+| Device registers | Plain movs, all the guest uses, decoded by the VMM; `WinHvEmulation.dll` for anything else | Done |
 | Boot | Direct kernel boot (Linux 64-bit boot protocol), no firmware | Done |
 | Clock and timers | Hyper-V enlightenments supply TSC and APIC timer frequencies | Done |
 | Interrupts | Hypervisor's local APIC plus an emulated 64-pin I/O APIC | Done, edge-triggered only |
@@ -669,7 +715,7 @@ container's supervisor, with no daemon.
 | Container I/O | Multiport virtio console with named ports for stdout, stderr, stdin and control; pipes or a pty in the guest | Done, including `-i`, `-t`, resize and signals |
 | Guest agent | Tiny init as PID 1 that mounts the overlay and execs the process, instead of hcsshim's GCS plus runc | Done (`runwhp-init`), with an exec server |
 | Host to guest | Console ports for the main process; a virtio socket device for further connections | Done: `runwhp exec` uses vsock |
-| Bind mounts and volumes | virtio-fs, with a FUSE server in Go serving Windows files and keeping Unix metadata as WSL does; volumes as journaled ext4 disk images on virtio-blk | Done; a volume is used by one container at a time |
+| Bind mounts and volumes | virtio-fs, with a FUSE server in Go serving Windows files and keeping Unix metadata as WSL does, and the writeback cache for delegated mounts; volumes as journaled ext4 disk images on virtio-blk | Done; a volume is used by one container at a time |
 | Networking | User-mode network stack in the VMM (gVisor netstack); published ports are loopback listeners | Done, IPv4 only, TCP ports only |
 | Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | Done over runwhp's own images, plus `run`, `list`, `stats`, `stop`, `restart`, `rename` and `logs`; no OCI bundles |
 | Kernel | Our own build with virtio drivers built in, shipped as a signed OCI artifact | Done: Linux 6.18 LTS on ghcr.io, pinned by digest rather than signed |
@@ -822,12 +868,11 @@ starts, which covers decompressing the kernel and early memory setup.
   is off, or must there be a fallback that needs none?
 - virtio-mmio with generated ACPI, as spiked, or virtio over PCI with MSI-X,
   which avoids both the I/O APIC and the bytecode but needs PCI emulation?
-  MSI-X would also give each device a queue and an interrupt per vCPU.
+  MSI-X would also give each device a queue and an interrupt per vCPU, and
+  spare the two exits every virtio-mmio interrupt costs, reading the
+  interrupt status and acknowledging it: two of the three exits of a small
+  bind mount request.
 - What protection does the guest kernel owe a container from itself? The VM
   is the boundary with the host, and the container is the guest's only
   tenant, so KASLR is off; CPU mitigations are on, at a cost to system
   calls that has not been measured.
-- Should bind mounts use FUSE's writeback cache? The guest would gather
-  small writes into large ones before sending them to the host, but the
-  host would see writes late, and a host program changing a file the
-  container has open could have its change overwritten.

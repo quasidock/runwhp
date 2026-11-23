@@ -1,5 +1,16 @@
 # Status
 
+- **Iteration 10** (2026-11-23): I/O got faster. runwhp decodes the
+  guest's accesses to device registers itself instead of through
+  `WinHvEmulation.dll`, serves a bind mount's request on the vCPU that sent
+  it, and suppresses needless notifications and interrupts with
+  `EVENT_IDX`; the network device offers checksum offload. A small write
+  to a bind mount takes about 90-110 µs instead of 120-200, and with
+  `-v SRC:DST:delegated` the guest caches a bind mount's writes, which made
+  writing 200 MB in small pieces take 1.2 s instead of 22-28. A bug that
+  dropped frames for the guest, which made downloads slow and sometimes
+  stall, is fixed. See [Delegated mounts](../README.md#delegated-mounts)
+  and [Iteration 10 results](#iteration-10-results).
 - **Iteration 9** (2026-11-23): containers get as much memory as they
   need and give back what they free. Guest RAM goes on above 4 GiB, up to
   the machine's, and defaults to half of it. It is committed 2 MiB at a
@@ -707,3 +718,127 @@ The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
 the WSL kernel with its vsock modules passed with `--module`. WSL's kernel
 builds in the balloon and free page reporting, so it gives memory back
 too; it takes 64 MiB or so more of its own than runwhp's.
+
+## Iteration 10 results
+
+Measured on the test machine with runwhp's kernel, from Git Bash, with the
+store on NTFS (`C:`). "Iteration 9" is that iteration's build, run in turn
+with this one.
+
+Runs got a little faster, as the boot's 2,800 device accesses no longer go
+through the emulator, over seven runs:
+
+| Measurement | Iteration 9 | Iteration 10 |
+| --- | --- | --- |
+| `run --rm alpine:3.20 true`, `-m 512m` | 191-215 ms | 177-191 ms |
+| the same, default memory | 266-291 ms | 245-275 ms |
+
+Where a small request's time goes, for 20 MB written to a bind mount on
+NTFS in 820-byte pieces, 25,600 requests, before this iteration's changes
+and after them:
+
+| Per request | Before | After |
+| --- | --- | --- |
+| Wall time | about 190 µs | about 85 µs |
+| MMIO exits | 3.1, through the emulator, 17.8 µs each | 3.1, decoded by runwhp, 2.3 µs each besides the request |
+| Windows' `WriteFile` | about 18 µs | 10-12 µs |
+| Served by | a worker, while the vCPU halted | the vCPU that sent it |
+
+Bind mounts, timed inside the guest with `-m 1g`, over three runs. "Small
+writes" is 200 MB from `head -c`, about 820 bytes a write, then `sync`; the
+others end with an `fsync`:
+
+| Measurement | Iteration 9 | Iteration 10 | Iteration 10, delegated |
+| --- | --- | --- | --- |
+| NTFS, 200 MB in 1 MiB writes | 0.53 s | 0.44-0.50 s | 0.95-1.06 s |
+| NTFS, 20 MB in 4 KiB writes | 0.90-1.00 s | 0.34-0.57 s | 0.10-0.12 s |
+| NTFS, small writes | 30.2-51.9 s | 22.0-28.2 s | 1.17-1.18 s |
+| ReFS, 200 MB in 1 MiB writes | 0.52-0.64 s | 0.45-0.50 s | 1.03-1.09 s |
+| ReFS, 20 MB in 4 KiB writes | 0.53-1.06 s | 0.22-0.49 s | 0.10-0.11 s |
+| ReFS, small writes | 50.0-51.1 s | 25.3-27.9 s | 1.18-1.19 s |
+
+A delegated mount takes large writes followed by an `fsync` at about half
+the speed: the guest copies them into its page cache first, and writes
+them back in 512 KiB pieces when the `fsync` comes.
+
+The tree of 10,000 small files in 100 directories from iteration 5, on
+NTFS, in `golang:1.26` with `--cpus 4`, one run each:
+
+| Measurement | Iteration 9 | Iteration 10 | Iteration 10, delegated |
+| --- | --- | --- | --- |
+| `tar -x` | 37.7 s | 35.9 s | 35.2 s |
+| `git add -A` and `git commit` | 76.1 s | 63.3 s | 72.7 s |
+| `git status`, new container | 0.75 s | 0.41 s | 0.44 s |
+| `git status` again | 0.26 s | 0.19 s | 0.19 s |
+| `rm -rf` | 18.9 s | 15.6 s | 19.5 s |
+
+Making files is still slow: Windows takes most of the 3.5 ms each costs,
+and the writeback cache does not gather creates, renames or removals.
+
+Moving 200 MB, timed inside the guest, over four runs. Iteration 9 dropped
+some frames for the guest, as [Findings](findings.md) explains, which made
+downloads slow, and slower still each time the host's stack backed off:
+
+| Measurement | Iteration 9 | Iteration 10 |
+| --- | --- | --- |
+| to a host server through `host-gateway` (`dd \| nc`) | 0.43-0.74 s | 0.36-0.53 s |
+| from it (`wget`) | 0.50-6.39 s | 0.58-0.84 s |
+
+The same upload took 30-45% fewer interrupts with `EVENT_IDX`, and a
+download about 60% fewer.
+
+Output, over four runs:
+
+| Measurement | Iteration 9 | Iteration 10 |
+| --- | --- | --- |
+| 200 MB to stdout, to a file, boot included | 1.08-2.53 s | 1.01-1.84 s |
+| `exec` writing 200 MB to stdout, to a file | 1.06-1.09 s | 0.97-0.98 s |
+
+Console output takes about 1.0 s or about 1.8 s, run to run, in both.
+
+Reading the Go toolchain out of `golang:1.26`'s layers, `tar` of
+`/usr/local/go` with caches dropped, `--cpus 4 -m 1g`, three runs each in
+turn; each pair ran faster than the one before, as the host's cache warmed:
+
+| Build | Time |
+| --- | --- |
+| iteration 9 | 2.85 s, 2.78 s, 1.73 s |
+| iteration 10 | 2.58 s, 2.21 s, 1.29 s |
+
+A cold `GOOS=windows go build ./cmd/runwhp` in `golang:1.26` with
+`--cpus 16`, reading the source and module cache through read-only bind
+mounts, as in iteration 6, two runs each: 19.9 s with iteration 9, and
+17.2-17.9 s with iteration 10.
+
+The new tests cover:
+
+- the instruction decoder: every mov form Linux uses for device
+  registers, with each kind of memory operand, the forms it leaves to the
+  emulator, and opcodes past prefixes
+- `EVENT_IDX` against a simulated driver: interrupts held back until
+  `used_event`, notifications asked for only once the device has run out,
+  a chain added while the device asks, 70,000 chains across the 16-bit
+  wrap, the no-interrupt flag without it, and reset; and every device's
+  tests again with a driver that takes it, under the race detector
+- the network device: a frame over several receive buffers returned at
+  once, the checksum features, frames marked valid, and the driver's
+  choice across a reset
+- the stack: a guest leaving its checksums out, and frames for it with
+  checksums or without, as the guest takes them
+- virtio-fs: the first request served by the kicking goroutine and the
+  rest by workers, a request the handler holds slow sent to a worker, and
+  reset and draining with a request served either way
+- hostfs, on NTFS and, through `RUNWHP_TEST_DIR`, on ReFS: files marked
+  offline are slow, and write-only files readable with the writeback cache
+- FUSE: the writeback cache taken only when asked for and offered, and
+  requests about slow nodes kept off the vCPU
+- parsing `:delegated` and `consistency=`, shares numbered per file
+  system, and the device budget with both
+- end to end: nearly every device access served without the emulator;
+  delegated mounts: 20 MB in small writes and its checksum, appends,
+  renames and removals reaching the host after the run, a file closed or
+  synced reaching it while the container runs, and a consistent, a
+  delegated and a read-only mount in one container
+
+The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
+the WSL kernel with its vsock modules passed with `--module`.

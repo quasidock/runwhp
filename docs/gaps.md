@@ -29,10 +29,17 @@
   layer, as they would with `docker run --rm`.
 - A full host disk shows in the container as I/O errors on the writable layer
   or a volume.
-- Every `write()` to a bind mount is a request to the host, about 130 µs each
-  on the test machine, so a program writing in small pieces is slow there;
-  see [Iteration 5 results](status.md#iteration-5-results). Making files is slow too,
-  at 3-4 ms each, mostly in Windows itself.
+- Every `write()` to a bind mount is a request to the host, about
+  90-110 µs each on the test machine, so a program writing in small pieces
+  is slow there, unless the mount is delegated; see
+  [Iteration 10 results](status.md#iteration-10-results). Making files is
+  slow too, at about 3.5 ms each, mostly in Windows itself, delegated or
+  not.
+- A delegated bind mount's writes reach the host late, are lost if the
+  container is stopped hard, and can overwrite host changes to files the
+  container has cached; see [Delegated mounts](../README.md#delegated-mounts).
+  Large writes followed by an `fsync` take about twice as long on one,
+  copied into the guest's page cache first.
 - Host changes in bind mounts raise no inotify events in the container.
   Extended attributes cannot be set there, and file locks are not shared with
   host programs.
@@ -41,15 +48,15 @@
   `internal/kernel/pin.go`, and the pinned digest is the only check on it:
   builds are not signed.
 - An image can have at most 54 non-empty layers, one more with
-  `--network none`, one fewer with bind mounts, and one fewer for each
-  volume: each device, the writable layer, the vsock device and the
-  balloon included, takes an I/O APIC line.
+  `--network none`, one fewer with bind mounts, one fewer again with
+  delegated ones, and one fewer for each volume: each device, the writable
+  layer, the vsock device and the balloon included, takes an I/O APIC line.
 - The network is IPv4 only and carries no ICMP. Only TCP ports can be
   published, each with an explicit host port, and there is no `-P`, `--dns`
   or `--dns-search`.
-- The network device has neither notification suppression (EVENT_IDX) nor
-  checksum and segmentation offloads, so sending from the container is
-  limited to about 90 MB/s on the test machine.
+- The network device has one queue pair and no segmentation offload, which
+  the link's 65520-byte MTU makes up for in part: 200 MB crosses in about
+  0.4 s out of the container and 0.6-0.8 s into it on the test machine.
 - The cache only grows: there is no `images` or `rmi` yet.
 - Interrupts are edge-triggered only; level-triggered lines and EOI tracking
   are not implemented.
@@ -58,8 +65,14 @@
   itself, and runwhp has no ACPI power-off for it to use.
 - `--cpus` is a count, not Docker's quota, and there is no `--cpuset-cpus`.
 - Each device has one virtqueue, which every vCPU shares.
-- Each MMIO access takes several round trips through `WinHvEmulation.dll`;
-  a fast path for common instructions would cut the per-write output cost.
+- Every interrupt from a virtio device costs two exits beyond the one that
+  asked for it, as the guest reads its interrupt status and acknowledges
+  it: virtio-mmio has no other way, where MSI-X with virtio over PCI would.
+  A request to a bind mount takes three exits in all.
+- Device register accesses other than plain movs, which Linux does not
+  make, still go through `WinHvEmulation.dll`, several times slower.
+- 200 MB of console output takes either about 1.0 s or about 1.75 s, run to
+  run, for reasons not yet known.
 - A guest gives back only the RAM it has free in whole, aligned 2 MiB
   blocks. Without compaction in runwhp's kernel, the pages a guest keeps,
   its own kernel's included, end up scattered over the RAM it has used:
