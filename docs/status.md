@@ -1,5 +1,17 @@
 # Status
 
+- **Iteration 12** (2026-11-24): the store no longer only grows.
+  `images` lists what is cached, with Docker's image IDs. `rmi` removes
+  images, and `image prune`, `container prune` and `system prune` remove
+  what nothing uses: layers no image or container lists, images no
+  container was made from, stopped and created containers, old kernels
+  and, with `--volumes`, volumes. `system df` shows what each takes and
+  what a prune would free. Pulls and runs hold a lock on the store while
+  they resolve images, so no prune removes layers they are about to use,
+  and runs cost no more. The test machine's store had 141 images left by
+  the end-to-end tests, which no longer leave any. See
+  [Cleaning up](../README.md#cleaning-up) and
+  [Iteration 12 results](#iteration-12-results).
 - **Iteration 11** (2026-11-23): containers that run for a long time
   can be rejoined and keep good time. `attach` shows a running
   container's output and, for one in the background run with `-i`, takes
@@ -932,3 +944,100 @@ The new tests cover:
 
 The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
 the WSL kernel with its vsock modules passed with `--module`.
+
+## Iteration 12 results
+
+Measured on the test machine with runwhp's kernel, from Git Bash, with the
+store on NTFS (`C:`). "Iteration 11" is that iteration's build, run in turn
+with this one.
+
+Runs cost the same, though a run now holds the store's lock while it
+resolves its image, over seven runs:
+
+| Measurement | Iteration 11 | Iteration 12 |
+| --- | --- | --- |
+| `run --rm alpine:3.20 true`, `-m 512m` | 191-206 ms | 194-207 ms |
+| the same, default memory | 253-268 ms | 254-267 ms |
+
+Taking the lock and letting it go, file opening included, takes about
+0.1-0.14 ms on NTFS and 21 µs on ReFS.
+
+The new commands, on a store of their own holding three images and 100
+stopped containers, over five runs, with `list` for scale, which reads
+the same containers:
+
+| Measurement | Result |
+| --- | --- |
+| `list` | 90-96 ms |
+| `images` | 98-106 ms |
+| `system df` | 100-110 ms |
+| `system df -v` | 99-108 ms |
+| `rmi python:3.12-slim`, 4 layers | 115 ms |
+| `container prune` of the 100 | 572 ms |
+| `image prune -a` of the other two images, once the containers were gone | 73 ms |
+
+The 100 containers' writable layers took 338 MiB, about 3.4 MiB each: a
+new journaled ext4 file system, sparse, and what `true` left in it.
+
+The test machine's own store held 151 image records, 2.25 GiB of layers
+and one kernel, and no containers. 141 of the records, all but ten, were
+images two end-to-end tests had served from registries of their own, one
+record per run; their layers were mostly alpine's. `rmi` of the 141 took
+305 ms and freed seven small layers no other image listed. The store
+then held the ten images it had pulled from Docker Hub, all of which
+`system df` reports as reclaimable, since no container uses them.
+
+Fixed along the way:
+
+- Two runs pulling one image at once wrote its record to the same
+  temporary file, and readers did not let it be replaced; one of twelve
+  concurrent runs in the prune race test failed on it. See
+  [Findings](findings.md).
+- Input that a second attached runwhp sent after a `create -i`
+  container's input had ended could still reach the container, about
+  half the time.
+- `start -a` with its output going to a file printed it twice, once
+  through the attach and once from the runwhp it started.
+
+The new tests cover:
+
+- image records: their IDs, recorded and worked out for older records,
+  listing past records being written and junk, finding by reference and
+  by ID prefix, ambiguous prefixes, the repository and tag Docker shows,
+  and one reference recorded from eight goroutines while others read it
+- layers: listing, removing, and one a guest holds open, on NTFS and,
+  through `RUNWHP_TEST_DIR`, on ReFS; kernels: listing and removing
+- records replaced while a reader has them open, and from eight
+  goroutines at once
+- package gc, on NTFS and ReFS, over a store made by hand: which images
+  and containers list each layer, a container whose image was pulled
+  again, `--layer` files in the store, shared and unique sizes, what
+  dangles and what is unused, `rmi`'s rules, a layer held open, the kept
+  kernels, unused volumes, and the lock, shared and exclusive
+- `images`, `image inspect`, `rmi`, `image prune`, `container prune`,
+  `system df` and `system prune` on stores made by hand, and their
+  arguments
+- the sweep of image records a pull stopped writing
+- end to end, in stores of their own, pulling from a registry in the test
+  process:
+  - `images`, with the registry's configuration digests as IDs, its
+    filters and JSON, and `image inspect` by reference and ID prefix
+  - `rmi`, refused for an image a stopped container uses, `-f`, the
+    container starting without its image, and its layers pruned once it
+    is gone
+  - `image prune -a` declined, then keeping the image a running container
+    uses
+  - pruning in a loop while an image is pulled and while twelve runs pull
+    one with `--pull always`, which fails without the lock
+  - `container prune` of a stopped and a created container, whose runwhp
+    is gone after, beside a running one
+  - `system df` counting a container's 50 MB, and its `-v` and JSON
+  - `system prune -a --volumes` keeping a running container's image and
+    volume and the kernel, and removing the rest
+  - `start -a` with its output going to files
+
+The whole suite passes with 4 and 16 vCPUs on runwhp's kernel, and on the
+WSL kernel with its vsock modules passed with `--module`. With one vCPU
+it passes but for `TestKernelClock`, which fails now and then, as it did
+with iteration 11's build: the container can read the clock before init
+has set it at boot. See [Known gaps](gaps.md).

@@ -323,3 +323,41 @@
   against time.windows.com; iteration 10's guest, 0.2 s behind before,
   was 1.1 s ahead from then on, while one syncing every minute stayed
   within 50 ms.
+- **A layer a guest has open cannot be removed, or moved aside.** Guests
+  open layers for reading, shared only with readers, and `os.Remove` and
+  `os.Rename` of one then fail with a sharing violation, on NTFS and on
+  ReFS alike, while the guest carries on. A prune relies on it: it never
+  has to know which layers running guests hold, and skips any it cannot
+  remove.
+- **`LockFileEx` is a cheap store-wide lock.** Opening the store's lock
+  file, locking a byte of it shared, unlocking and closing it took about
+  0.1-0.14 ms on NTFS and 21 µs on ReFS, averaged over 1,000. Any number of
+  processes hold it shared at once; an exclusive lock waits for them all,
+  and is granted the moment the last holder is killed: Windows releases a
+  process's locks however it ends.
+- **Without that lock, a prune races pulls and runs.** With the shared
+  holds taken out, `image prune` in a loop removed the layers of an image
+  being pulled, between their conversion and its record, both times, and
+  `image prune -a` broke one or two of twelve runs pulling the image it
+  removed. With them, neither happened.
+- **An image record's configuration is not the blob.** Records are written
+  with `json.MarshalIndent`, which re-indents an embedded raw message, so
+  the configuration's hash is not its digest, and not the image ID Docker
+  shows: Docker 29.10's ID for `alpine:3.20` is the configuration's
+  digest, `bf8527eb`. Compacting the record's copy gave it back for
+  `alpine:3.20` and `python:3.12-slim`, but would not for a configuration
+  with characters JSON escapes for HTML, so a pull now records the digest
+  the manifest names.
+- **Layer files are not sparse.** tar2ext4 writes every block, so the 54
+  layers in the test machine's store took the 2.3 GB on disk their sizes
+  say.
+- **Pulls of one image at once collided.** Every pull wrote its record to
+  the same temporary file, and readers did not share delete; eight
+  goroutines recording one image while others read it failed 64 of 80
+  writes. Image records are now written as container records are.
+- **The end-to-end tests had filled the test machine's store.** Of its 147
+  image records, 137 were images two tests served from registries of their
+  own on a random port, one record per run. And Docker Hub allows 100
+  anonymous pulls an hour, which the new tests, each pulling into a store
+  of its own, used up within a few runs; they now pull from a registry in
+  the test process, fed once from Docker Hub.

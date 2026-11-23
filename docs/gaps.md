@@ -4,8 +4,8 @@
   cannot type into it: its input belongs to the runwhp that runs it. An
   attached runwhp that falls 4 MiB behind the container's output is cut
   off, rather than holding the output up.
-- There are no restart policies and no `container prune`; containers a
-  plain `run` keeps stay until `delete`.
+- There are no restart policies. Containers a plain `run` keeps stay
+  until `delete` or `container prune`.
 - Logs grow until the container is deleted, carry no timestamps, and are
   not rotated.
 - A foreground `run` ends with its terminal. A container in the background
@@ -58,7 +58,19 @@
 - The network device has one queue pair and no segmentation offload, which
   the link's 65520-byte MTU makes up for in part: 200 MB crosses in about
   0.4 s out of the container and 0.6-0.8 s into it on the test machine.
-- The cache only grows: there is no `images` or `rmi` yet.
+- The prunes take no `--filter`, such as `until=` or `label=`, and
+  `images` no filter but a repository. There is no `tag`, `save`, `load`
+  or `history`, and no build, so `system df` has no build cache.
+- An image's SIZE is that of its ext4 layers, as the store holds them,
+  so it differs from Docker's for the same image.
+- `system prune` removes every kernel but the one this runwhp boots, so
+  a runwhp of another version sharing the store fetches its kernel again.
+- `system prune --volumes` removes named volumes no container uses, where
+  Docker's removes only anonymous ones; runwhp's anonymous volumes live in
+  their containers' writable layers and go with them.
+- `container prune` stops the VMs of created containers to remove them,
+  since a created container's VM is already booted.
+- Nothing is pruned on its own: the store grows until a prune or `rmi`.
 - Interrupts are edge-triggered only; level-triggered lines and EOI tracking
   are not implemented.
 - The container cannot reboot, halt or power off its VM: it lacks
@@ -94,6 +106,11 @@
   Windows resumes: a container that sets its own clock has it put back.
   The resume hook is untested: the test machine's Modern Standby never
   paused a container, and it has no other sleep state.
+- The container's process can start before init has set the clock from
+  the host's at boot, and then sees it up to a second behind, as the
+  CMOS stub left it, until the time arrives. With one vCPU,
+  `TestKernelClock` caught this in 3 of 25 runs, and 7 of 25 with
+  iteration 11's build.
 - String port I/O is not handled and stops the VMM with an error.
 - It is unknown whether hosted Windows CI runners expose WHP, so the
   end-to-end tests run only by hand.

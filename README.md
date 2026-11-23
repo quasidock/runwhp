@@ -13,7 +13,8 @@ own, on a kernel of its own and on several processors. Containers are kept
 after they stop, can run in the background, and can be started again,
 stopped, signalled, attached to and run more commands in. A container has half the
 machine's memory by default, but takes only what it uses, and gives back
-what it frees.
+what it frees. Images, containers and volumes can be listed, measured and
+pruned as Docker's can.
 
 See [status](docs/status.md) for details.
 
@@ -98,6 +99,16 @@ Containers that outlive the command, in the background:
 .\out\runwhp.exe run --rm alpine:3.20 echo gone afterwards
 ```
 
+Keeping the store small:
+
+```powershell
+.\out\runwhp.exe images
+.\out\runwhp.exe rmi python:3.12-slim
+.\out\runwhp.exe system df -v
+.\out\runwhp.exe container prune
+.\out\runwhp.exe system prune -a
+```
+
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `-d`, `--detach` | off | Run the container in the background and print its ID; see [Containers](#containers) |
@@ -144,7 +155,9 @@ Images, layers and runwhp's kernel are cached in `%LOCALAPPDATA%\runwhp`, or
 in `RUNWHP_ROOT` when it is set. `runwhp pull` fetches the kernel as well as
 the image, so a machine prepared with it can run that image offline.
 Registry credentials come from Docker's configuration and credential helpers.
-Only `linux/amd64` images run. Nothing is ever removed from the cache yet.
+Only `linux/amd64` images run. `runwhp images` lists what is cached,
+and `rmi`, the prunes and `system df` keep it in check; see
+[Cleaning up](#cleaning-up).
 
 In Git Bash, set `MSYS_NO_PATHCONV=1`, or MSYS rewrites container paths such
 as `/tmp` into Windows paths before runwhp sees them; then
@@ -234,7 +247,7 @@ attached to a container run in the foreground gets its output only. The
 container's output never waits for an attached runwhp: one that falls
 4 MiB behind is cut off. `start -a` boots a stopped container, attaches,
 and only then starts its process, so its first output is not missed; it
-takes one container. `wait` prints how containers ended, once they have.
+takes one container, and its output also goes to the container's log. `wait` prints how containers ended, once they have.
 
 ```powershell
 .\out\runwhp.exe run -dit --name dev alpine:3.20 sh
@@ -499,6 +512,55 @@ takes them. What it holds counts against `--memory`.
 | `rm NAME...` | Remove volumes and all they hold |
 | `prune -a [-f]` | Remove every volume no container uses, after asking unless `-f`. Without `-a` it removes nothing: anonymous volumes go with their containers |
 
+### Cleaning up
+
+Images, their layers and runwhp's kernels stay in the store until they are
+removed, and so do containers, unless run with `--rm`, and volumes.
+`runwhp images` lists the images, `rmi` removes them, `system df` shows
+what everything takes and what pruning would free, and the prunes remove
+what nothing uses. Every prune asks before it removes anything, unless
+given `-f`.
+
+- **What keeps a layer.** Images share layers, and so do the containers
+  made from them. A layer stays while an image record or a container lists
+  it, stopped containers included. A container boots from the layers it
+  was made with, never from its image's record, so it keeps them when its
+  image is removed with `rmi -f` or pulled again to a new digest; they go
+  with the container.
+- **Dangling** means the layers nothing lists, which pulling an image
+  again leaves behind, and images whose layers are gone. runwhp keeps a
+  record for each reference pulled, so it has no untagged images.
+  `image prune` removes what dangles; with `-a`, it removes every image no
+  container was made from.
+- **Image IDs** are configuration digests, as Docker shows them, and an
+  image can be named by a unique prefix of one. An image's SIZE is that of
+  its ext4 layers, which is not Docker's.
+- **Containers.** `container prune` removes stopped containers and created
+  ones; a created container's VM, waiting to start, is stopped first, as
+  `delete` stops it.
+- **Kernels.** `system prune` removes every kernel but the one this runwhp
+  boots and any a container was given from the store with `--kernel`. A
+  runwhp of another version that boots one of those fetches it again.
+- **Volumes.** `system prune --volumes` removes every volume no container
+  uses, running or not, and what is in it, as `volume prune -a` does.
+  Docker's removes only anonymous volumes, which runwhp keeps in their
+  containers' writable layers.
+- **Prunes while runwhp pulls and runs.** A pull holds the store's lock
+  until its image is recorded, and a run or create until its container
+  is, so that no prune removes layers one has stored or resolved but not
+  yet recorded. A prune or `rmi` waits for them, and says so. A layer a
+  running guest has open is never removed.
+
+| Command | |
+| --- | --- |
+| `images [-q] [--digests] [--format table\|json] [REPOSITORY[:TAG]]` | List images, newest first; `image ls` too |
+| `image inspect IMAGE...` | Describe images as JSON, in the shape of `docker image inspect`, with the containers made from them |
+| `rmi [-f] IMAGE...` | Remove images, by reference, ID or ID prefix, and their layers nothing else lists. Without `-f`, refuses an image a container was made from, and an ID several references name; `image rm` too |
+| `image prune [-a] [-f]` | Remove dangling images and layers, or with `-a` every image no container uses |
+| `container prune [-f]` | Remove stopped and created containers. `container ls` and `container rm` are `list` and `delete` |
+| `system df [-v] [--format table\|json]` | Show what images, containers, volumes and kernels take, and what pruning would free; with `-v`, each of them |
+| `system prune [-a] [--volumes] [-f]` | Remove stopped and created containers, dangling images (with `-a`, unused ones), old kernels, temporary files, and with `--volumes` unused volumes |
+
 ### Kernel
 
 runwhp boots unmodified upstream Linux, currently 6.18.64 (a longterm
@@ -579,6 +641,9 @@ bzImage.
 1. The image's layers are pulled and each one is converted to an ext4 image
    with `tar2ext4`, with OCI whiteouts turned into overlayfs whiteouts. Layers
    are cached by diffID and verified against it; empty layers are skipped.
+   From before it resolves the image until its container is recorded,
+   runwhp holds the store's lock shared, so that no prune removes the
+   layers it is about to use.
 2. runwhp records the container in the store, takes its lock and serves
    its pipe; for `create`, `run -d` and `start`, a runwhp of its own does
    this and what follows, detached from the caller. It loads its kernel from
@@ -710,7 +775,9 @@ bzImage.
 | [`internal/volume`](internal/volume) | Named volumes in the store: names, making, listing and removing them |
 | [`internal/container`](internal/container) | Containers in the store: records, names, locks, state, logs, and the pipe of the runwhp running one, whose attach requests carry frames as logs hold them |
 | [`internal/hostfs`](internal/hostfs) | The host end of bind mounts: Windows files served as that file system, with WSL's metadata |
-| [`internal/image`](internal/image), [`internal/layer`](internal/layer) | Registry pulls, image records, layer conversion and cache |
+| [`internal/image`](internal/image), [`internal/layer`](internal/layer) | Registry pulls, image records, layer conversion and cache, and listing and removing them |
+| [`internal/gc`](internal/gc) | What in the store is in use: which images and containers list each layer, which volumes and kernels are used; removals planned from that, and the store lock that keeps pulls and runs from racing them |
+| [`internal/storefile`](internal/storefile) | Reading and replacing records while other runwhps read them |
 | [`internal/kernel`](internal/kernel) | The kernel artifact's format, the pinned build, and fetching it into the store |
 | [`kernel`](kernel) | The kernel's configuration and build; [`kernel/push`](kernel/push) publishes it |
 | [`internal/guestspec`](internal/guestspec) | The contract between host and guest |
@@ -746,13 +813,13 @@ container's supervisor, with no daemon.
 | Device discovery | Hardware-reduced ACPI with a generated DSDT | Done |
 | Memory | Guest RAM below the device hole and above 4 GiB, committed as the guest touches it; free page reporting through a virtio balloon gives back what it frees | Done; up to the host's RAM, half of it by default, given back 2 MiB at a time |
 | Root filesystem | One read-only ext4 image per layer on virtio-blk, overlayfs in the guest, writable layer on a disk of its own | Done; the writable layer is a sparse file, kept with the container, or with `--rm` formatted for each run |
-| Layer conversion | `tar2ext4`, cached per layer digest | Done |
+| Layer conversion | `tar2ext4`, cached per layer digest, removed once no image record or container lists it | Done |
 | Container I/O | Multiport virtio console with named ports for stdout, stderr, stdin and control; pipes or a pty in the guest | Done, including `-i`, `-t`, resize and signals |
 | Guest agent | Tiny init as PID 1 that mounts the overlay and execs the process, instead of hcsshim's GCS plus runc | Done (`runwhp-init`), with an exec server |
 | Host to guest | Console ports for the main process; a virtio socket device for further connections | Done: `runwhp exec` uses vsock |
 | Bind mounts and volumes | virtio-fs, with a FUSE server in Go serving Windows files and keeping Unix metadata as WSL does, and the writeback cache for delegated mounts; volumes as journaled ext4 disk images on virtio-blk | Done; a volume is used by one container at a time |
 | Networking | User-mode network stack in the VMM (gVisor netstack); published ports are loopback listeners | Done, IPv4 only, TCP ports only |
-| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | Done over runwhp's own images, plus `run`, `list`, `stats`, `stop`, `restart`, `rename`, `logs`, `attach` and `wait`; no OCI bundles |
+| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | Done over runwhp's own images, plus `run`, `list`, `stats`, `stop`, `restart`, `rename`, `logs`, `attach`, `wait`, `images`, `rmi`, the prunes and `system df`; no OCI bundles |
 | Kernel | Our own build with virtio drivers built in, shipped as a signed OCI artifact | Done: Linux 6.18 LTS on ghcr.io, pinned by digest rather than signed |
 
 ### Out of scope for now
