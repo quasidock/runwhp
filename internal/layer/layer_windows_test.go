@@ -24,3 +24,19 @@ func TestRemoveInUse(t *testing.T) {
 		t.Errorf("Remove once closed: %v", err)
 	}
 }
+
+// TestRemoveInUseKeepsSplit leaves a layer a guest holds whole: its tar
+// metadata stays with its ext4 image.
+func TestRemoveInUseKeepsSplit(t *testing.T) {
+	s := newStore(t)
+	d := putTar(t, s, "a")
+	p, _ := s.Path(d)
+	f, err := disk.Open(p, disk.ReadOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := s.Remove(d); !errors.Is(err, ErrInUse) || !s.HasSplit(d) {
+		t.Errorf("Remove of an open layer: %v; metadata still there: %v", err, s.HasSplit(d))
+	}
+}

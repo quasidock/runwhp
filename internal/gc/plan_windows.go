@@ -35,11 +35,12 @@ type Report struct {
 // Dangling plans the removal of what no image or container can use:
 // layers nothing lists, which is what an image pulled again leaves, and
 // records that cannot be read or have lost layers, which Get treats as
-// absent. runwhp keeps a record per reference, so it has no untagged images.
+// absent, and untagged images no container uses: those loaded or imported
+// without a reference, as Docker's image prune removes them.
 func (u *Usage) Dangling() *Plan {
 	p := &Plan{Records: append([]*image.Record(nil), u.Junk...)}
 	for _, img := range u.Images {
-		if !img.Complete {
+		if !img.Complete || image.Untagged(img.Ref) && len(img.Containers) == 0 {
 			p.Records = append(p.Records, img.Record)
 		}
 	}
@@ -202,6 +203,7 @@ func (u *Usage) Apply(p *Plan) *Report {
 			r.Freed += l.Size
 		}
 	}
+	r.Freed += u.sweepBlobs(p.Records, r)
 	for _, k := range p.Kernels {
 		if err := u.kernels.Remove(k.Digest); err != nil {
 			r.Errors = append(r.Errors, err)
@@ -224,6 +226,40 @@ func (u *Usage) Apply(p *Plan) *Report {
 		}
 	}
 	return r
+}
+
+// sweepBlobs removes the configuration blobs no record keeps once the
+// removed records are gone, and returns what that freed. A record keeps
+// the blob its ID names. Blobs are a few KB each, and not reported.
+func (u *Usage) sweepBlobs(removed []*image.Record, r *Report) int64 {
+	gone := map[string]bool{}
+	for _, rec := range removed {
+		gone[strings.ToLower(rec.Path)] = true
+	}
+	kept := map[string]bool{}
+	for _, img := range u.Images {
+		if !gone[strings.ToLower(img.Path)] {
+			kept[img.ID()] = true
+		}
+	}
+	blobs, err := u.images.Blobs()
+	if err != nil {
+		r.Errors = append(r.Errors, err)
+		return 0
+	}
+	var freed int64
+	for _, d := range blobs {
+		if kept[d] {
+			continue
+		}
+		size := u.images.BlobSize(d)
+		if err := u.images.RemoveBlob(d); err != nil {
+			r.Errors = append(r.Errors, err)
+			continue
+		}
+		freed += size
+	}
+	return freed
 }
 
 // describe names containers for a message: by name, or by short ID.

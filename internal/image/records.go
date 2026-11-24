@@ -105,8 +105,7 @@ func (s *Store) readRecord(path string) *Record {
 // else every record whose ID is arg or starts with it, with or without
 // "sha256:". A prefix that matches two different IDs is ambiguous.
 func (s *Store) Find(arg string) ([]*Record, error) {
-	if r, err := normalize(arg); err == nil {
-		path := s.recordPath(r)
+	if path, err := s.recordFile(arg); err == nil {
 		if _, err := os.Stat(path); err == nil {
 			rec := s.readRecord(path)
 			if rec.Err != nil {
@@ -151,13 +150,26 @@ func (s *Store) Remove(rec *Record) error {
 }
 
 // Put records img as pulled by ref, as Pull does. It is for tests and for
-// whatever brings images in other than by pulling them.
+// whatever brings images in other than by pulling them. An untagged ref,
+// sha256:<id>, records an image with no reference.
 func (s *Store) Put(ref string, img *Image) error {
-	r, err := normalize(ref)
+	path, err := s.recordFile(ref)
 	if err != nil {
 		return err
 	}
-	return s.writeRecord(r, img)
+	return s.writeRecordAt(path, img)
+}
+
+// Untagged reports whether ref is the one an image loaded or imported
+// without a reference is recorded under: sha256:<id>. Docker lists such an
+// image as <none>:<none>, and image prune removes it, as dangling.
+func Untagged(ref string) bool {
+	h, ok := strings.CutPrefix(ref, "sha256:")
+	if !ok || len(h) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(h)
+	return err == nil
 }
 
 // Familiar writes a normalized reference as Docker shows it, without
@@ -175,6 +187,9 @@ func Familiar(ref string) string {
 // Display splits a normalized reference into the repository and tag
 // columns Docker lists images with. An image pulled by digest has no tag.
 func Display(ref string) (repo, tag string) {
+	if Untagged(ref) {
+		return "<none>", "<none>"
+	}
 	r, err := name.ParseReference(ref)
 	if err != nil {
 		return ref, "<none>"

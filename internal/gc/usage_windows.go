@@ -113,8 +113,12 @@ func Load(root string) (*Usage, error) {
 		return nil, err
 	}
 	for _, d := range diffIDs {
-		p, _ := u.images.Layers.Path(d)
-		u.Layers[d] = &Layer{DiffID: d, Size: allocated(p)}
+		l := &Layer{DiffID: d}
+		// Its ext4 image and its tar metadata.
+		for _, p := range u.images.Layers.Files(d) {
+			l.Size += allocated(p)
+		}
+		u.Layers[d] = l
 	}
 
 	recs, err := u.images.List()

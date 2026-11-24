@@ -159,7 +159,12 @@ func cmdImages(args []string, stdout io.Writer) int {
 				size += " (layers missing)"
 			}
 			if digests {
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", r.Repository, r.Tag, r.Digest, shortID(r.ID), created, size)
+				// A tag, a load or an import gives no registry digest.
+				digest := r.Digest
+				if digest == "" {
+					digest = "<none>"
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", r.Repository, r.Tag, digest, shortID(r.ID), created, size)
 			} else {
 				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", r.Repository, r.Tag, shortID(r.ID), created, size)
 			}
@@ -268,9 +273,15 @@ func cmdImageInspect(args []string, stdout io.Writer) int {
 		}
 		info := imageInfo{Id: found[0].ID()}
 		for _, rec := range found {
+			if image.Untagged(rec.Ref) {
+				continue
+			}
 			repo, _ := image.Display(rec.Ref)
 			info.RepoTags = append(info.RepoTags, image.Familiar(rec.Ref))
-			info.RepoDigests = append(info.RepoDigests, repo+"@"+rec.Digest)
+			// A tag, a load or an import gives no registry digest.
+			if rec.Digest != "" {
+				info.RepoDigests = append(info.RepoDigests, repo+"@"+rec.Digest)
+			}
 		}
 		img := byPath[strings.ToLower(found[0].Path)]
 		if img == nil {

@@ -219,3 +219,74 @@ func TestPutAtOnce(t *testing.T) {
 		t.Errorf("%d records", len(recs))
 	}
 }
+
+// TestUntagged records an image with no reference, as load and import do
+// without one, and finds and runs it by ID.
+func TestUntagged(t *testing.T) {
+	s := Open(t.TempDir())
+	cfg := json.RawMessage(`{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}`)
+	id := "sha256:" + strings.Repeat("c4", 32)
+	if !Untagged(id) || Untagged("alpine:3.20") || Untagged("sha256:abc") {
+		t.Fatal("Untagged")
+	}
+	if err := s.Put(id, &Image{Ref: id, ConfigDigest: id, Config: cfg}); err != nil {
+		t.Fatal(err)
+	}
+	recs, err := s.List()
+	if err != nil || len(recs) != 1 || recs[0].Ref != id || !recs[0].Complete {
+		t.Fatalf("List = %v, %v", recs, err)
+	}
+	if repo, tag := Display(id); repo != "<none>" || tag != "<none>" {
+		t.Errorf("Display = %s %s", repo, tag)
+	}
+	for _, arg := range []string{id, id[7:], "c4c4c4"} {
+		if found, err := s.Find(arg); err != nil || len(found) != 1 || found[0].Ref != id {
+			t.Errorf("Find(%s) = %v, %v", arg, found, err)
+		}
+		if img, err := s.Ensure(context.Background(), arg, PullNever); err != nil || img.Ref != id {
+			t.Errorf("Ensure(%s) = %v, %v", arg, img, err)
+		}
+	}
+	if _, err := s.Ensure(context.Background(), "c4c5", PullNever); err == nil {
+		t.Error("Ensure found an ID prefix that matches nothing")
+	}
+}
+
+func TestBlobs(t *testing.T) {
+	s := Open(t.TempDir())
+	data := []byte(`{"architecture":"amd64"}`)
+	d := digestOf(data)
+	if _, err := s.Blob(d); !errors.Is(err, ErrNoBlob) {
+		t.Errorf("Blob of an empty store: %v", err)
+	}
+	if err := s.PutBlob(d, append(data, ' ')); err == nil {
+		t.Error("stored a blob under the wrong digest")
+	}
+	if err := s.PutBlob(d, data); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Blob(d); err != nil || string(got) != string(data) {
+		t.Errorf("Blob = %q, %v", got, err)
+	}
+	if ds, err := s.Blobs(); err != nil || len(ds) != 1 || ds[0] != d || s.BlobSize(d) != int64(len(data)) {
+		t.Errorf("Blobs = %v, %v; size %d", ds, err, s.BlobSize(d))
+	}
+	p, _ := s.blobPath(d)
+	os.WriteFile(p, []byte("damaged"), 0o644)
+	if _, err := s.Blob(d); err == nil || errors.Is(err, ErrNoBlob) {
+		t.Errorf("Blob of a damaged blob: %v", err)
+	}
+	if _, err := s.RawConfig(&Image{Ref: "x"}); !errors.Is(err, ErrNoBlob) {
+		t.Errorf("RawConfig of a record without a configuration digest: %v", err)
+	}
+	if err := s.RemoveBlob(d); err != nil || len(must(s.Blobs())) != 0 {
+		t.Errorf("RemoveBlob: %v", err)
+	}
+}
+
+func must[T any](v T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return v
+}

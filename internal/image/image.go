@@ -49,10 +49,17 @@ func Open(root string) *Store {
 	}
 }
 
-// Image is a pulled image.
+// Image is what an image record holds: an image pulled, loaded, imported
+// or tagged.
 type Image struct {
-	Ref    string `json:"ref"`    // normalized reference it was pulled by
-	Digest string `json:"digest"` // manifest digest
+	// Ref is the normalized reference the image was pulled, loaded, imported
+	// or tagged as, or sha256:<id> for an image loaded or imported without
+	// one; see Untagged.
+	Ref string `json:"ref"`
+	// Digest is the registry manifest's digest, or empty for an image that
+	// did not come from a registry by this reference: one loaded, imported
+	// or tagged.
+	Digest string `json:"digest"`
 	// ConfigDigest is the configuration blob's digest, as the manifest names
 	// it: the image's ID, as Docker shows it. Records written before
 	// iteration 12 lack it.
@@ -140,9 +147,24 @@ func normalize(ref string) (name.Reference, error) {
 	return r, nil
 }
 
-func (s *Store) recordPath(ref name.Reference) string {
-	sum := sha256.Sum256([]byte(ref.Name()))
+func (s *Store) recordPath(ref name.Reference) string { return s.recordAt(ref.Name()) }
+
+func (s *Store) recordAt(name string) string {
+	sum := sha256.Sum256([]byte(name))
 	return filepath.Join(s.Root, "images", hex.EncodeToString(sum[:])+".json")
+}
+
+// recordFile is the file of the record of ref: a reference, normalized
+// here, or an untagged image's sha256:<id>.
+func (s *Store) recordFile(ref string) (string, error) {
+	if Untagged(ref) {
+		return s.recordAt(ref), nil
+	}
+	r, err := normalize(ref)
+	if err != nil {
+		return "", err
+	}
+	return s.recordPath(r), nil
 }
 
 func (s *Store) progressf(format string, a ...any) {
@@ -157,11 +179,11 @@ func (s *Store) progressf(format string, a ...any) {
 
 // Get returns the local record of ref if it and all its layers are present.
 func (s *Store) Get(ref string) (*Image, error) {
-	r, err := normalize(ref)
+	path, err := s.recordFile(ref)
 	if err != nil {
 		return nil, err
 	}
-	data, err := storefile.Read(s.recordPath(r))
+	data, err := storefile.Read(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrNotPresent
 	} else if err != nil {
@@ -169,7 +191,7 @@ func (s *Store) Get(ref string) (*Image, error) {
 	}
 	var img Image
 	if err := json.Unmarshal(data, &img); err != nil {
-		return nil, fmt.Errorf("image record for %s: %w", r.Name(), err)
+		return nil, fmt.Errorf("image record for %s: %w", ref, err)
 	}
 	layers, err := img.Layers()
 	if err != nil {
@@ -189,6 +211,10 @@ func (s *Store) Ensure(ctx context.Context, ref string, policy Policy) (*Image, 
 		img, err := s.Get(ref)
 		if err == nil || !errors.Is(err, ErrNotPresent) {
 			return img, err
+		}
+		// An image ID, or a prefix of one, as `docker run` takes it.
+		if recs, err := s.Find(ref); err == nil && recs[0].Complete {
+			return recs[0].Image, nil
 		}
 		if policy == PullNever {
 			return nil, fmt.Errorf("image %s is not present locally and --pull=never was given", ref)
@@ -274,6 +300,9 @@ func (s *Store) Pull(ctx context.Context, ref string) (*Image, error) {
 		return nil, firstErr
 	}
 
+	if err := s.PutBlob(img.ConfigDigest, raw); err != nil {
+		return nil, fmt.Errorf("pulling %s: configuration: %w", r.Name(), err)
+	}
 	if err := s.writeRecord(r, img); err != nil {
 		return nil, err
 	}
@@ -299,11 +328,14 @@ func (s *Store) fetchLayer(ctx context.Context, l v1.Layer, diffID string) error
 }
 
 func (s *Store) writeRecord(r name.Reference, img *Image) error {
+	return s.writeRecordAt(s.recordPath(r), img)
+}
+
+func (s *Store) writeRecordAt(path string, img *Image) error {
 	data, err := json.MarshalIndent(img, "", "  ")
 	if err != nil {
 		return err
 	}
-	path := s.recordPath(r)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}

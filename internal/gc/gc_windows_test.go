@@ -487,3 +487,92 @@ func TestLock(t *testing.T) {
 	}
 	release()
 }
+
+// TestSplitsAndBlobs counts a layer's tar metadata with it and removes it
+// with it, and removes configuration blobs no record keeps.
+func TestSplitsAndBlobs(t *testing.T) {
+	s := newStore(t)
+	is := image.Open(s.root)
+	// D's tar metadata, and an orphan: metadata whose ext4 image is gone,
+	// as a removal that stopped halfway leaves it.
+	dsplit, _ := is.Layers.SplitPath(s.d)
+	os.WriteFile(dsplit, make([]byte, 64<<10), 0o644)
+	orphan := digestOf("layer H")
+	hsplit, _ := is.Layers.SplitPath(orphan)
+	os.WriteFile(hsplit, make([]byte, 64<<10), 0o644)
+	// Blobs: app's and other's configurations, and one no record keeps.
+	for _, id := range []string{"one", "two", "gone"} {
+		data := []byte(`{"id":"` + id + `"}`)
+		p := filepath.Join(s.root, "blobs", "sha256", strings.TrimPrefix(digestOf(id), "sha256:"))
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		os.WriteFile(p, data, 0o644)
+	}
+
+	u := load(t, s.root)
+	if d, a := u.Layers[s.d], u.Layers[s.a]; d.Size <= a.Size {
+		t.Errorf("D with its metadata takes %d, no more than A alone, %d", d.Size, a.Size)
+	}
+	if u.Layers[orphan] == nil || u.Layers[orphan].Rooted() {
+		t.Fatalf("orphan metadata: %+v", u.Layers[orphan])
+	}
+	r := u.Apply(u.Dangling())
+	if len(r.Errors) > 0 {
+		t.Fatal(r.Errors)
+	}
+	for _, p := range []string{dsplit, hsplit} {
+		if _, err := os.Stat(p); err == nil {
+			t.Errorf("%s left", p)
+		}
+	}
+	blobs, _ := is.Blobs()
+	if strings.Join(blobs, " ") != strings.Join(sortedDigests("one", "two"), " ") {
+		t.Errorf("blobs left: %v", blobs)
+	}
+
+	// Removing other:1 removes its blob; app's stays with app:latest.
+	u = load(t, s.root)
+	p, errs := u.RemoveImages([]string{"other:1", "app:1"}, true)
+	if len(errs) > 0 {
+		t.Fatal(errs)
+	}
+	u.Apply(p)
+	if blobs, _ := is.Blobs(); strings.Join(blobs, " ") != digestOf("one") {
+		t.Errorf("blobs left after rmi: %v", blobs)
+	}
+}
+
+func sortedDigests(ids ...string) []string {
+	var out []string
+	for _, id := range ids {
+		out = append(out, digestOf(id))
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TestUntaggedDangling prunes an image loaded without a reference, unless
+// a container uses it, as Docker's image prune does.
+func TestUntaggedDangling(t *testing.T) {
+	f := &fixture{t, testRoot(t)}
+	a, b := f.layer("A", 64<<10), f.layer("B", 64<<10)
+	cfg := func(layers ...string) []byte {
+		b, _ := json.Marshal(map[string]any{"architecture": "amd64", "os": "linux",
+			"rootfs": map[string]any{"type": "layers", "diff_ids": layers}})
+		return b
+	}
+	is := image.Open(f.root)
+	unused, used := digestOf("unused"), digestOf("used")
+	is.Put(unused, &image.Image{Ref: unused, ConfigDigest: unused, Config: cfg(a)})
+	usedImg := &image.Image{Ref: used, ConfigDigest: used, Config: cfg(b)}
+	is.Put(used, usedImg)
+	f.container("c1", container.Stopped, from(usedImg))
+
+	u := load(t, f.root)
+	p := u.Dangling()
+	if len(p.Records) != 1 || p.Records[0].Ref != unused {
+		t.Errorf("Dangling records: %v", p.Records)
+	}
+	if got := diffIDs(p.Layers); len(got) != 1 || got[0] != a {
+		t.Errorf("Dangling layers: %v", got)
+	}
+}

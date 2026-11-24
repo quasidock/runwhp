@@ -134,6 +134,17 @@ func TestPullAndCache(t *testing.T) {
 		}
 		f.Close()
 	}
+	// The pull kept what save needs: each layer's tar metadata, and the
+	// configuration blob as the registry served it.
+	for _, d := range layers {
+		if !s.Layers.HasSplit(d) {
+			t.Errorf("layer %s has no tar metadata", d)
+		}
+	}
+	raw, _ := pushed.RawConfigFile()
+	if blob, err := s.RawConfig(img); err != nil || !bytes.Equal(blob, raw) {
+		t.Errorf("configuration blob: %v; equal %v", err, bytes.Equal(blob, raw))
+	}
 	if !strings.Contains(progress.String(), "converting to ext4") {
 		t.Errorf("no progress reported: %q", progress.String())
 	}

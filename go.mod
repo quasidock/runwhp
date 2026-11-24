@@ -6,6 +6,7 @@ require (
 	github.com/Microsoft/go-winio v0.6.4
 	github.com/Microsoft/hcsshim v0.15.0
 	github.com/google/go-containerregistry v0.22.1
+	github.com/vbatts/tar-split v0.12.3
 	golang.org/x/net v0.59.0
 	golang.org/x/sys v0.49.0
 	golang.org/x/term v0.47.0
