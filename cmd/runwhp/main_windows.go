@@ -23,6 +23,7 @@ const usage = `Usage:
   runwhp restart [-t SECONDS] CONTAINER...      stop containers and start them again
   runwhp pause CONTAINER...                     freeze every process in containers
   runwhp unpause CONTAINER...                   thaw what runwhp pause froze
+  runwhp cp [-a] [-L] SRC DEST                  copy files into or out of a container, named as CONTAINER:PATH
   runwhp logs [-f] CONTAINER                    print the output of a container in the background
   runwhp list [-q] [--format table|json]        list containers
   runwhp state CONTAINER                        describe a container's state as JSON
@@ -114,6 +115,8 @@ func realMain(args []string) int {
 		return cmdLogs(args[1:], os.Stdout, os.Stderr)
 	case "exec":
 		return cmdExec(args[1:])
+	case "cp":
+		return cmdCp(args[1:], os.Stdin, os.Stdout, os.Stderr)
 	case "pause":
 		return cmdPause(args[1:], os.Stdout)
 	case "unpause":
