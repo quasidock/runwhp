@@ -1,6 +1,7 @@
 package container
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"errors"
@@ -347,6 +348,44 @@ type LogPrinter struct {
 	// Done is set once a line written after Until has been read, after
 	// which following can stop.
 	Done bool
+
+	// Output is buffered, a stream's buffer flushed before the other is
+	// written to, so that they keep their order; last is the stream
+	// written to last. stamp is the last time printed, as text.
+	out, errs *bufio.Writer
+	last      byte
+	stampAt   time.Time
+	stamp     string
+}
+
+// writer is where stream's output goes, the other stream's flushed first.
+func (p *LogPrinter) writer(stream byte) (*bufio.Writer, error) {
+	if p.out == nil {
+		p.out, p.errs = bufio.NewWriterSize(p.Stdout, 64<<10), bufio.NewWriterSize(p.Stderr, 64<<10)
+	}
+	w, other := p.out, p.errs
+	if stream == Stderr {
+		w, other = p.errs, p.out
+	}
+	if p.last != stream && p.last != 0 {
+		if err := other.Flush(); err != nil {
+			return nil, err
+		}
+	}
+	p.last = stream
+	return w, nil
+}
+
+// flush writes out what is buffered.
+func (p *LogPrinter) flush() error {
+	if p.out == nil {
+		return nil
+	}
+	err := p.out.Flush()
+	if e := p.errs.Flush(); err == nil {
+		err = e
+	}
+	return err
 }
 
 // NewLogPrinter prepares to print the log in dir. With a Tail, it reads the
@@ -392,6 +431,14 @@ func (p *LogPrinter) keepTime(t time.Time) bool {
 // Copy prints what the log holds now, and returns how many bytes of output
 // it printed.
 func (p *LogPrinter) Copy() (int64, error) {
+	total, err := p.copy()
+	if ferr := p.flush(); err == nil {
+		err = ferr
+	}
+	return total, err
+}
+
+func (p *LogPrinter) copy() (int64, error) {
 	var total int64
 	for {
 		fr, err := p.r.Next()
@@ -416,12 +463,16 @@ func (p *LogPrinter) Copy() (int64, error) {
 			if !p.printing[pc.stream] {
 				return nil
 			}
-			w := p.Stdout
-			if pc.stream == Stderr {
-				w = p.Stderr
+			w, err := p.writer(pc.stream)
+			if err != nil {
+				return err
 			}
 			if pc.start && p.Filter.Timestamps && !pc.time.IsZero() {
-				if _, err := io.WriteString(w, pc.time.UTC().Format(LogTimeFormat)+" "); err != nil {
+				// Lines from one frame share its time.
+				if !pc.time.Equal(p.stampAt) || p.stamp == "" {
+					p.stampAt, p.stamp = pc.time, pc.time.UTC().Format(LogTimeFormat)+" "
+				}
+				if _, err := w.WriteString(p.stamp); err != nil {
 					return err
 				}
 			}
