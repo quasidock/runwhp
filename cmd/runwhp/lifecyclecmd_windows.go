@@ -260,7 +260,9 @@ func startContainer(ctx context.Context, store *container.Store, ref string) err
 			return err
 		}
 		if errors.Is(errFromReply(rep), container.ErrRunning) {
-			return nil // another runwhp started it first
+			// Another runwhp started it first, or a cp, export, diff or
+			// commit holds it.
+			return busyOrStarted(store, c)
 		}
 	}
 	if !rep.OK {
