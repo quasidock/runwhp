@@ -244,10 +244,7 @@ func cmdSupervise(args []string) int {
 		bio.stdin = os.Stdin
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	proxy := &signalProxy{stop: cancel, queue: newControlQueue(), logf: logf}
-	sup, err := supervise(root, store, rec, output, proxy)
+	sup, err := supervise(root, store, rec, output)
 	if err != nil {
 		report.fail(err, nil)
 		return 1
@@ -255,15 +252,23 @@ func cmdSupervise(args []string) int {
 	sup.files = files
 	// With -i and no file or pipe for input, the input is attached runwhps'.
 	sup.streams(&bio, cfg.Stdin && bio.stdin == nil, cfg.StdinOnce)
-	hooks := sup.hooks(waitStart)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	proxy := &signalProxy{stop: cancel, queue: newControlQueue(), logf: logf}
+	b := sup.beginBoot(proxy)
+	if sup.stdin != nil {
+		bio.stdin = sup.stdin.view(b.exited)
+	}
+	hooks := sup.hooks(b, waitStart)
 	if waitStart {
 		hooks.ready = func() {
-			sup.isReady()
+			sup.isReady(b)
 			report.ok(container.Created)
 		}
 	} else {
 		hooks.started = func(pid int) {
-			sup.started(pid)
+			sup.started(b, pid)
 			sup.persist()
 			report.ok(container.Running)
 		}
@@ -278,11 +283,12 @@ func cmdSupervise(args []string) int {
 			e = fmt.Errorf("the container exited with %d before it was ready", code)
 		}
 		sup.mu.Lock()
-		console := sup.console
+		console := b.console
 		sup.mu.Unlock()
 		report.failCode(e, code, console)
 	}
-	sup.finish(code, err)
+	sup.endBoot(b, code, err)
+	sup.finish()
 	return 0
 }
 

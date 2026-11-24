@@ -180,7 +180,9 @@ type attachStdin struct {
 	ended chan struct{}
 	end   sync.Once
 	once  bool // the first attached runwhp's end of input ends it
-	cur   []byte
+
+	mu  sync.Mutex
+	cur []byte // taken from ch, not yet read
 }
 
 // attachInputBacklog is how many pieces of input wait for the container
@@ -191,22 +193,50 @@ func newAttachStdin(once bool) *attachStdin {
 	return &attachStdin{ch: make(chan []byte, attachInputBacklog), ended: make(chan struct{}), once: once}
 }
 
-// Read is the console's, for the container's stdin port.
-func (a *attachStdin) Read(p []byte) (int, error) {
-	for len(a.cur) == 0 {
+// view is the container's input for one boot, for its console's stdin
+// port: it ends once done is closed, as the boot's VM goes, leaving what
+// it has not handed out for the next boot's.
+func (a *attachStdin) view(done <-chan struct{}) io.Reader { return &stdinView{a, done} }
+
+type stdinView struct {
+	a    *attachStdin
+	done <-chan struct{}
+}
+
+func (v *stdinView) Read(p []byte) (int, error) {
+	a := v.a
+	for {
+		// The boot's end goes first: select picks among ready cases at
+		// random.
 		select {
-		case a.cur = <-a.ch:
+		case <-v.done:
+			return 0, io.EOF
+		default:
+		}
+		a.mu.Lock()
+		if len(a.cur) > 0 {
+			n := copy(p, a.cur)
+			a.cur = a.cur[n:]
+			a.mu.Unlock()
+			return n, nil
+		}
+		a.mu.Unlock()
+		var next []byte
+		select {
+		case next = <-a.ch:
 		case <-a.ended:
 			select {
-			case a.cur = <-a.ch: // what came before the end goes first
+			case next = <-a.ch: // what came before the end goes first
 			default:
 				return 0, io.EOF
 			}
+		case <-v.done:
+			return 0, io.EOF
 		}
+		a.mu.Lock()
+		a.cur = next
+		a.mu.Unlock()
 	}
-	n := copy(p, a.cur)
-	a.cur = a.cur[n:]
-	return n, nil
 }
 
 // push passes input on, waiting while attachInputBacklog pieces wait.
@@ -243,13 +273,13 @@ func (s *supervisor) attach(c net.Conn, r *bufio.Reader, req container.Request) 
 		data, _ := json.Marshal(rep)
 		c.Write(append(data, '\n'))
 	}
-	if s.status() == container.Stopped {
+	s.mu.Lock()
+	in, b, status := s.stdin, s.cur, s.state.Status
+	s.mu.Unlock()
+	if status == container.Stopped || b == nil {
 		reply(container.Reply{Error: errNotRunning.Error()})
 		return
 	}
-	s.mu.Lock()
-	in := s.stdin
-	s.mu.Unlock()
 	cl := newAttachClient(c)
 	s.hub.add(cl) // before the reply, so nothing after it is missed
 	defer s.hub.remove(cl)
@@ -284,8 +314,10 @@ func (s *supervisor) attach(c net.Conn, r *bufio.Reader, req container.Request) 
 	}()
 
 	select {
-	case <-s.stopped:
-		exit, _ := json.Marshal(s.reply())
+	case <-b.exited:
+		s.mu.Lock()
+		exit, _ := json.Marshal(b.exit)
+		s.mu.Unlock()
 		cl.finish(container.AppendFrame(nil, container.AttachExit, exit))
 		select {
 		case <-cl.done:
@@ -307,7 +339,7 @@ func (s *supervisor) control(m guestspec.Control) {
 	if m.Signal > 0 && m.Signal <= 64 {
 		out.Signal, out.Group = m.Signal, m.Group
 	}
-	if out != (guestspec.Control{}) && s.proxy.listening() {
-		s.proxy.queue.send(out)
+	if b := s.current(); out != (guestspec.Control{}) && b != nil && b.proxy.listening() {
+		b.proxy.queue.send(out)
 	}
 }

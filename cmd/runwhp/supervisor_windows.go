@@ -26,41 +26,54 @@ const killGrace = 5 * time.Second
 // supervisor is the runwhp process that runs a container: it holds the
 // container's lock for as long as the container has a VM, records its
 // state as it changes, and serves other runwhps' requests on the
-// container's pipe.
+// container's pipe. The container's process may run more than once, each
+// time in a VM of its own, a boot; what belongs to one is in vmBoot, what
+// lasts from one to the next here.
 type supervisor struct {
 	root  string
 	store *container.Store
 	rec   *container.Container
 	lock  *container.Lock
-	proxy *signalProxy // the control port, and stopping the VM
 	ln    net.Listener
+	serve sync.Once
 
 	mu    sync.Mutex
 	state container.State
+	cur   *vmBoot // the boot under way, or the last
 	// wmu orders the writes of state: each writes it as it is then, so the
 	// last write is always of the latest. pending counts writes in flight.
 	wmu     sync.Mutex
 	pending sync.WaitGroup
-	ready   chan struct{} // closed once a container booted to wait is ready
-	running chan struct{} // closed once the process has started
-	stopped chan struct{} // closed once the container has stopped and that is recorded
-	// hardStopped says why the supervisor stopped the VM itself, if it did.
-	hardStopped string
-	console     []string // the last kernel console lines, if the VM failed
-	conns       sync.WaitGroup
+	done    chan struct{} // closed once the container has stopped for good, and that is recorded
+	conns   sync.WaitGroup
 	// files are closed before the container is removed: a file open in
 	// its directory would keep that from being renamed away.
 	files []io.Closer
-	vm    *vmHandles // what reaches into the VM, once it has one
 	// hub passes the container's output on to attached runwhps, and stdin,
 	// if set, is its input, open to them.
 	hub   *outputHub
 	stdin *attachStdin
 }
 
+// vmBoot is one VM of the container's, from booting it until the process
+// ends.
+type vmBoot struct {
+	proxy   *signalProxy  // its control port, and stopping it
+	ready   chan struct{} // closed once a container booted to wait is ready
+	running chan struct{} // closed once the process has started
+	exited  chan struct{} // closed once the process has ended and that is recorded
+
+	// Guarded by the supervisor's mu.
+	hardStopped string     // why the supervisor stopped the VM itself, if it did
+	console     []string   // the last kernel console lines, if the VM failed
+	vm          *vmHandles // what reaches into the VM, once it has one
+	exit        container.Reply
+}
+
 // streams has the container's output pass through the hub to attached
 // runwhps, and, with openStdin, makes its input theirs: stdinOnce ends it
-// with the first of them to end its own.
+// with the first of them to end its own. Each boot then reads that input
+// through a view of its own (see attachStdin.view).
 func (s *supervisor) streams(bio *bootIO, openStdin, stdinOnce bool) {
 	bio.stdout = s.hub.wrap(container.Stdout, bio.stdout)
 	bio.stderr = s.hub.wrap(container.Stderr, bio.stderr)
@@ -68,20 +81,19 @@ func (s *supervisor) streams(bio *bootIO, openStdin, stdinOnce bool) {
 		s.mu.Lock()
 		s.stdin = newAttachStdin(stdinOnce)
 		s.mu.Unlock()
-		bio.stdin = s.stdin
 	}
 }
 
 // supervise takes a container's lock, records that this process is
-// booting it, with its output going where output says, and serves its
-// pipe.
-func supervise(root string, store *container.Store, rec *container.Container, output string, proxy *signalProxy) (*supervisor, error) {
+// booting it, with its output going where output says, and makes its
+// pipe, which it serves from the first boot.
+func supervise(root string, store *container.Store, rec *container.Container, output string) (*supervisor, error) {
 	lock, err := store.Lock(rec)
 	if err != nil {
 		return nil, err
 	}
-	s := &supervisor{root: root, store: store, rec: rec, lock: lock, proxy: proxy, state: rec.State,
-		ready: make(chan struct{}), running: make(chan struct{}), stopped: make(chan struct{}), hub: newOutputHub()}
+	s := &supervisor{root: root, store: store, rec: rec, lock: lock, state: rec.State,
+		done: make(chan struct{}), hub: newOutputHub()}
 	if s.ln, err = container.Listen(root, rec.ID); err != nil {
 		lock.Close()
 		return nil, fmt.Errorf("serving container %s's pipe: %w", rec.Short(), err)
@@ -95,23 +107,43 @@ func supervise(root string, store *container.Store, rec *container.Container, ou
 				FinishedAt: st.FinishedAt, ExitCode: st.ExitCode}
 		})
 	}
-	go s.serve()
-	go s.clockLoop(clockPeriod(proxy.logf))
 	return s, nil
 }
 
+// beginBoot starts a boot of the container, with proxy its control port
+// and the way to stop its VM.
+func (s *supervisor) beginBoot(proxy *signalProxy) *vmBoot {
+	b := &vmBoot{proxy: proxy, ready: make(chan struct{}), running: make(chan struct{}), exited: make(chan struct{})}
+	// The console's reader of the control port ends with the boot, rather
+	// than wait for messages meant for the next.
+	proxy.queue.done = b.exited
+	s.mu.Lock()
+	s.cur = b
+	s.mu.Unlock()
+	s.serve.Do(func() { go s.serveConns() })
+	go s.clockLoop(b, clockPeriod(proxy.logf))
+	return b
+}
+
+// current is the boot under way, or the last; nil before the first.
+func (s *supervisor) current() *vmBoot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cur
+}
+
 // clockLoop keeps the guest's wall clock with the host's, for as long as
-// the container runs: the guest boots with the CMOS stub's whole seconds,
-// and nothing moves its clock on while the host sleeps. The time goes to
-// init as it opens the control port, every period, and as Windows resumes.
-// The first is queued at once: the queue stamps it as the console takes it
-// for init, and init waits for it before it starts the process
+// the boot's process runs: the guest boots with the CMOS stub's whole
+// seconds, and nothing moves its clock on while the host sleeps. The time
+// goes to init as it opens the control port, every period, and as Windows
+// resumes. The first is queued at once: the queue stamps it as the console
+// takes it for init, and init waits for it before it starts the process
 // (Spec.ClockSync).
-func (s *supervisor) clockLoop(period time.Duration) {
+func (s *supervisor) clockLoop(b *vmBoot, period time.Duration) {
 	if period <= 0 {
 		return
 	}
-	s.proxy.queue.sendTime()
+	b.proxy.queue.sendTime()
 	wake := make(chan struct{}, 1)
 	stopResume, err := onResume(func() {
 		select {
@@ -120,20 +152,20 @@ func (s *supervisor) clockLoop(period time.Duration) {
 		}
 	})
 	if err != nil {
-		s.proxy.logf("%v; the guest's clock follows the host's every %v only", err, period)
+		b.proxy.logf("%v; the guest's clock follows the host's every %v only", err, period)
 	}
 	defer stopResume()
 	tick := time.NewTicker(period)
 	defer tick.Stop()
 	for {
 		select {
-		case <-s.stopped:
+		case <-b.exited:
 			return
 		case <-tick.C:
 		case <-wake:
-			s.proxy.logf("Windows resumed: setting the guest's clock")
+			b.proxy.logf("Windows resumed: setting the guest's clock")
 		}
-		s.proxy.queue.sendTime()
+		b.proxy.queue.sendTime()
 	}
 }
 
@@ -178,48 +210,48 @@ func (s *supervisor) status() container.Status {
 	return s.state.Status
 }
 
-// hooks are what bootContainer tells the supervisor.
-func (s *supervisor) hooks(waitStart bool) bootHooks {
-	return bootHooks{waitStart: waitStart, ready: s.isReady, started: s.started, failed: s.failed,
+// hooks are what bootContainer tells the supervisor of boot b.
+func (s *supervisor) hooks(b *vmBoot, waitStart bool) bootHooks {
+	return bootHooks{waitStart: waitStart,
+		ready:   func() { s.isReady(b) },
+		started: func(pid int) { s.started(b, pid) },
+		failed: func(console []string) {
+			s.mu.Lock()
+			b.console = append([]string(nil), console...)
+			s.mu.Unlock()
+		},
 		attached: func(h *vmHandles) {
 			s.mu.Lock()
-			s.vm = h
+			b.vm = h
 			s.mu.Unlock()
 		}}
 }
 
 // isReady records that a container booted to wait for its start is ready.
-func (s *supervisor) isReady() {
+func (s *supervisor) isReady(b *vmBoot) {
 	s.update(func(st *container.State) { st.Status = container.Created })
-	close(s.ready)
+	close(b.ready)
 }
 
 // started records that the container process runs, as pid in the guest:
 // in the background, since the guest goes on meanwhile, and whoever needs
 // it recorded first, a start request say, persists it itself.
-func (s *supervisor) started(pid int) {
+func (s *supervisor) started(b *vmBoot, pid int) {
 	s.updateLater(func(st *container.State) {
 		st.Status, st.GuestPid, st.StartedAt = container.Running, pid, time.Now().UTC()
 	})
-	close(s.running)
+	close(b.running)
 }
 
-func (s *supervisor) failed(console []string) {
-	s.mu.Lock()
-	s.console = append([]string(nil), console...)
-	s.mu.Unlock()
-}
-
-// finish records how the container ended, answers whoever waits for that,
-// gives up the container's lock and pipe, and removes the container if it
-// was to be removed when it stopped.
-func (s *supervisor) finish(code int, err error) {
+// endBoot records how boot b's process ended, and answers whoever waits
+// for that.
+func (s *supervisor) endBoot(b *vmBoot, code int, err error) {
 	s.change(func(st *container.State) {
 		st.Status, st.Pid, st.GuestPid = container.Stopped, 0, 0
 		st.FinishedAt, st.ExitCode, st.Error = time.Now().UTC(), code, ""
 		switch {
-		case s.hardStopped != "":
-			st.ExitCode, st.Error = guestspec.ExitSignalBase+guestspec.SIGKILL, s.hardStopped
+		case b.hardStopped != "":
+			st.ExitCode, st.Error = guestspec.ExitSignalBase+guestspec.SIGKILL, b.hardStopped
 		case errors.Is(err, context.Canceled):
 			st.Error = "stopped by runwhp after a second interrupt"
 		case err != nil:
@@ -227,13 +259,25 @@ func (s *supervisor) finish(code int, err error) {
 		case code == guestspec.ExitRuntime:
 			st.Error = "runwhp failed"
 		}
+		b.vm = nil
 	})
-	autoRemove := s.rec.Config.AutoRemove
 	s.pending.Wait()
-	if !autoRemove {
+	if !s.rec.Config.AutoRemove {
 		s.persist()
 	}
-	close(s.stopped)
+	rep := s.reply()
+	s.mu.Lock()
+	b.exit = rep
+	s.mu.Unlock()
+	close(b.exited)
+}
+
+// finish ends the supervisor once the container has stopped for good: it
+// gives up the container's lock and pipe, and removes the container if it
+// was to be removed when it stopped.
+func (s *supervisor) finish() {
+	autoRemove := s.rec.Config.AutoRemove
+	close(s.done)
 	if s.stdin != nil {
 		s.stdin.close() // for attached runwhps still sending input
 	}
@@ -264,7 +308,7 @@ func (s *supervisor) finish(code int, err error) {
 	}
 }
 
-// exitCode is the container's exit code, once it has stopped.
+// reply describes the container as it is now.
 func (s *supervisor) reply() container.Reply {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -279,14 +323,14 @@ func (s *supervisor) reply() container.Reply {
 	return r
 }
 
-// hardStop stops the VM at once, without the guest's help.
-func (s *supervisor) hardStop(why string) {
+// hardStop stops boot b's VM at once, without the guest's help.
+func (s *supervisor) hardStop(b *vmBoot, why string) {
 	s.mu.Lock()
-	if s.hardStopped == "" {
-		s.hardStopped = why
+	if b.hardStopped == "" {
+		b.hardStopped = why
 	}
 	s.mu.Unlock()
-	s.proxy.stop()
+	b.proxy.stop()
 }
 
 var errNotRunning = errors.New("container is not running")
@@ -296,26 +340,27 @@ var errNotRunning = errors.New("container is not running")
 // stopped instead. After SIGKILL the guest has killGrace to end the
 // container before the VM is stopped.
 func (s *supervisor) kill(sig int, all bool) error {
-	switch s.status() {
-	case container.Stopped:
+	s.mu.Lock()
+	b, status := s.cur, s.state.Status
+	s.mu.Unlock()
+	if status == container.Stopped || b == nil {
 		return errNotRunning
-	case container.Creating:
-		if !s.proxy.listening() {
-			s.hardStop(fmt.Sprintf("killed by %s while it was being created", guestspec.SignalName(sig)))
-			return nil
-		}
 	}
-	if !s.proxy.listening() {
-		s.hardStop(fmt.Sprintf("killed by %s", guestspec.SignalName(sig)))
+	if !b.proxy.listening() {
+		why := fmt.Sprintf("killed by %s", guestspec.SignalName(sig))
+		if status == container.Creating {
+			why += " while it was being created"
+		}
+		s.hardStop(b, why)
 		return nil
 	}
-	s.proxy.queue.send(guestspec.Control{Signal: sig, All: all})
+	b.proxy.queue.send(guestspec.Control{Signal: sig, All: all})
 	if sig == guestspec.SIGKILL {
 		time.AfterFunc(killGrace, func() {
 			select {
-			case <-s.stopped:
+			case <-b.exited:
 			default:
-				s.hardStop(fmt.Sprintf("stopped by runwhp: the guest had not ended it %v after SIGKILL", killGrace))
+				s.hardStop(b, fmt.Sprintf("stopped by runwhp: the guest had not ended it %v after SIGKILL", killGrace))
 			}
 		})
 	}
@@ -333,40 +378,50 @@ func (s *supervisor) stop(timeout time.Duration) {
 		return
 	}
 	t := time.AfterFunc(timeout, func() { s.kill(guestspec.SIGKILL, false) })
-	<-s.stopped
+	<-s.done
 	t.Stop()
 }
 
 // start starts the process of a container booted to wait for its start,
 // and waits until it runs or has failed to.
 func (s *supervisor) start() container.Reply {
+	b := s.current()
 	switch s.status() {
 	case container.Creating:
 		return container.Reply{Error: "the container is still being created"}
 	case container.Stopped:
 		return container.Reply{Error: errNotRunning.Error()}
 	case container.Created:
-		s.proxy.queue.send(guestspec.Control{Start: true})
+		b.proxy.queue.send(guestspec.Control{Start: true})
 	}
 	select {
-	case <-s.running:
+	case <-b.running:
 		s.persist() // so that whoever asked sees it running
 		return s.reply()
-	case <-s.stopped:
-		r := s.reply()
+	case <-b.exited:
+		s.mu.Lock()
+		r := b.exit
+		r.Console = b.console
+		s.mu.Unlock()
 		r.OK = false
 		if r.Error == "" {
 			r.Error = fmt.Sprintf("the container exited with %d as it started", r.ExitCode)
 		}
-		s.mu.Lock()
-		r.Console = s.console
-		s.mu.Unlock()
 		return r
 	}
 }
 
-// serve answers requests on the container's pipe until it closes.
-func (s *supervisor) serve() {
+// wait waits for the container's process to end, and says how it did.
+func (s *supervisor) wait() container.Reply {
+	b := s.current()
+	<-b.exited
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return b.exit
+}
+
+// serveConns answers requests on the container's pipe until it closes.
+func (s *supervisor) serveConns() {
 	for {
 		c, err := s.ln.Accept()
 		if err != nil {
@@ -403,8 +458,7 @@ func (s *supervisor) handle(c net.Conn) {
 			s.stop(time.Duration(req.Timeout * float64(time.Second)))
 			rep = s.reply()
 		case container.OpWait:
-			<-s.stopped
-			rep = s.reply()
+			rep = s.wait()
 		case container.OpConnect:
 			s.connect(c, r, req)
 			return
@@ -421,14 +475,23 @@ func (s *supervisor) handle(c net.Conn) {
 	c.Write(append(data, '\n'))
 }
 
+// running returns the VM of the boot under way, if the container's process
+// runs.
+func (s *supervisor) running() *vmHandles {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state.Status != container.Running || s.cur == nil {
+		return nil
+	}
+	return s.cur.vm
+}
+
 // stats reports what the running container uses: its VM's processor time
 // and memory, this process's memory, which holds the guest's, the bytes
 // its devices moved, and what init says of the guest.
 func (s *supervisor) stats() container.Reply {
-	s.mu.Lock()
-	h, status := s.vm, s.state.Status
-	s.mu.Unlock()
-	if status != container.Running || h == nil {
+	h := s.running()
+	if h == nil {
 		return container.Reply{Error: errNotRunning.Error()}
 	}
 	st := &container.Stats{Time: time.Now(), CPUs: s.rec.Config.CPUs, MemLimit: s.rec.Config.Memory}
@@ -466,10 +529,8 @@ func (s *supervisor) connect(c net.Conn, r *bufio.Reader, req container.Request)
 		reply(container.Reply{Error: fmt.Sprintf("vsock port %d is not runwhp exec's", req.Port)})
 		return
 	}
-	s.mu.Lock()
-	h, status := s.vm, s.state.Status
-	s.mu.Unlock()
-	if status != container.Running || h == nil {
+	h := s.running()
+	if h == nil {
 		reply(container.Reply{Error: errNotRunning.Error()})
 		return
 	}

@@ -186,7 +186,7 @@ func TestAttachStdin(t *testing.T) {
 	once.push([]byte("b"))
 	once.endInput()
 	once.push([]byte("ignored")) // after the end
-	if got := readAll(t, once); got != "ab" {
+	if got := readAll(t, once.view(nil)); got != "ab" {
 		t.Errorf("stdin-once read %q", got)
 	}
 
@@ -198,7 +198,7 @@ func TestAttachStdin(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		open.close() // the container stopped
 	}()
-	if got := readAll(t, open); got != "first second" {
+	if got := readAll(t, open.view(nil)); got != "first second" {
 		t.Errorf("open stdin read %q", got)
 	}
 }
@@ -264,5 +264,55 @@ func TestParseDetachKeys(t *testing.T) {
 		if got, err := parseDetachKeys(bad); err == nil {
 			t.Errorf("%q accepted as %q", bad, got)
 		}
+	}
+}
+
+// TestAttachStdinViews checks the input of a container that boots again:
+// a boot's view ends with it, and leaves what it has not read for the next.
+func TestAttachStdinViews(t *testing.T) {
+	in := newAttachStdin(false)
+	done1 := make(chan struct{})
+	first := in.view(done1)
+	in.push([]byte("one"))
+	in.push([]byte("two"))
+	buf := make([]byte, 2)
+	if n, err := first.Read(buf); string(buf[:n]) != "on" || err != nil {
+		t.Fatalf("first boot read %q, %v", buf[:n], err)
+	}
+	close(done1)
+	if n, err := first.Read(buf); n != 0 || err != io.EOF {
+		t.Errorf("first boot after its end: %d, %v", n, err)
+	}
+	second := in.view(make(chan struct{}))
+	in.push([]byte("three"))
+	in.close()
+	if got := readAll(t, second); got != "etwothree" {
+		t.Errorf("second boot read %q", got)
+	}
+	if n, err := in.view(nil).Read(buf); n != 0 || err != io.EOF {
+		t.Errorf("after the end: %d, %v", n, err)
+	}
+}
+
+// TestControlQueueDone checks that the console's reading of the control
+// port ends with the boot it is for.
+func TestControlQueueDone(t *testing.T) {
+	q := newControlQueue()
+	done := make(chan struct{})
+	q.done = done
+	got := make(chan error, 1)
+	go func() {
+		_, err := q.Read(make([]byte, 16))
+		got <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	close(done)
+	select {
+	case err := <-got:
+		if err != io.EOF {
+			t.Errorf("read %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("still reading after the boot ended")
 	}
 }

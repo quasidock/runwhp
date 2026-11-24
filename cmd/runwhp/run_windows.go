@@ -257,7 +257,7 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 		layer = startLayer(rec.RW(), cfg.StorageSize, false)
 		defer layer.close()
 	}
-	sup, err := supervise(root, store, rec, container.OutputTerminal, proxy)
+	sup, err := supervise(root, store, rec, container.OutputTerminal)
 	if err != nil {
 		layer.close()
 		store.Remove(rec)
@@ -277,9 +277,11 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 		}
 	}
 	sup.streams(&bio, false, false) // its input stays this console's
-	code, err := bootContainer(ctx, root, rec, layer, policy, proxy, bio, sup.hooks(false), logf, start)
+	b := sup.beginBoot(proxy)
+	code, err := bootContainer(ctx, root, rec, layer, policy, proxy, bio, sup.hooks(b, false), logf, start)
 	layer.close()
-	sup.finish(code, err)
+	sup.endBoot(b, code, err)
+	sup.finish()
 	return code, err
 }
 

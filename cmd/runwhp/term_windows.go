@@ -198,6 +198,9 @@ func (r *consoleReader) decode(s []uint16) []byte {
 type controlQueue struct {
 	ch  chan queuedControl
 	cur []byte
+	// done, once closed, ends the console's reading: the VM it is for is
+	// gone. Messages still queued are dropped with it.
+	done <-chan struct{}
 }
 
 type queuedControl struct {
@@ -212,7 +215,12 @@ func newControlQueue() *controlQueue { return &controlQueue{ch: make(chan queued
 // it waited behind others.
 func (q *controlQueue) Read(p []byte) (int, error) {
 	if len(q.cur) == 0 {
-		item := <-q.ch
+		var item queuedControl
+		select {
+		case item = <-q.ch:
+		case <-q.done:
+			return 0, io.EOF
+		}
 		if item.stamp {
 			item.m.Time = time.Now().UnixNano()
 		}
