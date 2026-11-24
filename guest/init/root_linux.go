@@ -92,13 +92,9 @@ func mountRoot(spec *guestspec.Spec) error {
 
 	lower := make([]string, 0, spec.Layers)
 	for i := spec.Layers - 1; i >= 0; i-- {
-		dir := fmt.Sprintf("/layers/%d", i)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		dir, err := mountLayer(i, devices[guestspec.LayerSerial(i)])
+		if err != nil {
 			return err
-		}
-		dev := devices[guestspec.LayerSerial(i)]
-		if err := syscall.Mount(dev, dir, "ext4", syscall.MS_RDONLY|syscall.MS_NODEV, ""); err != nil {
-			return fmt.Errorf("mounting layer %d (%s): %w", i, dev, err)
 		}
 		lower = append(lower, dir)
 	}
@@ -145,6 +141,18 @@ func mountRoot(spec *guestspec.Spec) error {
 		return fmt.Errorf("mounting overlay: %w", err)
 	}
 	return nil
+}
+
+// mountLayer mounts layer i's disk, dev, read-only at /layers/<i>.
+func mountLayer(i int, dev string) (string, error) {
+	dir := fmt.Sprintf("/layers/%d", i)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	if err := syscall.Mount(dev, dir, "ext4", syscall.MS_RDONLY|syscall.MS_NODEV, ""); err != nil {
+		return "", fmt.Errorf("mounting layer %d (%s): %w", i, dev, err)
+	}
+	return dir, nil
 }
 
 // Mount options for the scratch disk's ext4 and the overlay above it.

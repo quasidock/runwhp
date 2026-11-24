@@ -104,6 +104,9 @@ func start(begin time.Time, ctl *controller) (guestspec.Status, error) {
 	if spec.Stdin {
 		want = append(want, portMode{guestspec.PortStdin, os.O_RDONLY})
 	}
+	if spec.Serve != "" {
+		want = want[:1] // no process, so no output
+	}
 	ports, err := openPorts(want, 5*time.Second)
 	if p := ports[guestspec.PortControl]; p != nil {
 		ctl.setPort(p)
@@ -113,6 +116,14 @@ func start(begin time.Time, ctl *controller) (guestspec.Status, error) {
 		return none, err
 	}
 	debugf("console ports open")
+
+	switch spec.Serve {
+	case "":
+	case guestspec.ServeLayers:
+		return none, serveLayers(&spec, ctl)
+	default:
+		return none, fmt.Errorf("init cannot serve %q", spec.Serve)
+	}
 
 	if err := mountRoot(&spec); err != nil {
 		return none, err

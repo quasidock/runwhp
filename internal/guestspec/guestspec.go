@@ -132,7 +132,17 @@ type Spec struct {
 	Reclaim Reclaim `json:"reclaim,omitzero"`
 	// Debug makes init describe what it does on the kernel console.
 	Debug bool `json:"debug,omitempty"`
+	// Serve, when not empty, boots the guest for runwhp itself rather than
+	// for a container: with ServeLayers, init mounts the Layers disks
+	// read-only, each on its own, serves their files on ArchivePort, sends
+	// an Event with Ready, and waits for the host to stop the machine. It
+	// runs no process.
+	Serve string `json:"serve,omitempty"`
 }
+
+// ServeLayers is Spec.Serve for a guest that serves image layers' files,
+// for runwhp save.
+const ServeLayers = "layers"
 
 // Reclaim has init reclaim the guest's page cache once the guest has kept
 // its processors idle for IdleSeconds, a step every IntervalSeconds, so
