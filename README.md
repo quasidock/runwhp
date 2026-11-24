@@ -17,7 +17,9 @@ line and are rotated. A container has half the
 machine's memory by default, but takes only what it uses, and gives back
 what it frees. Images, containers and volumes can be listed, measured and
 pruned as Docker's can, and images tagged, imported, and saved to and
-loaded from archives Docker takes, with the same IDs.
+loaded from archives Docker takes, with the same IDs. A container's files
+can be copied in and out, running or stopped, exported, listed as its
+changes and committed to an image, and a container paused.
 
 See [status](docs/status.md) for details.
 
@@ -123,6 +125,18 @@ Images in and out of the store:
 .\out\runwhp.exe import -c 'ENV GREETING=hi' rootfs.tar mine/rootfs:1
 ```
 
+A container's files:
+
+```powershell
+.\out\runwhp.exe cp web:/etc/nginx/nginx.conf .
+.\out\runwhp.exe cp .\site web:/usr/share/nginx/html
+.\out\runwhp.exe diff web
+.\out\runwhp.exe commit -m 'with the site' web mine/web:1
+.\out\runwhp.exe export -o web.tar web
+.\out\runwhp.exe pause web
+.\out\runwhp.exe unpause web
+```
+
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `-d`, `--detach` | off | Run the container in the background and print its ID; see [Containers](#containers) |
@@ -199,6 +213,7 @@ its ID, its name, or any unique prefix of its ID.
 | `wait CONTAINER...` | Wait for containers to stop, and print their exit codes |
 | `stop [-t SECONDS] CONTAINER...` | Send the image's stop signal, SIGTERM unless it names another, then SIGKILL after the timeout, 10 s by default |
 | `restart [-t SECONDS] CONTAINER...` | `stop`, then `start` |
+| `pause CONTAINER...`, `unpause CONTAINER...` | Freeze every process in a running container, and thaw them; see **Pausing** below |
 | `kill [-a] CONTAINER [SIGNAL]` | Send a signal, by name or number, to the container's process, or with `-a` to every process in it. The default is SIGTERM, as with runc; Docker's `kill` sends SIGKILL. A created container ends without starting |
 | `exec [-i] [-t] [-d] [-e] [-w] [-u] CONTAINER COMMAND...` | Run another command in a running container |
 | `logs [-f] [-t] [-n N] [--since TIME] [--until TIME] CONTAINER` | Print a container's output as its log holds it: `-t` with the time each line was written, `-n` the last N lines, `--since` and `--until` the lines written in a window, given as a date and time, Unix seconds, or a duration before now such as `10m` |
@@ -211,7 +226,20 @@ its ID, its name, or any unique prefix of its ID.
 States are runc's: `creating`, `created`, `running` and `stopped`, and
 runwhp's own `restarting`, for a container waiting to be started again by
 its restart policy. Unlike with runc, a stopped container can be started
-again.
+again. A paused container is `running`, and `state` says `paused`, as
+`docker inspect` does.
+
+**Pausing.** The container's process, and those `exec` starts, run in a
+cgroup of their own in the guest, which `pause` freezes through
+`cgroup.freeze`, and `unpause` thaws, each in a few tens of ms. init, which
+stays outside it, goes on serving the host: the clock, `stats`, `logs`,
+`cp`, `diff`, `export` and `commit` work on a paused container, and its
+memory is reclaimed as an idle one's is. `exec`, `attach`, and `delete`
+without `-f` are refused, with Docker's words, and `list` shows
+`Up 3 minutes (Paused)`. `kill` thaws the container once its signal is
+sent, so that the signal is taken, as `docker kill` does, and so `stop`,
+`restart` and `delete -f` work as on a running one. A process that leaves
+the cgroup, which a container's root can do, is not paused.
 
 **Who runs a container.** A container has a VM only while a runwhp process
 runs it, holding the record's `lock` file exclusively; whether that file is
@@ -517,9 +545,78 @@ stopped under.
   the image's, as Docker does, so they are no part of a container's
   changes. They can be edited in place, but not replaced: `sed -i` on them
   fails. A mount of the user's own at one of those paths wins.
+- The mount points init makes for itself, `/proc`, `/sys`, `/dev` and those
+  three files, go in a layer of their own when the image lacks them, as in
+  Docker's init layer: a tmpfs between the image's layers and the writable
+  one, so they are not the container's changes either. Its directories
+  take the image's mode, owner and times. A container kept from before
+  iteration 15 has them in its writable layer already, and `diff` shows
+  them. Mount points of the container's own mounts and its working
+  directory go in the writable layer, as with Docker.
 - On a store whose volume has no sparse files, such as FAT or exFAT, runwhp
   says so and keeps the writable layer in guest memory, so a stopped
   container loses its changes.
+
+### Container files
+
+`cp`, `export`, `diff` and `commit` reach a container's files as Docker's
+do, whether it is running, created, paused or stopped.
+
+- **How they reach them.** init serves the container's files on a vsock
+  port of its own, from the moment its root is ready, so a created
+  container is served too; the runwhp running the container passes the
+  connection on. A stopped container's files are served by a guest booted
+  for the purpose with its storage: its layers, its writable layer, its
+  volumes and its bind mounts, with the container's own kernel, modules and
+  init, but no network and no process, in 256 MiB and two vCPUs. It is
+  ready about 0.1 s after the command starts, and on its way out freezes
+  what it wrote, as a container's guest does. Meanwhile the command holds
+  the container's lock: a `start` is refused, saying the container is
+  busy, and another `cp` waits its turn.
+- **cp** follows `docker cp`: its client side is the Docker CLI's, through
+  github.com/moby/go-archive, and init's side follows Docker's daemon. A
+  path in the container resolves as the container sees it, its mounts
+  included: symlinks before the last element are followed within its root,
+  and the last element is followed only with `-L`. Files copied in keep
+  the tar's owner, which is root for files from Windows, with the modes
+  go-archive gives Windows files, or, with `-a`, belong to the container's
+  user. A symlink copied out to Windows needs the right to make one,
+  Developer Mode or an administrator, as with Docker's CLI. Without a
+  console on stdout it prints nothing; with one, `Successfully copied`
+  and the size. Errors are Docker's words.
+- **export** writes the overlay alone, without what is mounted in it, as
+  `docker export` does: the image's files, the container's changes, the
+  init layer's mount points, and the directories of volumes, but not their
+  files.
+- **diff** reads the writable layer alone, so its cost is that of the
+  changes, not of the image, as Docker's overlay2 does on a kernel without
+  `redirect_dir`, which runwhp's lacks. It lists what Docker's does: a path
+  added, changed or deleted, and every directory above a change; not a
+  directory whose times alone changed, nor a volume's files. Docker lists
+  them in no particular order; runwhp sorts them.
+- **commit** pauses a running container while it reads the writable
+  layer, unless `-p=false`, and makes an image of the container's image
+  with that layer on top, as an image layer's tar, whiteouts included. A
+  container that changed nothing adds no layer, as with Docker. Its
+  configuration is the image's with the container's over it: command and
+  entrypoint, environment, working directory, user, hostname, published
+  ports and anonymous volumes, then `-c` changes, which `import` takes too.
+  Its history adds the container's command, `-a`'s author and `-m`'s
+  comment. Like a tagged or loaded image, it has no registry digest; `save`
+  fetches the tar metadata of base layers pulled before iteration 14
+  through any image in the store that has them and came from a registry. A
+  container records its image's ID and keeps that image's configuration in
+  the store, so it can be committed after its image is removed. Containers
+  made before iteration 15 record their command whole: their commits have
+  it as `Cmd`, with no entrypoint.
+
+| Command | |
+| --- | --- |
+| `cp [-a] [-L] [-q] CONTAINER:SRC DEST\|-` | Copy a container's file or directory to Windows, or as a tar to stdout. `container cp` too |
+| `cp [-a] [-L] [-q] SRC\|- CONTAINER:DEST` | Copy a file or directory into a container, or a tar from stdin into a directory of it |
+| `export [-o FILE] CONTAINER` | Write the container's root file system to a tar, to stdout unless `-o`; refuses a console. `container export` too |
+| `diff CONTAINER` | List the container's changes: `A`dded, `C`hanged, `D`eleted. `container diff` too |
+| `commit [-a AUTHOR] [-c CHANGE]... [-m MESSAGE] [-p=false] CONTAINER [REPOSITORY[:TAG]]` | Make an image of the container's changes, and print its ID. `container commit` too |
 
 ### Volumes
 
@@ -894,14 +991,14 @@ bzImage.
 | [`internal/volume`](internal/volume) | Named volumes in the store: names, making, listing and removing them |
 | [`internal/container`](internal/container) | Containers in the store: records, names, locks, state, restart policies, logs, written, rotated and read with their times, and the pipe of the runwhp running one, whose attach requests carry frames in the framing of logs before iteration 13 |
 | [`internal/hostfs`](internal/hostfs) | The host end of bind mounts: Windows files served as that file system, with WSL's metadata |
-| [`internal/image`](internal/image), [`internal/layer`](internal/layer) | Registry pulls, image records and configuration blobs, layer conversion and cache with each layer's tar metadata, image archives read and written, imports and Dockerfile changes, and listing and removing them |
+| [`internal/image`](internal/image), [`internal/layer`](internal/layer) | Registry pulls, image records and configuration blobs, layer conversion and cache with each layer's tar metadata, image archives read and written, imports, commits and Dockerfile changes, and listing and removing them |
 | [`internal/gc`](internal/gc) | What in the store is in use: which images and containers list each layer, which volumes and kernels are used; removals planned from that, and the store lock that keeps pulls and runs from racing them |
 | [`internal/storefile`](internal/storefile) | Reading and replacing records while other runwhps read them |
 | [`internal/kernel`](internal/kernel) | The kernel artifact's format, the pinned build, and fetching it into the store |
 | [`kernel`](kernel) | The kernel's configuration and build; [`kernel/push`](kernel/push) publishes it |
-| [`internal/guestspec`](internal/guestspec) | The contract between host and guest |
+| [`internal/guestspec`](internal/guestspec) | The contract between host and guest: the spec, control messages and events, exec's and the file servers' protocols |
 | [`internal/passwd`](internal/passwd) | User and group resolution |
-| [`guest/init`](guest/init) | `runwhp-init`, PID 1 in the guest, and the server of image layers' files a guest booted for save runs |
+| [`guest/init`](guest/init) | `runwhp-init`, PID 1 in the guest: the container's root, its init layer, mounts and cgroup, its process and exec's, and the server of its files, written and read as go-archive does, and of image layers' files a guest booted for save runs |
 | [`test/e2e`](test/e2e) | End-to-end tests against WHP |
 
 `go test ./...` runs the unit tests anywhere. The end-to-end tests need a
@@ -938,7 +1035,8 @@ container's supervisor, with no daemon.
 | Host to guest | Console ports for the main process; a virtio socket device for further connections | Done: `runwhp exec` uses vsock |
 | Bind mounts and volumes | virtio-fs, with a FUSE server in Go serving Windows files and keeping Unix metadata as WSL does, and the writeback cache for delegated mounts; volumes as journaled ext4 disk images on virtio-blk | Done; a volume is used by one container at a time |
 | Networking | User-mode network stack in the VMM (gVisor netstack); published ports are loopback listeners | Done, IPv4 only, TCP ports only |
-| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | Done over runwhp's own images, plus `run`, `list`, `stats`, `stop`, `restart`, `rename`, `logs`, `attach`, `wait`, `images`, `rmi`, the prunes, `system df`, `tag`, `history`, `save`, `load` and `import`, and restart policies; no OCI bundles |
+| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | Done over runwhp's own images, plus `run`, `list`, `stats`, `stop`, `restart`, `rename`, `logs`, `attach`, `wait`, `pause`, `unpause`, `cp`, `export`, `diff`, `commit`, `images`, `rmi`, the prunes, `system df`, `tag`, `history`, `save`, `load` and `import`, and restart policies; no OCI bundles |
+| Container files | A file server in init, reached through the container's runwhp, or for a stopped container through a guest booted with its storage; tars written and read as Docker's daemon does | Done: `cp`, `export`, `diff`, `commit` |
 | Container logs | Frames stamped with the host's time, rotated as Docker's `local` driver rotates | Done; every kept container has one |
 | Image archives | Docker 29's `docker save` format, rebuilt from each layer's tar-split metadata and its files, read in a guest booted for the purpose | Done; same IDs and blobs as Docker |
 | Kernel | Our own build with virtio drivers built in, shipped as a signed OCI artifact | Done: Linux 6.18 LTS on ghcr.io, pinned by digest rather than signed |

@@ -1,5 +1,17 @@
 # Status
 
+- **Iteration 15** (2026-11-25): a container's files, from Windows.
+  `cp` copies into and out of a container, its volumes and bind mounts
+  included, as `docker cp` does, `export` writes its root file system to a
+  tar, `diff` lists its changes, and `commit` makes an image of them, which
+  `save` writes as it does pulled ones. Each works on running, created,
+  paused and stopped containers: init serves the files over vsock, and a
+  stopped container's through a guest booted with its storage in about
+  0.1 s. `pause` and `unpause` freeze and thaw a container's processes
+  through a cgroup of their own, as Docker's do. The mount points init makes
+  for itself now go in an init layer, as Docker's do, so they are not a
+  container's changes. See [Container files](../README.md#container-files)
+  and [Iteration 15 results](#iteration-15-results).
 - **Iteration 14** (2026-11-24): images come and go without a registry.
   `save` writes images as Docker 29's `docker save` does, with the same
   IDs and, for alpine, the same bytes, and Docker loads them; `load`
@@ -1253,6 +1265,69 @@ The new tests cover:
   with both its tags; `save` fetching the metadata of an image pulled
   without it, and failing with its registry gone; an image of 71 layers
   saved through two guests; and `system prune -a` looping during a save
+
+The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
+the WSL kernel with its vsock modules passed with `--module`.
+
+## Iteration 15 results
+
+Measured on the test machine with runwhp's kernel, from Git Bash, with the
+store on NTFS (`C:`) and the Windows end of each copy on ReFS (`E:`), over
+three to seven runs. "Iteration 14" is that iteration's build, run in turn
+with this one.
+
+Runs cost a few ms more, at most: alpine with a network lacks
+`/etc/resolv.conf`, so its overlay is mounted twice, the second time with
+the init layer, and init makes the container's cgroup and starts its file
+server.
+
+| Measurement | Iteration 14 | Iteration 15 |
+| --- | --- | --- |
+| `run --rm alpine:3.20 true`, `-m 512m` | 182-201 ms, and 289 ms once | 180-192 ms, and 213 ms once |
+| the same, default memory | 246-268 ms | 247-265 ms |
+
+The new commands. A stopped container's take the 0.1-0.2 s of booting a
+guest with its storage, and read from cold disks:
+
+| Measurement | Running | Stopped |
+| --- | --- | --- |
+| `cp` of a 100 MB file in | 254-267 ms | 483-503 ms |
+| `cp` of it out | 248-318 ms | 562-653 ms |
+| `cp` of a small file out | | 162-183 ms |
+| `cp` of 10,000 small files in | 2.0-2.3 s | |
+| `cp` of them out | 11.7-11.8 s | |
+| `export -o` of a python:3.12-slim container, 120 MB | 0.85-0.88 s, 1.9 s first | 1.7-1.9 s, 3.2 s first |
+| `diff` of 1,010 changes | 71-74 ms | 186-199 ms |
+| `commit` of a 100 MB change | 332-340 ms, paused meanwhile | 711-733 ms |
+| `pause`, then `unpause`, of a busy loop | 60-68 ms, then 62-66 ms | |
+
+Copying 10,000 files out spends 1.05 s getting them as a tar from the
+guest, and the rest extracting them on Windows through go-archive, as
+Docker's CLI does, about 1 ms a file on ReFS; GNU tar extracts the same tar
+there in 2.7 s.
+
+The new tests cover:
+
+- **cp:** into and out of a running container, its volume and bind mount,
+  a read-only mount, symlinks followed and not, tars on stdin and stdout,
+  `-a`, and Docker's errors; a stopped container, its volume and bind
+  mount; a created one; and a `start` refused while a cp holds a stopped
+  one.
+- **export** of a running and a stopped container, the same, without
+  deleted files, volumes' or anonymous volumes' files.
+- **diff** of a stopped container's changes, exactly as Docker lists them,
+  a running one's, and none for busybox, whose mount points go in the init
+  layer.
+- **commit** with `-c`, `-m` and `-a`, of a running container, left
+  running, then saved, removed and loaded with its ID; without pausing;
+  untagged; of a stopped container; and of an unchanged one, which adds no
+  layer.
+- **pause** and **unpause**: a count that stops and goes on, `state` and
+  `list`, `exec`, `attach` and `delete` refused, `kill` and `stop` of a
+  paused container, and a created one refused.
+- In the guest, against go-archive: tars of trees and of overlay upper
+  directories byte for byte, extractions file for file, and the changes
+  of an upper directory over a layer; and freezing a cgroup.
 
 The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
 the WSL kernel with its vsock modules passed with `--module`.

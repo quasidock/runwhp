@@ -440,3 +440,57 @@
   iteration lacks its layers' metadata too, which only the registry can
   give, so save fetches the blob with them rather than trust a
   reconstruction.
+- **Docker 29.10's diff, on WSL, is its naive diff.** WSL's kernel has
+  `redirect_dir`, so overlay2 compares the container's root with its
+  image's, walking both, and lists the changes in a map's order. It lists
+  the mount points of volumes and the working directory (`A /data`,
+  `A /anon`, `A /newdir`), but not `/proc`, `/sys`, `/dev`, the `/etc`
+  files it binds or `.dockerenv`, which its init layer holds. A directory
+  whose times alone changed is not listed (`touch /root`), though it is
+  copied up and goes into a commit's layer; one deleted and made again is
+  `C`, with its new files `A`.
+- **Docker's commit keeps the container's whole configuration**: hostname,
+  attach flags, environment, command and entrypoint, working directory,
+  user, labels, exposed ports, anonymous volumes and stop signal, as
+  `config`, and before `-c` changes as `container_config`, beside the
+  container's ID. Its history entry's `created_by` is the command without
+  the entrypoint, with `-a`'s author and `-m`'s comment. A container that
+  changed nothing gets no layer, and an `empty_layer` entry. An anonymous
+  volume's directory goes into the layer, its files do not. `commit` prints
+  the new ID; untagged, the image is `<none>`.
+- **Docker's cp, from a console-less caller, says nothing**: `quiet` is
+  whether stdout is a terminal. Files copied in keep the tar's owners
+  unless `-a` gives them the container's user's. A copy onto a symlink in
+  the container follows it. A read-only volume refuses with `mounted volume
+  is marked read-only`, a missing source with `Could not find the file
+  /nope in container NAME`, and a file named as a directory with `lstat
+  /d/f1/: not a directory`. A stopped container's volumes and bind mounts
+  are copied into and out of.
+- **Docker's pause thaws on kill.** `kill -s TERM` on a paused container
+  delivers the signal and the container exits; `exec`, `attach` and `rm`
+  without `-f` are refused while it is paused, and `ps` shows `Up 1 second
+  (Paused)`.
+- **go-archive would grow init by 1.42 MB**, to 4.19 MB from 2.77 MB, with
+  `TarWithOptions`, `Untar`, `TarResourceRebase` and `ChangesDirs` linked:
+  its tars always pass through its compression, zstd, bzip2 and gzip, and
+  its logging brings logrus. A run of alpine's `true` took 183-193 ms
+  with it, against 182-216 ms without, over eight runs. Init writes and
+  reads tars itself instead, as go-archive does, byte for byte; its tests
+  check it against go-archive.
+- **A volatile overlay leaves its mark when unmounted cleanly**:
+  `work/incompat/volatile/dirty` stays, and overlayfs refuses to mount on
+  that work directory again until it is removed.
+- **What lands in the writable layer today**: for alpine with a network,
+  `/etc/resolv.conf`, which alpine lacks; for busybox, `/etc/hostname`,
+  `/etc/hosts`, `/etc/resolv.conf`, `/proc` and `/sys`; with volumes and a
+  working directory, their mount points, as with Docker. The upper
+  directory itself carries `trusted.overlay.uuid` and, once something is
+  copied up, `trusted.overlay.impure`.
+- **cgroup v2's freezer freezes a busy shell loop in about 13 ms**, in a
+  WSL Docker container; a process started with `CLONE_INTO_CGROUP`, as Go
+  does with `SysProcAttr.UseCgroupFD`, lands in the cgroup at once.
+- **Docker loads runwhp's commits.** An image committed from an alpine
+  container and saved by runwhp loaded into Docker 29.10 with runwhp's ID,
+  ran, and showed the commit in its history; the save fetched the tar
+  metadata of alpine's layer, pulled before iteration 14, through alpine's
+  record.

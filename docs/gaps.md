@@ -36,8 +36,8 @@
 - `runwhp exec` needs vsock in the guest's kernel. runwhp's has it; WSL's
   builds it as modules, which have to be passed with `--module`.
 - Volumes cannot be resized, nor shared by containers running at once, even
-  read-only. `runwhp volume` cannot copy files in or out, and reading one
-  from Windows needs WSL.
+  read-only. `runwhp volume` cannot copy files in or out: `cp` reaches a
+  volume only through a container that mounts it.
 - Image `VOLUME` declarations are ignored: those paths stay in the writable
   layer, as they would with `docker run --rm`.
 - A full host disk shows in the container as I/O errors on the writable layer
@@ -71,14 +71,39 @@
   the link's 65520-byte MTU makes up for in part: 200 MB crosses in about
   0.4 s out of the container and 0.6-0.8 s into it on the test machine.
 - The prunes take no `--filter`, such as `until=` or `label=`, and
-  `images` no filter but a repository. There is no `push`, `cp`, `export`,
-  `diff` or `commit`, and no build, so `system df` has no build cache.
+  `images` no filter but a repository. There is no `push`, and no build,
+  so `system df` has no build cache.
+- `cp`, `export`, `diff` and `commit` on a stopped container boot a guest
+  with its storage, about 0.1 s, and hold its lock meanwhile: a `start`
+  then is refused as busy, rather than waiting, and `delete` says the
+  container is running.
+- A container kept from before iteration 15 has the mount points init made
+  for it in its writable layer, `/etc/resolv.conf` for alpine with a
+  network, say, and `diff` and `commit` show them. Its command is recorded
+  whole, so its commit has it as `Cmd`, without an entrypoint.
+- `diff` lists changes sorted by path, where Docker's order is a map's.
+  Like Docker's overlay2 without `redirect_dir`, it reads a directory the
+  container made again as changed, not as deleted and added.
+- `cp` resolves a path's symlinks in the container, then opens what they
+  lead to: a container changing its files meanwhile can redirect it within
+  its own root, as with Docker. A tar copied in that names a path through a
+  symlink pointing outside the destination is refused.
+- A symlink copied out to Windows needs Developer Mode or an administrator,
+  as with Docker's CLI on Windows. Files copied in from Windows are root's,
+  0755 for files and directories alike, as go-archive makes them.
+- A container's root can move its processes out of the container's cgroup,
+  and they are then not paused.
+- `commit` writes the container's configuration as go-containerregistry
+  writes Docker's, with no `container_config`, no `Domainname` and no
+  attach flags, and it does not record `--label`, which runwhp lacks.
 - `save` reads layers in a guest it boots for the purpose, about 0.2 s
   before the first byte, and needs vsock in its kernel: runwhp's has it,
   and `save` boots runwhp's, or `RUNWHP_KERNEL`, never `--module`. Layers
   pulled before iteration 14 have no tar metadata, and `save` fetches it
-  from the registry they came from, reading each such layer once more; an
-  image tagged or loaded from one with no registry digest cannot get it.
+  from the registry they came from, reading each such layer once more,
+  through the image's own record or, for an image tagged, committed or
+  loaded, any image in the store that has the layer and came from a
+  registry; without one, it cannot get it.
 - `save` writes about 130 MB/s, for reasons not yet known: a guest four
   times as large does no better.
 - A layer whose tar names a file twice, or holds a GNU sparse file,
@@ -143,3 +168,6 @@
 - String port I/O is not handled and stops the VMM with an error.
 - It is unknown whether hosted Windows CI runners expose WHP, so the
   end-to-end tests run only by hand.
+- `cp` of many small files out to Windows takes about 1 ms a file,
+  extracting them through go-archive, as Docker's CLI does: 11.7 s for
+  10,000, where GNU tar takes 2.7 s for the same tar.
