@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 	"regexp"
@@ -291,5 +292,47 @@ func TestRestartLeak(t *testing.T) {
 	}
 	if r := cli(t, "stop", name); r.code != 0 {
 		t.Errorf("stop: %+v", r)
+	}
+}
+
+// TestRestartForeground runs a container in the foreground with a restart
+// policy: runwhp exits with the first run's exit code, and a runwhp in the
+// background runs it again, its output going to the log after the first
+// run's.
+func TestRestartForeground(t *testing.T) {
+	t.Setenv("RUNWHP_RESTART_BACKOFF", "50ms")
+	name := newName(t)
+	start := time.Now()
+	r := keep(t, "--name", name, "--restart", "always", alpine, "sh", "-c",
+		bootCounter(`[ $n -ge 2 ] && exec sleep 600; exit 4`))
+	if r.code != 4 || r.stdout != "boot 1\n" || time.Since(start) > 15*time.Second {
+		t.Fatalf("run: %+v after %v", r, time.Since(start))
+	}
+	waitLog(t, name, "boot 2")
+	s := waitStatus(t, name, "running", 30*time.Second)
+	if s.Output != "log" || s.RestartCount != 1 || s.Pid == 0 {
+		t.Errorf("state %+v", s)
+	}
+	if l := cli(t, "logs", name); l.stdout != "boot 1\nboot 2\n" {
+		t.Errorf("logs: %+v", l)
+	}
+	if r := cli(t, "stop", "-t", "1", name); r.code != 0 {
+		t.Errorf("stop: %+v", r)
+	}
+
+	// A run interrupted is not handed over.
+	stopped := newName(t)
+	var stdout syncBuffer
+	var stderr bytes.Buffer
+	cmd, interrupt := interruptibleArgv(t, &stdout, &stderr, keepArgs("--name", stopped, "--restart", "always", alpine, "sh", "-c",
+		bootCounter(`echo ready; sleep 600`)))
+	interrupt()
+	cmd.Wait()
+	time.Sleep(time.Second)
+	if s := stateOf(t, stopped); s.Status != "stopped" {
+		t.Errorf("after Ctrl+Break: %+v", s)
+	}
+	if l := cli(t, "logs", stopped); strings.Contains(l.stdout, "boot 2") {
+		t.Errorf("ran again: %+v", l)
 	}
 }

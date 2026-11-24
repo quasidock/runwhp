@@ -108,16 +108,38 @@ func supervise(root string, store *container.Store, rec *container.Container, ou
 	if err != nil {
 		return nil, err
 	}
+	return superviseLocked(root, store, rec, output, lock)
+}
+
+// adopt takes over a container from the runwhp that started this one,
+// with the lock it handed over, to start it again: it records that this
+// process holds it, waiting to, and serves its pipe at once.
+func adopt(root string, store *container.Store, rec *container.Container, lock *container.Lock, restarts int) (*supervisor, error) {
+	s, err := superviseLocked(root, store, rec, container.OutputLog, lock)
+	if err != nil {
+		return nil, err
+	}
+	s.restarts, s.armed = restarts, true
+	s.update(func(st *container.State) {
+		st.Status, st.Pid, st.GuestPid, st.Output, st.RestartCount = container.Restarting, os.Getpid(), 0, container.OutputLog, restarts
+	})
+	s.serve.Do(func() { go s.serveConns() })
+	return s, nil
+}
+
+func superviseLocked(root string, store *container.Store, rec *container.Container, output string, lock *container.Lock) (*supervisor, error) {
+	var err error
 	s := &supervisor{root: root, store: store, rec: rec, lock: lock, state: rec.State,
 		done: make(chan struct{}), hub: newOutputHub(), changed: make(chan struct{}), stopCh: make(chan struct{})}
 	if s.ln, err = container.Listen(root, rec.ID); err != nil {
 		lock.Close()
 		return nil, fmt.Errorf("serving container %s's pipe: %w", rec.Short(), err)
 	}
-	// A container this process made already records it. One started again
-	// keeps how it last ended, which also tells the store it is not a
-	// record that was never finished.
-	if rec.State.Pid != os.Getpid() || rec.State.Output != output {
+	// A container this process made already records it, and one handed
+	// over is recorded by adopt. One started again keeps how it last
+	// ended, which also tells the store it is not a record that was never
+	// finished.
+	if rec.State.Status != container.Restarting && (rec.State.Pid != os.Getpid() || rec.State.Output != output) {
 		s.update(func(st *container.State) {
 			*st = container.State{Status: container.Creating, Pid: os.Getpid(), Output: output,
 				FinishedAt: st.FinishedAt, ExitCode: st.ExitCode}
@@ -345,6 +367,35 @@ func (s *supervisor) stoppedRestarting() {
 			st.Status, st.Pid = container.Stopped, 0
 		}
 	})
+}
+
+// handOff hands the container, waiting to start again after delay, to a
+// runwhp in the background, with its lock, so that it outlives this one,
+// as a foreground run's container does under Docker's daemon. Between the
+// two, no runwhp serves its pipe, and clients wait while its lock is held.
+func (s *supervisor) handOff(ctx context.Context, delay time.Duration) error {
+	s.ln.Close()
+	done := make(chan struct{})
+	go func() { s.conns.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+	}
+	s.mu.Lock()
+	stopped, restarts := s.stopping, s.restarts
+	s.mu.Unlock()
+	if stopped {
+		return errors.New("it was stopped")
+	}
+	rep, err := spawnHandOff(ctx, s.root, s.rec, s.lock, delay, restarts)
+	if err == nil && !rep.OK {
+		err = errors.New(rep.Error)
+	}
+	if err != nil {
+		return err
+	}
+	s.lock.Close()
+	return nil
 }
 
 // stopRestarts says no boot is to follow; mu must be held.

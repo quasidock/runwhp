@@ -270,10 +270,11 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 	}
 	logf("%4d ms  container %s recorded: %d layers", time.Since(start).Milliseconds(), rec.Short(), max(len(cfg.Layers), len(cfg.LayerFiles)))
 	bio := foregroundIO(cfg)
+	var lw *container.LogWriter
 	if !cfg.AutoRemove && cfg.KeepsLog() {
 		// A kept container's output also goes to its log, as Docker keeps
 		// one for every container, so that logs shows it later.
-		if lw, err := container.OpenLogWriter(rec.Dir(), cfg.LogOptions(), errorf); err != nil {
+		if lw, err = container.OpenLogWriter(rec.Dir(), cfg.LogOptions(), errorf); err != nil {
 			errorf("opening container %s's log: %v", rec.Short(), err)
 		} else {
 			defer lw.Close()
@@ -282,10 +283,24 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 		}
 	}
 	sup.streams(&bio, false, false) // its input stays this console's
+	sup.policy = cfg.Restart
+	sup.backoff = restartBackoff(errorf)
 	b := sup.beginBoot(proxy)
 	code, err := bootContainer(ctx, root, rec, layer, policy, proxy, bio, sup.hooks(b, false), logf, start)
 	layer.close()
-	sup.endBoot(b, code, err)
+	if restart, delay := sup.endBoot(b, code, err); restart {
+		// As Docker's daemon would, a runwhp in the background starts it
+		// again, and this one exits with how it ended.
+		if lw != nil {
+			lw.Close()
+		}
+		herr := sup.handOff(ctx, delay)
+		if herr == nil {
+			return code, err
+		}
+		errorf("could not hand container %s over to start it again: %v", rec.Short(), herr)
+		sup.stoppedRestarting()
+	}
 	sup.finish()
 	return code, err
 }

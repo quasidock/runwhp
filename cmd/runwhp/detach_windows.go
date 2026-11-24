@@ -81,6 +81,32 @@ var breakawayWarning sync.Once
 // output goes to the log and its input is open to attached runwhps. If
 // ctx ends first, the runwhp is killed.
 func spawnSupervisor(ctx context.Context, root string, rec *container.Container, waitStart, ownIO bool) (container.Reply, error) {
+	var args []string
+	if waitStart {
+		args = append(args, "--wait-start")
+	}
+	return startSupervisor(ctx, root, rec, args, ownIO, nil)
+}
+
+// spawnHandOff starts a runwhp in the background to take container rec
+// over from this one, with lock, and start it again after delay, the
+// restarts'th time; it waits until that runwhp holds the container. Its
+// output goes to the container's log, and its input, if it takes input, is
+// open to attached runwhps.
+func spawnHandOff(ctx context.Context, root string, rec *container.Container, lock *container.Lock, delay time.Duration, restarts int) (container.Reply, error) {
+	h, err := lock.Inheritable()
+	if err != nil {
+		return container.Reply{}, err
+	}
+	args := []string{"--lock", strconv.FormatUint(uint64(h), 10),
+		"--restart-after", delay.String(), "--restart-count", strconv.Itoa(restarts)}
+	return startSupervisor(ctx, root, rec, args, false, []syscall.Handle{syscall.Handle(h)})
+}
+
+// startSupervisor starts a runwhp running cmdSupervise for rec, with args
+// and the handles to inherit beside its ready pipe, and waits for its
+// reply.
+func startSupervisor(ctx context.Context, root string, rec *container.Container, extra []string, ownIO bool, handles []syscall.Handle) (container.Reply, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return container.Reply{}, err
@@ -94,10 +120,7 @@ func spawnSupervisor(ctx context.Context, root string, rec *container.Container,
 		return container.Reply{}, err
 	}
 	defer readR.Close()
-	args := []string{"__supervise", "--ready", strconv.FormatUint(uint64(readW.Fd()), 10)}
-	if waitStart {
-		args = append(args, "--wait-start")
-	}
+	args := append([]string{"__supervise", "--ready", strconv.FormatUint(uint64(readW.Fd()), 10)}, extra...)
 	cmd := exec.Command(exe, append(args, rec.ID)...)
 	// Not the caller's working directory, which a process that stays
 	// there would keep from being removed or renamed.
@@ -114,7 +137,7 @@ func spawnSupervisor(ctx context.Context, root string, rec *container.Container,
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		CreationFlags:              detachedProcess | windows.CREATE_NEW_PROCESS_GROUP | breakawayFromJob,
-		AdditionalInheritedHandles: []syscall.Handle{syscall.Handle(readW.Fd())},
+		AdditionalInheritedHandles: append([]syscall.Handle{syscall.Handle(readW.Fd())}, handles...),
 	}
 	err = cmd.Start()
 	if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
@@ -172,10 +195,16 @@ func lastLine(s string) string {
 // cmdSupervise runs a container in the background, for spawnSupervisor.
 func cmdSupervise(args []string) int {
 	fs := flag.NewFlagSet("__supervise", flag.ContinueOnError)
-	var ready uint64
+	var ready, handedLock uint64
 	var waitStart bool
+	var restartAfter time.Duration
+	var restarts int
 	fs.Uint64Var(&ready, "ready", 0, "")
 	fs.BoolVar(&waitStart, "wait-start", false, "")
+	// A container handed over by a foreground run, to start again.
+	fs.Uint64Var(&handedLock, "lock", 0, "")
+	fs.DurationVar(&restartAfter, "restart-after", 0, "")
+	fs.IntVar(&restarts, "restart-count", 0, "")
 	if fs.Parse(args) != nil || fs.NArg() != 1 || ready == 0 {
 		return 2
 	}
@@ -246,7 +275,15 @@ func cmdSupervise(args []string) int {
 		bio.stdin = os.Stdin
 	}
 
-	sup, err := supervise(root, store, rec, output)
+	var sup *supervisor
+	if handedLock != 0 {
+		var lock *container.Lock
+		if lock, err = store.AdoptLock(rec, windows.Handle(handedLock)); err == nil {
+			sup, err = adopt(root, store, rec, lock, restarts)
+		}
+	} else {
+		sup, err = supervise(root, store, rec, output)
+	}
 	if err != nil {
 		report.fail(err, nil)
 		return 1
@@ -257,6 +294,18 @@ func cmdSupervise(args []string) int {
 
 	sup.policy = cfg.Restart
 	sup.backoff = restartBackoff(errorf)
+	if handedLock != 0 {
+		// The runwhp that handed the container over exits once this one
+		// has it, and the restart's delay goes on here.
+		fmt.Fprintf(diagOut, "%s taking the container over to start it again in %v, as --restart %s says (restart %d)\n",
+			time.Now().Format(time.RFC3339), restartAfter, cfg.Restart, restarts)
+		sup.backoff.Continue(restartAfter)
+		report.ok(container.Restarting)
+		if !sup.waitRestart(restartAfter) {
+			sup.finish()
+			return 0
+		}
+	}
 
 	// The container runs, and runs again as its restart policy says, each
 	// time in a VM of its own on its writable layer.
@@ -313,8 +362,11 @@ func cmdSupervise(args []string) int {
 			break
 		}
 		st := sup.reply()
+		sup.mu.Lock()
+		count := sup.restarts
+		sup.mu.Unlock()
 		fmt.Fprintf(diagOut, "%s container exited with %d; starting it again in %v, as --restart %s says (restart %d)\n",
-			time.Now().Format(time.RFC3339), st.ExitCode, delay, cfg.Restart, n+1)
+			time.Now().Format(time.RFC3339), st.ExitCode, delay, cfg.Restart, count)
 		if cfg.Debug {
 			fmt.Fprintf(diagOut, "[vmm] %d goroutines\n", runtime.NumGoroutine())
 		}

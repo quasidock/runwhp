@@ -9,10 +9,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/windows"
 )
 
 func testRoot(t *testing.T) string {
@@ -382,5 +386,74 @@ func TestRestartingDied(t *testing.T) {
 	}
 	if st := list[0].State; st.Status != Stopped || st.ExitCode != 3 || st.RestartCount != 2 || st.Error == "" {
 		t.Errorf("state %+v", st)
+	}
+}
+
+// TestAdoptLock hands a container's lock to another process: it stays
+// locked once the first lets its handle go, and is free once the second
+// does.
+func TestAdoptLock(t *testing.T) {
+	if os.Getenv("RUNWHP_ADOPT_LOCK") != "" {
+		s := Open(os.Getenv("RUNWHP_ADOPT_ROOT"))
+		c, err := s.Get(os.Getenv("RUNWHP_ADOPT_ID"))
+		if err != nil {
+			fmt.Println("get:", err)
+			os.Exit(3)
+		}
+		h, _ := strconv.ParseUint(os.Getenv("RUNWHP_ADOPT_LOCK"), 10, 64)
+		l, err := s.AdoptLock(c, windows.Handle(h))
+		if err != nil {
+			fmt.Println("adopt:", err)
+			os.Exit(4)
+		}
+		fmt.Println("adopted")
+		bufio.NewReader(os.Stdin).ReadString('\n')
+		l.Close()
+		os.Exit(0)
+	}
+	root := testRoot(t)
+	s := Open(root)
+	c := mustCreate(t, s, "", "")
+	other := mustCreate(t, s, "", "")
+	l, err := s.Lock(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := l.Inheritable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Another container's lock is refused.
+	ol, _ := s.Lock(other)
+	if _, err := s.AdoptLock(c, ol.h); err == nil {
+		t.Error("adopted another container's lock")
+	}
+	ol.Close()
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestAdoptLock$")
+	cmd.Env = append(os.Environ(), "RUNWHP_ADOPT_LOCK="+strconv.FormatUint(uint64(h), 10),
+		"RUNWHP_ADOPT_ROOT="+root, "RUNWHP_ADOPT_ID="+c.ID)
+	cmd.SysProcAttr = &syscall.SysProcAttr{AdditionalInheritedHandles: []syscall.Handle{syscall.Handle(h)}}
+	in, _ := cmd.StdinPipe()
+	out, _ := cmd.StdoutPipe()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if line, _ := bufio.NewReader(out).ReadString('\n'); line != "adopted\n" {
+		in.Close()
+		cmd.Wait()
+		t.Fatalf("child: %q", line)
+	}
+	l.Close()
+	if !c.Locked() {
+		t.Error("unlocked once the first process let it go")
+	}
+	if _, err := s.lock(c, false); err == nil {
+		t.Error("a third took the lock")
+	}
+	in.Close()
+	cmd.Wait()
+	if c.Locked() {
+		t.Error("still locked once the second let it go")
 	}
 }

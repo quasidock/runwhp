@@ -520,6 +520,47 @@ func (l *Lock) WriteState(st State) error {
 	return nil
 }
 
+// Inheritable lets a process this one starts inherit the lock's handle,
+// which it then names to AdoptLock: the container is never unlocked
+// between the two.
+func (l *Lock) Inheritable() (windows.Handle, error) {
+	if err := windows.SetHandleInformation(l.h, windows.HANDLE_FLAG_INHERIT, windows.HANDLE_FLAG_INHERIT); err != nil {
+		return 0, fmt.Errorf("handing over container %s's lock: %w", l.c.Short(), err)
+	}
+	return l.h, nil
+}
+
+// AdoptLock takes over the lock of c that the process starting this one
+// held, from the handle h it passed down, after checking that h is that
+// lock.
+func (s *Store) AdoptLock(c *Container, h windows.Handle) (*Lock, error) {
+	var held, want windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(h, &held); err != nil {
+		return nil, fmt.Errorf("container %s's lock, handed over: %w", c.Short(), err)
+	}
+	p, err := windows.UTF16PtrFromString(c.lockPath())
+	if err != nil {
+		return nil, err
+	}
+	// Opening a file for its attributes alone needs no sharing.
+	f, err := windows.CreateFile(p, windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, 0, 0)
+	if err != nil {
+		return nil, fmt.Errorf("container %s's lock: %w", c.Short(), err)
+	}
+	err = windows.GetFileInformationByHandle(f, &want)
+	windows.CloseHandle(f)
+	if err != nil {
+		return nil, err
+	}
+	if held.VolumeSerialNumber != want.VolumeSerialNumber || held.FileIndexHigh != want.FileIndexHigh || held.FileIndexLow != want.FileIndexLow {
+		return nil, fmt.Errorf("the handle handed over is not container %s's lock", c.Short())
+	}
+	// Not to be passed on any further.
+	windows.SetHandleInformation(h, windows.HANDLE_FLAG_INHERIT, 0)
+	return &Lock{c: c, h: h}, nil
+}
+
 // Close releases the lock.
 func (l *Lock) Close() error {
 	if l == nil || l.h == 0 {

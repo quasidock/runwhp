@@ -51,15 +51,27 @@ func Listen(root, id string) (net.Listener, error) {
 // has no VM.
 var ErrNoRunwhp = errors.New("no runwhp is running the container")
 
-// Dial connects to the pipe of the runwhp running the container.
+// Dial connects to the pipe of the runwhp running the container. While a
+// runwhp holds the container's lock with no pipe, as when it is handing
+// the container over to another, it tries again for a while.
 func Dial(ctx context.Context, root, id string) (net.Conn, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	c, err := winio.DialPipeContext(ctx, PipeName(root, id))
-	if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
-		return nil, ErrNoRunwhp
+	lock := &Container{ID: id, dir: filepath.Join(root, "containers", id)}
+	for {
+		c, err := winio.DialPipeContext(ctx, PipeName(root, id))
+		if !errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
+			return c, err
+		}
+		if !lock.Locked() {
+			return nil, ErrNoRunwhp
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ErrNoRunwhp
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
-	return c, err
 }
 
 // Ask sends one request to the runwhp running the container and returns

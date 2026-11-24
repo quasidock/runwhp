@@ -112,3 +112,6 @@ func (b *Backoff) Next(ran time.Duration) time.Duration {
 
 // Reset starts the delays over.
 func (b *Backoff) Reset() { b.cur = 0 }
+
+// Continue goes on from a delay of d, the last another runwhp waited.
+func (b *Backoff) Continue(d time.Duration) { b.cur = d }
