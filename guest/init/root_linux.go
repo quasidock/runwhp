@@ -140,6 +140,40 @@ func mountRoot(spec *guestspec.Spec) error {
 	if err := syscall.Mount("overlay", root, "overlay", 0, opts); err != nil {
 		return fmt.Errorf("mounting overlay: %w", err)
 	}
+	// The mount points init makes for itself go in a layer of their own,
+	// as Docker's go in its init layer, so they are not the container's
+	// changes.
+	plan, err := planInitLayer(spec)
+	if err != nil {
+		return err
+	}
+	if len(plan) > 0 {
+		if err := syscall.Unmount(root, 0); err != nil {
+			return fmt.Errorf("unmounting overlay: %w", err)
+		}
+		// A volatile overlay leaves work/incompat/volatile behind, even
+		// unmounted, and overlayfs refuses to mount over it. This one was
+		// mounted a moment ago, on a scratch disk made for this run.
+		if err := os.RemoveAll("/rw/work/work/incompat"); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(initLayerDir, 0o755); err != nil {
+			return err
+		}
+		if err := syscall.Mount("tmpfs", initLayerDir, "tmpfs", 0, "mode=755"); err != nil {
+			return fmt.Errorf("mounting tmpfs for the init layer: %w", err)
+		}
+		if err := makeInitLayer(initLayerDir, plan); err != nil {
+			return fmt.Errorf("making the init layer: %w", err)
+		}
+		lower = append([]string{initLayerDir}, lower...)
+		opts = "lowerdir=" + strings.Join(lower, ":") + opts[strings.Index(opts, ",upperdir="):]
+		if err := syscall.Mount("overlay", root, "overlay", 0, opts); err != nil {
+			return fmt.Errorf("mounting overlay: %w", err)
+		}
+		debugf("init layer: %d mount points", len(plan))
+	}
+	openLayerRoots(lower)
 	return nil
 }
 
