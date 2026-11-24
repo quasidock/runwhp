@@ -31,6 +31,8 @@ const usage = `Usage:
   runwhp pull IMAGE                             pull an image, and runwhp's kernel, into the local store
   runwhp images [-q] [REPOSITORY[:TAG]]         list images
   runwhp rmi [-f] IMAGE...                      remove images
+  runwhp tag SOURCE TARGET                      name an image anew
+  runwhp history IMAGE                          show how an image was built
   runwhp image COMMAND                          list, inspect, remove and prune images
   runwhp volume COMMAND                         create, list, inspect and remove volumes
   runwhp system df [-v]                         show the space the store takes
@@ -69,6 +71,10 @@ func realMain(args []string) int {
 		return cmdImages(args[1:], os.Stdout)
 	case "rmi":
 		return cmdRmi(args[1:], os.Stdout)
+	case "tag":
+		return cmdTag(args[1:])
+	case "history":
+		return cmdHistory(args[1:], os.Stdout)
 	case "list":
 		return cmdList(args[1:], os.Stdout)
 	case "state":
