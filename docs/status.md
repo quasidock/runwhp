@@ -1,5 +1,17 @@
 # Status
 
+- **Iteration 14** (2026-11-24): images come and go without a registry.
+  `save` writes images as Docker 29's `docker save` does, with the same
+  IDs and, for alpine, the same bytes, and Docker loads them; `load`
+  takes Docker's archives, and OCI layouts, with Docker's IDs; `import`
+  makes an image of a root file system's tar; `tag` names an image anew;
+  and `history` shows how one was built, with Docker's sizes. Every layer
+  stored keeps its tar's metadata, as Docker keeps it, from which `save`
+  rebuilds the tar byte for byte, reading the files in a guest it boots
+  for the purpose. Pulls got a little faster despite it, converting,
+  hashing and decompressing at once. See
+  [Images in and out](../README.md#images-in-and-out) and
+  [Iteration 14 results](#iteration-14-results).
 - **Iteration 13** (2026-11-24): containers restart, and their logs are
   bounded and tell the time. `--restart` takes Docker's policies: the
   runwhp running a container boots it again when its process ends, after
@@ -1154,6 +1166,93 @@ The new tests cover:
     and `stop` while it waits, `delete -f`, a port taken between runs, a
     runwhp killed while it waits, 50 boots in one runwhp, a foreground run
     handed over, and one interrupted and not
+
+The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
+the WSL kernel with its vsock modules passed with `--module`.
+
+## Iteration 14 results
+
+Measured on the test machine with runwhp's kernel, from Git Bash, with the
+store on NTFS (`C:`). "Iteration 13" is that iteration's build, run in turn
+with this one. Images came from a registry on the test machine serving
+what Docker Hub had served.
+
+Runs cost the same, over seven runs:
+
+| Measurement | Iteration 13 | Iteration 14 |
+| --- | --- | --- |
+| `run --rm alpine:3.20 true`, `-m 512m` | 182-194 ms | 185-192 ms, and 215 ms once |
+| the same, default memory | 245-257 ms | 239-261 ms |
+
+Pulls keep each layer's tar metadata now, and got faster: converting a
+layer to ext4, hashing it, taking its tar apart and decompressing it run
+at once rather than in turn. Into an empty store, over three runs:
+
+| Measurement | Iteration 13 | Iteration 14 |
+| --- | --- | --- |
+| `pull python:3.12-slim`, 5 layers, 124 MB of tars | 837-843 ms | 750-756 ms |
+| `pull golang:1.26`, 7 layers, 901 MB of tars | 3.37-3.62 s | 2.65-2.86 s |
+
+Before they ran at once, the metadata made the same pulls take 1.12-1.21 s
+and 4.6-4.7 s; see [Findings](findings.md). The metadata, gzipped, is
+0.1-0.4% of a large layer's tar: 326 KB for python:3.12-slim, 2.1 MB for
+golang:1.26 and 2.0 MB for node:22.
+
+The new commands, over three to five runs, with Docker 29.10's own
+`docker save` in WSL, on the same machine, for scale:
+
+| Measurement | runwhp | Docker in WSL |
+| --- | --- | --- |
+| `save -o` alpine:3.20, 8 MB | 184-194 ms | 339-373 ms |
+| `save -o` python:3.12-slim, 123 MB | 0.91-1.00 s | 2.6-4.9 s |
+| `save -o` golang:1.26, 900 MB | 6.6-7.7 s | 18.8-36.7 s |
+| `load -i` alpine's archive, into an empty store | 97-103 ms | |
+| `load -i` python's | 363-378 ms | |
+| `load -i` golang's | 1.93-2.02 s | |
+| `import` of python's 81 MB base layer | 235-251 ms | |
+
+A save boots a guest of 256 MiB and two vCPUs, which takes most of
+alpine's 190 ms; one of 1 GiB and four saved golang no faster. What
+bounds it near 130 MB/s is not yet known.
+
+The archives are Docker's: runwhp's save of alpine:3.20 held the same
+layer, configuration and OCI manifest, byte for byte, as Docker 29's,
+and Docker loaded runwhp's archives of alpine and python:3.12-slim with
+their IDs and ran them, as runwhp loaded Docker's.
+
+The new tests cover:
+
+- layers: their tar metadata kept and rebuilt into the same tar, with
+  directories, symlinks, hard links, whiteouts, names that are not UTF-8,
+  PAX records and padding after the end; a changed file caught; metadata
+  added to a layer stored without it; imports; removal and listing with
+  and without either file; Docker's size; and the chunks shared among
+  converting, hashing and taking apart, a consumer failing and a source
+  failing, on NTFS and, through `RUNWHP_TEST_DIR`, on ReFS
+- configuration blobs, untagged records, `run` by ID, and the prunes
+  removing metadata and blobs, and untagged images, but not those a
+  container uses
+- Dockerfile changes, as `docker import -c` takes them, and the refused
+- archives: go-containerregistry's, Docker 29's, OCI layouts alone with
+  gzip and zstd layers, untagged images, other platforms and damaged
+  digests; archives written and read back by runwhp and by
+  go-containerregistry, as a tarball and as an OCI layout, with a layer
+  two images share, an empty layer, and a file served wrong
+- fetching what layers pulled earlier lack, with the registry there and
+  gone, and for a record of iteration 11 without a configuration digest
+- the file protocol between host and guest, and init serving files:
+  names that are not UTF-8, `..`, symlinks on the way, missing files and
+  directories
+- `tag`, `history`, `load`, `import` and `save`'s arguments and output
+- end to end: `tag` and `run` by tag and by ID, `rmi` of one tag of two;
+  `history` with Docker's size for alpine's layer; `load` of the mirror's
+  archives from a file and from stdin; `import` from plain, gzipped and
+  zstd tars and stdin, run; `save` of alpine and python:3.12-slim read
+  by go-containerregistry, the same through stdout, loaded back and run,
+  saved by ID and loaded untagged, then pruned, and a repository saved
+  with both its tags; `save` fetching the metadata of an image pulled
+  without it, and failing with its registry gone; an image of 71 layers
+  saved through two guests; and `system prune -a` looping during a save
 
 The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
 the WSL kernel with its vsock modules passed with `--module`.

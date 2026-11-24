@@ -395,3 +395,48 @@
   restarted every 10 ms, `true` in a 512 MiB guest, left its runwhp with
   206 handles and 112 MiB committed after 10 restarts, and 212 handles and
   94 MiB after 50.
+- **tar-split gives layers back byte for byte from what ext4 keeps.** The
+  layers of alpine:3.20, busybox:1.36, debian:12, nginx:alpine,
+  postgres:17, node:22, golang:1.26 and python:3.12-slim, 44 in all,
+  rebuilt from their tars' metadata and their files, looked up by name as
+  tar2ext4 stores them (`path.Clean("/"+name)`, the last entry for a name
+  winning), hashed to their diffIDs, padding after the end-of-archive
+  marker included; no layer named a file twice. The metadata, gzipped,
+  is 0.1-0.4% of a large layer's tar, a few hundred bytes for a small
+  one: 2.0 MB for node:22's 1.16 GB, 326 KB for python:3.12-slim's
+  124 MB. tar2ext4 writes regular files' contents as the tar holds them,
+  and Go's tar reader, which it uses, expands GNU sparse files, which
+  would not rebuild; none of these images has one.
+- **In series, keeping the metadata made pulls 35% slower.** tar-split
+  passes the tar on through a pipe of its own while it parses it, so
+  converting, hashing and parsing took turns: pulling golang:1.26 from a
+  local registry took 4.6-4.7 s instead of 3.3-3.5. Fed the same 1 MiB
+  chunks on goroutines of their own, they run at once, and the pull
+  takes 2.7-3.3 s, decompressing included.
+- **Docker 29.10's save is an OCI layout plus manifest.json.** With the
+  overlay2 store, as WSL's Docker has it, IDs are configuration digests,
+  as runwhp's are. The archive holds each layer as a plain tar named by
+  its diffID, the configuration, an OCI manifest, index.json, with
+  containerd's name and the tag as annotations, manifest.json with
+  `LayerSources`, oci-layout, repositories, and a legacy v1 JSON blob no
+  loader needs. A repository given without a tag saves every tag of it;
+  an image given by ID is saved with `RepoTags: null` and loads as
+  `Loaded image ID: sha256:...`. `import` prints the new ID, its history
+  says `Imported from -`, `-c RUN` is refused as "not a valid change
+  command", and `docker tag` gives the new name no digest in
+  `images --digests`.
+- **runwhp's save gives Docker's blobs.** Saving alpine:3.20 gave the
+  same layer, configuration and OCI manifest, byte for byte, as Docker
+  29's save of it, and Docker loaded runwhp's archives of alpine and
+  python:3.12-slim with their IDs and ran them; runwhp loaded Docker's
+  with Docker's IDs.
+- **Docker's layer size counts symlinks.** Docker sizes a layer by walking
+  its directory, so a symlink adds the length of its target: alpine's
+  layer is 7807582 bytes to Docker, and 7802737 summing its files. runwhp
+  reads the targets from the tar's headers in the metadata.
+- **A record's configuration can be compacted back to its blob**, for
+  alpine and the other registry images on the test machine, which have
+  compact, unescaped configurations. But a record written before this
+  iteration lacks its layers' metadata too, which only the registry can
+  give, so save fetches the blob with them rather than trust a
+  reconstruction.

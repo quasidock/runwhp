@@ -71,8 +71,28 @@
   the link's 65520-byte MTU makes up for in part: 200 MB crosses in about
   0.4 s out of the container and 0.6-0.8 s into it on the test machine.
 - The prunes take no `--filter`, such as `until=` or `label=`, and
-  `images` no filter but a repository. There is no `tag`, `save`, `load`
-  or `history`, and no build, so `system df` has no build cache.
+  `images` no filter but a repository. There is no `push`, `cp`, `export`,
+  `diff` or `commit`, and no build, so `system df` has no build cache.
+- `save` reads layers in a guest it boots for the purpose, about 0.2 s
+  before the first byte, and needs vsock in its kernel: runwhp's has it,
+  and `save` boots runwhp's, or `RUNWHP_KERNEL`, never `--module`. Layers
+  pulled before iteration 14 have no tar metadata, and `save` fetches it
+  from the registry they came from, reading each such layer once more; an
+  image tagged or loaded from one with no registry digest cannot get it.
+- `save` writes about 130 MB/s, for reasons not yet known: a guest four
+  times as large does no better.
+- A layer whose tar names a file twice, or holds a GNU sparse file,
+  cannot be rebuilt byte for byte, and `save` fails on it; none of the
+  images checked has either.
+- `load` refuses images other than linux/amd64, where Docker loads them;
+  from a multi-platform index, it takes the linux/amd64 image alone. `import`
+  takes no xz and no URL.
+- An image tagged, loaded or imported has no registry digest, as with
+  Docker; one loaded or imported without a name is listed as
+  `<none>:<none>` and `image prune` removes it unless a container uses
+  it.
+- `history` gives a layer pulled before iteration 14 its ext4 image's
+  size, not Docker's.
 - An image's SIZE is that of its ext4 layers, as the store holds them,
   so it differs from Docker's for the same image.
 - `system prune` removes every kernel but the one this runwhp boots, so

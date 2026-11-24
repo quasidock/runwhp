@@ -16,7 +16,8 @@ again by Docker's restart policies; their logs carry the time of each
 line and are rotated. A container has half the
 machine's memory by default, but takes only what it uses, and gives back
 what it frees. Images, containers and volumes can be listed, measured and
-pruned as Docker's can.
+pruned as Docker's can, and images tagged, imported, and saved to and
+loaded from archives Docker takes, with the same IDs.
 
 See [status](docs/status.md) for details.
 
@@ -110,6 +111,16 @@ Keeping the store small:
 .\out\runwhp.exe system df -v
 .\out\runwhp.exe container prune
 .\out\runwhp.exe system prune -a
+```
+
+Images in and out of the store:
+
+```powershell
+.\out\runwhp.exe save -o python.tar python:3.12-slim
+.\out\runwhp.exe load -i python.tar
+.\out\runwhp.exe tag python:3.12-slim mine/python:dev
+.\out\runwhp.exe history python:3.12-slim
+.\out\runwhp.exe import -c 'ENV GREETING=hi' rootfs.tar mine/rootfs:1
 ```
 
 | Flag | Default | Meaning |
@@ -579,8 +590,10 @@ given `-f`.
   image is removed with `rmi -f` or pulled again to a new digest; they go
   with the container.
 - **Dangling** means the layers nothing lists, which pulling an image
-  again leaves behind, and images whose layers are gone. runwhp keeps a
-  record for each reference pulled, so it has no untagged images.
+  again leaves behind, images whose layers are gone, and untagged images
+  no container uses: those loaded or imported without a name, listed as
+  `<none>:<none>`. runwhp keeps a record for each reference, so pulling
+  or tagging another image under a name leaves none.
   `image prune` removes what dangles; with `-a`, it removes every image no
   container was made from.
 - **Image IDs** are configuration digests, as Docker shows them, and an
@@ -611,6 +624,60 @@ given `-f`.
 | `container prune [-f]` | Remove stopped and created containers. `container ls` and `container rm` are `list` and `delete` |
 | `system df [-v] [--format table\|json]` | Show what images, containers, volumes and kernels take, and what pruning would free; with `-v`, each of them |
 | `system prune [-a] [--volumes] [-f]` | Remove stopped and created containers, dangling images (with `-a`, unused ones), old kernels, temporary files, and with `--volumes` unused volumes |
+
+### Images in and out
+
+Images leave the store in archives that Docker, Podman and runwhp load,
+and come into it from them, keeping their IDs, as well as by `pull`.
+
+- **What the store keeps.** A layer is kept as an ext4 image, which
+  guests attach, and, beside it, its tar's own metadata in tar-split's
+  format, as Docker keeps it: every byte of the tar but its files'
+  contents, a few tenths of a percent of its size. The two give the tar
+  back byte for byte. Each image's configuration is kept too, as the
+  registry or the archive gave it, in the store's `blobs` directory.
+  Layers pulled before iteration 14 have no metadata.
+- **save** writes images as Docker 29's `docker save` does: an OCI image
+  layout, with each layer as a plain tar named by its diffID, and
+  Docker's `manifest.json` beside it, which older Docker, Podman and
+  go-containerregistry read. It rebuilds each layer's tar from its
+  metadata and its files, which it reads in a guest it boots for the
+  purpose, with the layers attached read-only, about 0.2 s before the
+  first byte; every layer must hash to its diffID, or `save` fails. The
+  blobs are Docker's, byte for byte: alpine:3.20's layer, configuration
+  and manifest are those Docker 29 writes. A layer pulled before
+  iteration 14 gets its metadata from the registry it came from, read
+  once more and not kept, and `save` says so. An image named by
+  reference is saved under it; by ID, without a name; a repository
+  without a tag saves every tag of it. A save holds the store's lock, so
+  prunes wait for it.
+- **load** takes such archives, from a file or from stdin, which it keeps
+  in the store's `tmp` first: Docker's `manifest.json`, or an OCI image
+  layout alone, as skopeo and buildah write it, with layers plain or
+  compressed with gzip or zstd. Images keep their IDs, and come with their
+  layers' metadata, so they can be saved again as they were. Only
+  linux/amd64 images are taken.
+- **import** makes an image of one layer from a tar of a root file system,
+  plain or compressed with gzip, zstd or bzip2, as `docker import` does:
+  `-c` takes Dockerfile instructions for its configuration (`CMD`,
+  `ENTRYPOINT`, `ENV`, `EXPOSE`, `LABEL`, `ONBUILD`, `STOPSIGNAL`, `USER`,
+  `VOLUME` and `WORKDIR`), and `-m` its history's comment.
+- **Names.** An image tagged, loaded or imported has no registry digest,
+  so `images --digests` shows `<none>`, as Docker does. One loaded or
+  imported without a name is listed as `<none>:<none>`, and named by its
+  ID, which `run` takes as Docker's does.
+- **history** shows how an image was built, from its configuration,
+  newest step first, with Docker's size for each step's layer: what its
+  files take once unpacked, symlinks counting their targets' length. A
+  layer pulled before iteration 14 shows its ext4 image's size instead.
+
+| Command | |
+| --- | --- |
+| `save [-o FILE] IMAGE...` | Write images to an archive, to stdout unless `-o`; refuses a console. `image save` too |
+| `load [-i FILE] [-q]` | Load the images in an archive, from stdin unless `-i`; `-q` prints only what was loaded. `image load` too |
+| `import [-c CHANGE]... [-m MESSAGE] FILE\|- [REPOSITORY[:TAG]]` | Make an image of one layer from a root file system's tar, and print its ID. `image import` too |
+| `tag SOURCE TARGET` | Name an image anew, replacing what TARGET named. `image tag` too |
+| `history [-H=false] [--no-trunc] [-q] [--format table\|json] IMAGE` | Show how an image was built. `image history` too |
 
 ### Kernel
 
@@ -827,14 +894,14 @@ bzImage.
 | [`internal/volume`](internal/volume) | Named volumes in the store: names, making, listing and removing them |
 | [`internal/container`](internal/container) | Containers in the store: records, names, locks, state, restart policies, logs, written, rotated and read with their times, and the pipe of the runwhp running one, whose attach requests carry frames in the framing of logs before iteration 13 |
 | [`internal/hostfs`](internal/hostfs) | The host end of bind mounts: Windows files served as that file system, with WSL's metadata |
-| [`internal/image`](internal/image), [`internal/layer`](internal/layer) | Registry pulls, image records, layer conversion and cache, and listing and removing them |
+| [`internal/image`](internal/image), [`internal/layer`](internal/layer) | Registry pulls, image records and configuration blobs, layer conversion and cache with each layer's tar metadata, image archives read and written, imports and Dockerfile changes, and listing and removing them |
 | [`internal/gc`](internal/gc) | What in the store is in use: which images and containers list each layer, which volumes and kernels are used; removals planned from that, and the store lock that keeps pulls and runs from racing them |
 | [`internal/storefile`](internal/storefile) | Reading and replacing records while other runwhps read them |
 | [`internal/kernel`](internal/kernel) | The kernel artifact's format, the pinned build, and fetching it into the store |
 | [`kernel`](kernel) | The kernel's configuration and build; [`kernel/push`](kernel/push) publishes it |
 | [`internal/guestspec`](internal/guestspec) | The contract between host and guest |
 | [`internal/passwd`](internal/passwd) | User and group resolution |
-| [`guest/init`](guest/init) | `runwhp-init`, PID 1 in the guest |
+| [`guest/init`](guest/init) | `runwhp-init`, PID 1 in the guest, and the server of image layers' files a guest booted for save runs |
 | [`test/e2e`](test/e2e) | End-to-end tests against WHP |
 
 `go test ./...` runs the unit tests anywhere. The end-to-end tests need a
@@ -871,8 +938,9 @@ container's supervisor, with no daemon.
 | Host to guest | Console ports for the main process; a virtio socket device for further connections | Done: `runwhp exec` uses vsock |
 | Bind mounts and volumes | virtio-fs, with a FUSE server in Go serving Windows files and keeping Unix metadata as WSL does, and the writeback cache for delegated mounts; volumes as journaled ext4 disk images on virtio-blk | Done; a volume is used by one container at a time |
 | Networking | User-mode network stack in the VMM (gVisor netstack); published ports are loopback listeners | Done, IPv4 only, TCP ports only |
-| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | Done over runwhp's own images, plus `run`, `list`, `stats`, `stop`, `restart`, `rename`, `logs`, `attach`, `wait`, `images`, `rmi`, the prunes and `system df`, and restart policies; no OCI bundles |
+| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | Done over runwhp's own images, plus `run`, `list`, `stats`, `stop`, `restart`, `rename`, `logs`, `attach`, `wait`, `images`, `rmi`, the prunes, `system df`, `tag`, `history`, `save`, `load` and `import`, and restart policies; no OCI bundles |
 | Container logs | Frames stamped with the host's time, rotated as Docker's `local` driver rotates | Done; every kept container has one |
+| Image archives | Docker 29's `docker save` format, rebuilt from each layer's tar-split metadata and its files, read in a guest booted for the purpose | Done; same IDs and blobs as Docker |
 | Kernel | Our own build with virtio drivers built in, shipped as a signed OCI artifact | Done: Linux 6.18 LTS on ghcr.io, pinned by digest rather than signed |
 
 ### Out of scope for now
