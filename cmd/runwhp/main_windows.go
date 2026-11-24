@@ -33,6 +33,8 @@ const usage = `Usage:
   runwhp rmi [-f] IMAGE...                      remove images
   runwhp tag SOURCE TARGET                      name an image anew
   runwhp history IMAGE                          show how an image was built
+  runwhp load [-i FILE]                         load images from an archive docker save wrote
+  runwhp import FILE|- [REPOSITORY[:TAG]]       make an image from a root file system tar
   runwhp image COMMAND                          list, inspect, remove and prune images
   runwhp volume COMMAND                         create, list, inspect and remove volumes
   runwhp system df [-v]                         show the space the store takes
@@ -75,6 +77,10 @@ func realMain(args []string) int {
 		return cmdTag(args[1:])
 	case "history":
 		return cmdHistory(args[1:], os.Stdout)
+	case "load":
+		return cmdLoad(args[1:], os.Stdin, os.Stdout)
+	case "import":
+		return cmdImport(args[1:], os.Stdin, os.Stdout)
 	case "list":
 		return cmdList(args[1:], os.Stdout)
 	case "state":
