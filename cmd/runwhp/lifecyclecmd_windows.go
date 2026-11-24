@@ -569,8 +569,9 @@ func cmdRestart(args []string, stdout io.Writer) int {
 const logsUsage = `Usage: runwhp logs [-f] CONTAINER
 
 Print a container's output, stdout to stdout and stderr to stderr, as its
-log holds it. A container's output goes to its log only when it runs in
-the background and was not given files for it.
+log holds it. Every container keeps a log, but one run with --rm, with
+--log-driver none, or in the background with files for its output; the
+log is rotated as --log-opt says, by default at 20 MB, keeping 5 files.
 
   -f, --follow   keep printing what the container writes until it stops
 `
@@ -593,43 +594,48 @@ func cmdLogs(args []string, stdout, stderr io.Writer) int {
 		errorf("%v", err)
 		return 1
 	}
-	f, err := container.OpenShared(c.LogPath())
-	if errors.Is(err, os.ErrNotExist) {
-		switch c.State.Output {
-		case container.OutputFile:
+	return printLogs(c, container.LogFilter{Tail: -1}, follow, stdout, stderr)
+}
+
+// printLogs prints a container's log through f, and with follow, what it
+// writes after, until it stops.
+func printLogs(c *container.Container, f container.LogFilter, follow bool, stdout, stderr io.Writer) int {
+	files, err := container.LogFiles(c.Dir())
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		errorf("%v", err)
+		return 1
+	}
+	if len(files) == 0 {
+		switch {
+		case !c.Config.KeepsLog():
+			errorf("container %s keeps no log: it was made with --log-driver none", c.Short())
+		case c.State.Output == container.OutputFile:
 			errorf("container %s's output goes to the files its runwhp was given, not to a log", c.Short())
-		case container.OutputTerminal:
+		case c.State.Output == container.OutputTerminal && c.Config.AutoRemove:
 			errorf("container %s's output goes to the terminal of the runwhp running it, not to a log", c.Short())
 		}
 		if !follow || !c.State.Active() {
 			return 0
 		}
-		// The log may not be made yet.
-		for f == nil && c.Locked() {
-			time.Sleep(100 * time.Millisecond)
-			f, _ = container.OpenShared(c.LogPath())
-		}
-		if f == nil {
-			return 0
-		}
-	} else if err != nil {
-		errorf("%v", err)
+	}
+	p, err := container.NewLogPrinter(c.Dir(), stdout, stderr, f)
+	if err != nil {
+		errorf("container %s: %v", c.Short(), err)
 		return 1
 	}
-	defer f.Close()
-	lr := container.NewLogReader(f)
+	defer p.Close()
 	for {
-		if _, err := lr.Copy(stdout, stderr); err != nil {
+		if _, err := p.Copy(); err != nil {
 			errorf("container %s: %v", c.Short(), err)
 			return 1
 		}
-		if !follow {
+		if !follow || p.Done {
 			return 0
 		}
 		if !c.Locked() {
 			// Stopped: whatever was written before is there now.
-			_, err := lr.Copy(stdout, stderr)
-			if err != nil {
+			if _, err := p.Copy(); err != nil {
+				errorf("container %s: %v", c.Short(), err)
 				return 1
 			}
 			return 0

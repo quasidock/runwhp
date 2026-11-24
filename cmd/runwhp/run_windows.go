@@ -70,6 +70,8 @@ type runOptions struct {
 	mounts      listFlag
 	tmpfs       listFlag
 	storageOpts listFlag
+	logDriver   string
+	logOpts     listFlag
 	name        string
 	rm          bool
 	detach      bool
@@ -115,6 +117,8 @@ func runFlags(o *runOptions) *flag.FlagSet {
 	fs.Var(&o.mounts, "mount", "")
 	fs.Var(&o.tmpfs, "tmpfs", "")
 	fs.Var(&o.storageOpts, "storage-opt", "")
+	fs.StringVar(&o.logDriver, "log-driver", "", "")
+	fs.Var(&o.logOpts, "log-opt", "")
 	fs.StringVar(&o.name, "name", "", "")
 	fs.BoolVar(&o.rm, "rm", false, "")
 	fs.BoolVar(&o.detach, "d", false, "")
@@ -152,6 +156,10 @@ Flags:
       --mount type=bind|volume|tmpfs,source=...,target=PATH[,readonly]  the same, Docker's long form
       --tmpfs PATH[:OPTIONS]  mount a tmpfs, by default noexec,nosuid,nodev (repeatable)
       --storage-opt size=SIZE  how large the container's writable layer may grow (default 64g)
+      --log-driver local|none  keep the container's output in its log (local, the default)
+                         or not
+      --log-opt max-size=SIZE|max-file=N  rotate the log as it reaches SIZE (default 20m;
+                         -1 never), keeping N files (default 5) (repeatable)
       --pull POLICY      when to pull the image: missing, always or never (default missing);
                          never also keeps runwhp from fetching its own kernel
       --kernel PATH      Linux bzImage to boot instead of runwhp's own kernel
@@ -257,6 +265,17 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 	}
 	logf("%4d ms  container %s recorded: %d layers", time.Since(start).Milliseconds(), rec.Short(), max(len(cfg.Layers), len(cfg.LayerFiles)))
 	bio := foregroundIO(cfg)
+	if !cfg.AutoRemove && cfg.KeepsLog() {
+		// A kept container's output also goes to its log, as Docker keeps
+		// one for every container, so that logs shows it later.
+		if lw, err := container.OpenLogWriter(rec.Dir(), cfg.LogOptions(), errorf); err != nil {
+			errorf("opening container %s's log: %v", rec.Short(), err)
+		} else {
+			defer lw.Close()
+			bio.stdout = teeWriter{bio.stdout, lw.Stream(container.Stdout)}
+			bio.stderr = teeWriter{bio.stderr, lw.Stream(container.Stderr)}
+		}
+	}
 	sup.streams(&bio, false, false) // its input stays this console's
 	code, err := bootContainer(ctx, root, rec, layer, policy, proxy, bio, sup.hooks(false), logf, start)
 	layer.close()
@@ -289,12 +308,17 @@ func resolveConfig(ctx context.Context, root string, o *runOptions, entrypointSe
 	if err != nil {
 		return nil, err
 	}
+	logs, err := parseLogOptions(o.logDriver, o.logOpts)
+	if err != nil {
+		return nil, err
+	}
 	cfg := &container.Config{
 		Version: container.ConfigVersion, ID: container.NewID(), Created: time.Now().UTC(),
 		Stdin: o.interactive, TTY: o.tty,
 		Hosts: network.hosts, Network: network.enabled, Publish: network.publish, HostGateway: network.hostGateway,
 		Shares: plan.shares, Mounts: plan.mounts,
 		Memory: memory, CPUs: cpus, StorageSize: storageSize, Debug: o.debug,
+		LogDriver: logs.driver, LogMaxSize: logs.maxSize, LogMaxFiles: logs.maxFiles,
 	}
 
 	// The process and its layers, from an image or (for development)

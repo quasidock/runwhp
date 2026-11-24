@@ -24,6 +24,7 @@ const (
 	OutputTerminal = "terminal" // the console or pipes of a foreground run
 	OutputFile     = "file"     // files the caller redirected to
 	OutputLog      = "log"      // the container's log
+	OutputNone     = "none"     // nowhere: --log-driver none
 )
 
 // State is what changes as a container runs. Only the process holding the

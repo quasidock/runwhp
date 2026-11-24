@@ -72,6 +72,34 @@ type Config struct {
 
 	// AutoRemove removes the container when it stops, as --rm asks.
 	AutoRemove bool `json:"autoRemove,omitempty"`
+
+	// The log: LogDriver is LogDriverLocal, runwhp's own, or LogDriverNone;
+	// empty means local. LogMaxSize and LogMaxFiles bound it, 0 meaning
+	// the defaults and a negative LogMaxSize no bound.
+	LogDriver   string `json:"logDriver,omitempty"`
+	LogMaxSize  int64  `json:"logMaxSize,omitempty"`
+	LogMaxFiles int    `json:"logMaxFiles,omitempty"`
+}
+
+// Log drivers.
+const (
+	LogDriverLocal = "local"
+	LogDriverNone  = "none"
+)
+
+// KeepsLog reports whether the container keeps a log.
+func (c *Config) KeepsLog() bool { return c.LogDriver != LogDriverNone }
+
+// LogOptions are the bounds of the container's log.
+func (c *Config) LogOptions() LogOptions {
+	o := LogOptions{MaxSize: c.LogMaxSize, MaxFiles: c.LogMaxFiles}
+	if o.MaxSize == 0 {
+		o.MaxSize = DefaultLogMaxSize
+	}
+	if o.MaxFiles == 0 {
+		o.MaxFiles = DefaultLogMaxFiles
+	}
+	return o
 }
 
 // Share is a host directory or file bound into the container.

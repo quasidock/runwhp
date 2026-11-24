@@ -101,7 +101,10 @@ func Load(root string) (*Usage, error) {
 		return nil, err
 	}
 	for _, c := range cs {
-		size := allocated(c.RW()) + allocated(c.LogPath()) + allocated(filepath.Join(c.Dir(), "runwhp.log"))
+		size := allocated(c.RW())
+		for _, p := range c.LogPaths() {
+			size += allocated(p)
+		}
 		u.Containers = append(u.Containers, &Container{c, size})
 	}
 

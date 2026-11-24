@@ -64,8 +64,25 @@ func (c *Container) Dir() string { return c.dir }
 // RW is the path of the container's writable layer.
 func (c *Container) RW() string { return filepath.Join(c.dir, "rw.ext4") }
 
-// LogPath is the path of the container's log.
+// LogPath is the path of the container's log, the file being written; the
+// files rotated away from it are beside it, as log.1 and so on.
 func (c *Container) LogPath() string { return filepath.Join(c.dir, "log") }
+
+// DiagLogPath is the path of runwhp's own messages about the container,
+// when it runs in the background; the file before it is beside it, as
+// runwhp.log.1.
+func (c *Container) DiagLogPath() string { return filepath.Join(c.dir, "runwhp.log") }
+
+// LogPaths lists the container's logs and runwhp's, rotated files
+// included.
+func (c *Container) LogPaths() []string {
+	var out []string
+	for _, pattern := range []string{"log", "log.*", "runwhp.log", "runwhp.log.*"} {
+		m, _ := filepath.Glob(filepath.Join(c.dir, pattern))
+		out = append(out, m...)
+	}
+	return out
+}
 
 func (c *Container) lockPath() string { return filepath.Join(c.dir, "lock") }
 

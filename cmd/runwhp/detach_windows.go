@@ -193,7 +193,7 @@ func cmdSupervise(args []string) int {
 	// runwhp's own messages go to the container's runwhp.log, not to the
 	// files its output may go to.
 	var files []io.Closer
-	if f, err := os.OpenFile(filepath.Join(rec.Dir(), "runwhp.log"), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644); err == nil {
+	if f, err := openDiagLog(rec.DiagLogPath()); err == nil {
 		files = append(files, f)
 		diagOut = f
 		fmt.Fprintf(f, "%s runwhp %d starting container %s\n", time.Now().Format(time.RFC3339), os.Getpid(), rec.Short())
@@ -208,15 +208,15 @@ func cmdSupervise(args []string) int {
 
 	bio := bootIO{diag: diagOut}
 	output := container.OutputFile
-	var log *container.Log
-	openLog := func() (*container.Log, error) {
+	var log *container.LogWriter
+	openLog := func() (*container.LogWriter, error) {
 		if log == nil {
-			f, err := os.OpenFile(rec.LogPath(), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+			l, err := container.OpenLogWriter(rec.Dir(), cfg.LogOptions(), errorf)
 			if err != nil {
 				return nil, err
 			}
-			log = container.NewLog(f)
-			files = append(files, f)
+			log = l
+			files = append(files, l)
 		}
 		return log, nil
 	}
@@ -227,6 +227,10 @@ func cmdSupervise(args []string) int {
 	}{{os.Stdout, container.Stdout, &bio.stdout}, {os.Stderr, container.Stderr, &bio.stderr}} {
 		if classify(s.f) == handleFile {
 			*s.w = s.f
+			continue
+		}
+		if !cfg.KeepsLog() {
+			*s.w, output = io.Discard, container.OutputNone
 			continue
 		}
 		l, err := openLog()
