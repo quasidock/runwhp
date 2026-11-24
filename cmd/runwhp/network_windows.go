@@ -39,7 +39,7 @@ func parseNetworkFlags(mode string, publish, addHosts []string) (networkOptions,
 		n.publish = append(n.publish, p)
 	}
 	for _, s := range addHosts {
-		line, gateway, err := parseAddHost(s)
+		line, gateway, err := netstack.HostsLine(s)
 		if err != nil {
 			return n, err
 		}
@@ -102,26 +102,4 @@ func parsePort(s string) (uint16, error) {
 		return 0, fmt.Errorf("%q is not a port number (ranges are not supported)", s)
 	}
 	return uint16(n), nil
-}
-
-// parseAddHost reads --add-host NAME:ADDRESS or NAME=ADDRESS, where ADDRESS
-// may be host-gateway: the address at which the guest reaches the host's
-// loopback. It returns the /etc/hosts line.
-func parseAddHost(s string) (line string, gateway bool, err error) {
-	i := strings.IndexAny(s, ":=")
-	if i <= 0 {
-		return "", false, fmt.Errorf("--add-host %s: want NAME:ADDRESS", s)
-	}
-	name, value := s[:i], strings.TrimSuffix(strings.TrimPrefix(s[i+1:], "["), "]")
-	if strings.ContainsAny(name, " \t") {
-		return "", false, fmt.Errorf("--add-host %s: bad host name %q", s, name)
-	}
-	if value == "host-gateway" {
-		return netstack.Gateway.String() + "\t" + name, true, nil
-	}
-	ip, err := netip.ParseAddr(value)
-	if err != nil {
-		return "", false, fmt.Errorf("--add-host %s: %q is not an IP address or host-gateway", s, value)
-	}
-	return ip.String() + "\t" + name, false, nil
 }
