@@ -107,6 +107,10 @@ type Spec struct {
 	// signal that arrives first ends the container without starting it, as
 	// if the process had been killed by it.
 	WaitStart bool `json:"waitStart,omitempty"`
+	// ClockSync says the host sends its time as init opens the control
+	// port: init sets the clock from it before it starts the process, which
+	// would otherwise see the CMOS stub's whole seconds.
+	ClockSync bool `json:"clockSync,omitempty"`
 	// Volumes is how many volume disks there are.
 	Volumes int `json:"volumes,omitempty"`
 	// Network configures the network interface. nil means the guest has

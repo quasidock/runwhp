@@ -18,6 +18,10 @@ const (
 	// kernel slews at 500 µs a second, so this much is made up in 40 s,
 	// within the host's period.
 	clockSlew = 20 * time.Millisecond
+	// clockWait bounds how long the process waits for the host's first
+	// time, which comes as soon as init opens the control port: under
+	// 1 ms, measured.
+	clockWait = 500 * time.Millisecond
 )
 
 // clockAction decides what to do about the guest's clock being offset

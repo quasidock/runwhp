@@ -44,6 +44,15 @@ func runProcess(spec *guestspec.Spec, user passwd.User, ports map[string]*os.Fil
 			return guestspec.Status{Exit: guestspec.ExitSignalBase + sig}, nil
 		}
 	}
+	if spec.ClockSync {
+		// The time is on its way as the control port opens, but on its own
+		// goroutine: the process must not read the clock before it is set.
+		if took, ok := ctl.waitClock(clockWait); ok {
+			debugf("clock set from the host's after waiting %v", took)
+		} else {
+			logf("no time from the host within %v; starting with the boot clock", clockWait)
+		}
+	}
 
 	env := processEnv(spec.Env, spec.Hostname, user, spec.TTY)
 

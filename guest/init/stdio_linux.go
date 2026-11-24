@@ -218,10 +218,32 @@ type controller struct {
 	startReq  bool
 	preSignal int
 	wake      chan struct{}
+
+	// clockSet is closed once the clock has been set from the host's time
+	// the first time.
+	clockSet  chan struct{}
+	clockOnce sync.Once
 }
 
 func newController(waitMode bool) *controller {
-	return &controller{waitMode: waitMode, wake: make(chan struct{}, 1)}
+	return &controller{waitMode: waitMode, wake: make(chan struct{}, 1), clockSet: make(chan struct{})}
+}
+
+// waitClock waits up to limit for the host's first time to be applied,
+// and reports how long it waited and whether it came.
+func (c *controller) waitClock(limit time.Duration) (time.Duration, bool) {
+	start := time.Now()
+	select {
+	case <-c.clockSet:
+		return 0, true
+	default:
+	}
+	select {
+	case <-c.clockSet:
+		return time.Since(start), true
+	case <-time.After(limit):
+		return limit, false
+	}
 }
 
 // waitStart waits for the host to start the process. It returns 0, or the
@@ -291,6 +313,7 @@ func (c *controller) listen(port *os.File) {
 		}
 		if m.Time != 0 {
 			setClock(m.Time)
+			c.clockOnce.Do(func() { close(c.clockSet) })
 		}
 		if m.Stats != 0 {
 			// Walking /proc takes a while; signals behind it should not wait.

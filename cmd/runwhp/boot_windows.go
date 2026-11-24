@@ -208,6 +208,7 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 		Hostname: cfg.Hostname, Hosts: cfg.Hosts, Layers: len(layerFiles), Scratch: lr.file != nil, KeepLayer: keep,
 		Volumes: len(volumeDevices), Debug: cfg.Debug, Stdin: cfg.Stdin, TTY: cfg.TTY, Network: guestNetwork(cfg.Network),
 		Mounts: cfg.Mounts, WaitStart: hooks.waitStart, Reclaim: reclaimPolicy(logf),
+		ClockSync: clockPeriod(logf) > 0,
 	}
 	if cfg.TTY {
 		if bio.terminal {
