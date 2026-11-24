@@ -72,6 +72,7 @@ type runOptions struct {
 	storageOpts listFlag
 	logDriver   string
 	logOpts     listFlag
+	restart     string
 	name        string
 	rm          bool
 	detach      bool
@@ -117,6 +118,7 @@ func runFlags(o *runOptions) *flag.FlagSet {
 	fs.Var(&o.mounts, "mount", "")
 	fs.Var(&o.tmpfs, "tmpfs", "")
 	fs.Var(&o.storageOpts, "storage-opt", "")
+	fs.StringVar(&o.restart, "restart", "no", "")
 	fs.StringVar(&o.logDriver, "log-driver", "", "")
 	fs.Var(&o.logOpts, "log-opt", "")
 	fs.StringVar(&o.name, "name", "", "")
@@ -143,6 +145,9 @@ Flags:
       --name NAME        name the container, as well as its ID
       --rm               remove the container when it stops; otherwise it is kept, with
                          its writable layer, until runwhp delete
+      --restart POLICY   start the container again when its process ends: no (default),
+                         on-failure[:N] (when it fails, at most N times), always or
+                         unless-stopped (the same here), unless stopped or killed
       --hostname NAME    container hostname (default: the start of its ID)
       --network MODE     user (default: outbound access through this machine) or none
   -p, --publish [IP:]HOSTPORT:PORT  forward a host port to a container TCP port (repeatable);
@@ -314,6 +319,13 @@ func resolveConfig(ctx context.Context, root string, o *runOptions, entrypointSe
 	if err != nil {
 		return nil, err
 	}
+	restart, err := container.ParseRestartPolicy(o.restart)
+	if err != nil {
+		return nil, err
+	}
+	if restart.IsSet() && o.rm {
+		return nil, errors.New("conflicting options: cannot specify both --restart and --rm")
+	}
 	cfg := &container.Config{
 		Version: container.ConfigVersion, ID: container.NewID(), Created: time.Now().UTC(),
 		Stdin: o.interactive, TTY: o.tty,
@@ -321,6 +333,7 @@ func resolveConfig(ctx context.Context, root string, o *runOptions, entrypointSe
 		Shares: plan.shares, Mounts: plan.mounts,
 		Memory: memory, CPUs: cpus, StorageSize: storageSize, Debug: o.debug,
 		LogDriver: logs.driver, LogMaxSize: logs.maxSize, LogMaxFiles: logs.maxFiles,
+		Restart: restart,
 	}
 
 	// The process and its layers, from an image or (for development)

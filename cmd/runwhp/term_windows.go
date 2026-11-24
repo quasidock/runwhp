@@ -260,6 +260,9 @@ type signalProxy struct {
 	logf    func(format string, a ...any)
 
 	interrupts int
+	// signaled says runwhp itself was sent a signal for the container,
+	// Ctrl+C say: whatever it ends with, it ended by hand.
+	signaled atomic.Bool
 }
 
 // listening reports whether init has opened the control port, and so can
@@ -276,6 +279,7 @@ func (p *signalProxy) run(sigs <-chan os.Signal) {
 }
 
 func (p *signalProxy) handle(sig os.Signal) {
+	p.signaled.Store(true)
 	con := p.console.Load()
 	if con == nil || !con.Connected(guestspec.PortControl) {
 		p.stop()

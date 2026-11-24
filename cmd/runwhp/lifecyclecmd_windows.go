@@ -239,8 +239,8 @@ func startContainer(ctx context.Context, store *container.Store, ref string) err
 	root, _ := storeRoot()
 	var rep container.Reply
 	switch c.State.Status {
-	case container.Running:
-		return nil
+	case container.Running, container.Restarting:
+		return nil // a restarting one starts again by itself
 	case container.Creating:
 		return fmt.Errorf("container %s is still being created", c.Short())
 	case container.Created:
@@ -298,6 +298,8 @@ func startAttached(ctx context.Context, done func(), store *container.Store, ref
 	switch c.State.Status {
 	case container.Running:
 		start = nil
+	case container.Restarting:
+		return fail, fmt.Errorf("container %s is restarting: attach once it is running", c.Short())
 	case container.Creating:
 		return fail, fmt.Errorf("container %s is still being created", c.Short())
 	case container.Stopped:
@@ -372,7 +374,7 @@ func waitContainer(ctx context.Context, store *container.Store, ref string) (int
 	if ctx.Err() != nil {
 		return 0, ctx.Err()
 	}
-	if err == nil && rep.Status == container.Stopped {
+	if err == nil && (rep.Status == container.Stopped || rep.Status == container.Restarting) {
 		// It answers before it removes a container run with --rm.
 		return rep.ExitCode, nil
 	}

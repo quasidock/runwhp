@@ -106,6 +106,10 @@ func cmdExec(args []string) int {
 		errorf("%v", err)
 		return fail
 	}
+	if c.State.Status == container.Restarting {
+		errorf("container %s is restarting: wait until it is running", c.Short())
+		return fail
+	}
 	if c.State.Status != container.Running {
 		errorf("container %s is not running", c.Short())
 		return fail

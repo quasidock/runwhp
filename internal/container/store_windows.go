@@ -352,8 +352,12 @@ func (s *Store) refresh(c *Container) {
 	}
 	if st.Active() {
 		// A record that was never finished has nothing to say; a container
-		// being started again had ended before.
-		if st.Status != Creating || !st.FinishedAt.IsZero() {
+		// being started again had ended before. One waiting to be started
+		// again had ended, and how is recorded.
+		switch {
+		case st.Status == Restarting:
+			st.Error = "runwhp's process ended while the container waited to be started again"
+		case st.Status != Creating || !st.FinishedAt.IsZero():
 			st.ExitCode = 255
 			st.Error = "runwhp's process ended without recording how the container ended"
 		}

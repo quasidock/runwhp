@@ -13,7 +13,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -253,43 +255,95 @@ func cmdSupervise(args []string) int {
 	// With -i and no file or pipe for input, the input is attached runwhps'.
 	sup.streams(&bio, cfg.Stdin && bio.stdin == nil, cfg.StdinOnce)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	proxy := &signalProxy{stop: cancel, queue: newControlQueue(), logf: logf}
-	b := sup.beginBoot(proxy)
-	if sup.stdin != nil {
-		bio.stdin = sup.stdin.view(b.exited)
-	}
-	hooks := sup.hooks(b, waitStart)
-	if waitStart {
-		hooks.ready = func() {
-			sup.isReady(b)
-			report.ok(container.Created)
+	sup.policy = cfg.Restart
+	sup.backoff = restartBackoff(errorf)
+
+	// The container runs, and runs again as its restart policy says, each
+	// time in a VM of its own on its writable layer.
+	for n := 0; ; n++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		proxy := &signalProxy{stop: cancel, queue: newControlQueue(), logf: logf}
+		b := sup.beginBoot(proxy)
+		if b == nil {
+			cancel()
+			sup.stoppedRestarting()
+			break
 		}
-	} else {
-		hooks.started = func(pid int) {
-			sup.started(b, pid)
-			sup.persist()
-			report.ok(container.Running)
+		bb := bio
+		switch {
+		case sup.stdin != nil:
+			bb.stdin = sup.stdin.view(b.exited)
+		case n > 0:
+			bb.stdin = nil // a file or pipe of input goes to the first run only
+		}
+		hooks := sup.hooks(b, waitStart && n == 0)
+		if n == 0 {
+			// The runwhp that started this one waits to hear how the first
+			// boot went.
+			if waitStart {
+				hooks.ready = func() {
+					sup.isReady(b)
+					report.ok(container.Created)
+				}
+			} else {
+				hooks.started = func(pid int) {
+					sup.started(b, pid)
+					sup.persist()
+					report.ok(container.Running)
+				}
+			}
+		}
+		code, err := bootContainer(ctx, root, rec, nil, image.PullNever, proxy, bb, hooks, logf, time.Now())
+		cancel()
+		if err != nil {
+			errorf("%v", err)
+		}
+		if !report.done() {
+			e := err
+			if e == nil {
+				e = fmt.Errorf("the container exited with %d before it was ready", code)
+			}
+			sup.mu.Lock()
+			console := b.console
+			sup.mu.Unlock()
+			report.failCode(e, code, console)
+		}
+		restart, delay := sup.endBoot(b, code, err)
+		if !restart {
+			break
+		}
+		st := sup.reply()
+		fmt.Fprintf(diagOut, "%s container exited with %d; starting it again in %v, as --restart %s says (restart %d)\n",
+			time.Now().Format(time.RFC3339), st.ExitCode, delay, cfg.Restart, n+1)
+		if cfg.Debug {
+			fmt.Fprintf(diagOut, "[vmm] %d goroutines\n", runtime.NumGoroutine())
+		}
+		if !sup.waitRestart(delay) {
+			break
 		}
 	}
-	code, err := bootContainer(ctx, root, rec, nil, image.PullNever, proxy, bio, hooks, logf, time.Now())
-	if err != nil {
-		errorf("%v", err)
-	}
-	if !report.done() {
-		e := err
-		if e == nil {
-			e = fmt.Errorf("the container exited with %d before it was ready", code)
-		}
-		sup.mu.Lock()
-		console := b.console
-		sup.mu.Unlock()
-		report.failCode(e, code, console)
-	}
-	sup.endBoot(b, code, err)
 	sup.finish()
 	return 0
+}
+
+// restartBackoff is the delays between restarts: Docker's, unless
+// RUNWHP_RESTART_BACKOFF says INITIAL[,MAX], as Go durations, for tests.
+func restartBackoff(logf func(string, ...any)) container.Backoff {
+	var b container.Backoff
+	v, ok := os.LookupEnv("RUNWHP_RESTART_BACKOFF")
+	if !ok {
+		return b
+	}
+	first, last, _ := strings.Cut(v, ",")
+	var err error
+	if b.Initial, err = time.ParseDuration(first); err == nil && last != "" {
+		b.Max, err = time.ParseDuration(last)
+	}
+	if err != nil || b.Initial <= 0 || b.Max < 0 {
+		logf("RUNWHP_RESTART_BACKOFF=%q is not INITIAL[,MAX] durations; ignored", v)
+		return container.Backoff{}
+	}
+	return b
 }
 
 // readiness is the pipe on which a background runwhp tells the one that

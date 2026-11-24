@@ -276,6 +276,10 @@ func (s *supervisor) attach(c net.Conn, r *bufio.Reader, req container.Request) 
 	s.mu.Lock()
 	in, b, status := s.stdin, s.cur, s.state.Status
 	s.mu.Unlock()
+	if status == container.Restarting {
+		reply(container.Reply{Error: "container is restarting: attach once it is running"})
+		return
+	}
 	if status == container.Stopped || b == nil {
 		reply(container.Reply{Error: errNotRunning.Error()})
 		return

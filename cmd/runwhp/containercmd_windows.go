@@ -309,10 +309,14 @@ type containerState struct {
 	Error       string    `json:"error,omitempty"`
 	GuestPid    int       `json:"guestPid,omitempty"`
 	AutoRemove  bool      `json:"autoRemove,omitempty"`
-	Output      string    `json:"output,omitempty"`
-	Memory      uint64    `json:"memory"` // guest RAM, in bytes
-	Ports       []string  `json:"ports,omitempty"`
-	Volumes     []string  `json:"volumes,omitempty"`
+	// RestartPolicy is --restart's, and RestartCount the times the runwhp
+	// running the container has started it again.
+	RestartPolicy string   `json:"restartPolicy,omitempty"`
+	RestartCount  int      `json:"restartCount,omitempty"`
+	Output        string   `json:"output,omitempty"`
+	Memory        uint64   `json:"memory"` // guest RAM, in bytes
+	Ports         []string `json:"ports,omitempty"`
+	Volumes       []string `json:"volumes,omitempty"`
 }
 
 func stateOf(c *container.Container) containerState {
@@ -321,9 +325,12 @@ func stateOf(c *container.Container) containerState {
 		Name: c.Name, Image: imageOf(c.Config), ImageDigest: c.Config.ImageDigest, Command: c.Config.Args,
 		Created: c.Config.Created, StartedAt: c.State.StartedAt, FinishedAt: c.State.FinishedAt,
 		Error: c.State.Error, GuestPid: c.State.GuestPid, AutoRemove: c.Config.AutoRemove, Output: c.State.Output,
-		Memory: c.Config.Memory,
+		Memory: c.Config.Memory, RestartCount: c.State.RestartCount,
 	}
-	if c.State.Status == container.Stopped && !c.State.FinishedAt.IsZero() {
+	if c.Config.Restart.IsSet() {
+		s.RestartPolicy = c.Config.Restart.String()
+	}
+	if (c.State.Status == container.Stopped || c.State.Status == container.Restarting) && !c.State.FinishedAt.IsZero() {
 		code := c.State.ExitCode
 		s.ExitCode = &code
 	}
@@ -389,6 +396,8 @@ func statusText(st container.State, now time.Time) string {
 			return "Created" // made, but never started
 		}
 		return fmt.Sprintf("Exited (%d) %s", st.ExitCode, ago(now, st.FinishedAt))
+	case container.Restarting:
+		return fmt.Sprintf("Restarting (%d) %s", st.ExitCode, ago(now, st.FinishedAt))
 	}
 	return string(st.Status)
 }

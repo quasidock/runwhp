@@ -72,6 +72,8 @@ type Config struct {
 
 	// AutoRemove removes the container when it stops, as --rm asks.
 	AutoRemove bool `json:"autoRemove,omitempty"`
+	// Restart is when the runwhp running the container starts it again.
+	Restart RestartPolicy `json:"restart,omitzero"`
 
 	// The log: LogDriver is LogDriverLocal, runwhp's own, or LogDriverNone;
 	// empty means local. LogMaxSize and LogMaxFiles bound it, 0 meaning

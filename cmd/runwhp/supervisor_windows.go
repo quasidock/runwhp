@@ -40,6 +40,18 @@ type supervisor struct {
 	mu    sync.Mutex
 	state container.State
 	cur   *vmBoot // the boot under way, or the last
+	// changed is closed, and replaced, as the status changes.
+	changed chan struct{}
+	// The restart policy, and how far along it the container is: armed
+	// once a boot's process has started, after which it applies, and
+	// stopping once someone has stopped the container, after which no
+	// boot follows; stopCh is closed then too.
+	policy   container.RestartPolicy
+	backoff  container.Backoff
+	restarts int
+	armed    bool
+	stopping bool
+	stopCh   chan struct{}
 	// wmu orders the writes of state: each writes it as it is then, so the
 	// last write is always of the latest. pending counts writes in flight.
 	wmu     sync.Mutex
@@ -68,6 +80,10 @@ type vmBoot struct {
 	console     []string   // the last kernel console lines, if the VM failed
 	vm          *vmHandles // what reaches into the VM, once it has one
 	exit        container.Reply
+	startedAt   time.Time // when the process started
+	// killed says a kill or stop reached this boot: its process ended by
+	// hand, and is not started again, as Docker counts any kill.
+	killed bool
 }
 
 // streams has the container's output pass through the hub to attached
@@ -93,7 +109,7 @@ func supervise(root string, store *container.Store, rec *container.Container, ou
 		return nil, err
 	}
 	s := &supervisor{root: root, store: store, rec: rec, lock: lock, state: rec.State,
-		done: make(chan struct{}), hub: newOutputHub()}
+		done: make(chan struct{}), hub: newOutputHub(), changed: make(chan struct{}), stopCh: make(chan struct{})}
 	if s.ln, err = container.Listen(root, rec.ID); err != nil {
 		lock.Close()
 		return nil, fmt.Errorf("serving container %s's pipe: %w", rec.Short(), err)
@@ -111,15 +127,26 @@ func supervise(root string, store *container.Store, rec *container.Container, ou
 }
 
 // beginBoot starts a boot of the container, with proxy its control port
-// and the way to stop its VM.
+// and the way to stop its VM; or returns nil if the container has been
+// stopped meanwhile, and is not to be booted again.
 func (s *supervisor) beginBoot(proxy *signalProxy) *vmBoot {
 	b := &vmBoot{proxy: proxy, ready: make(chan struct{}), running: make(chan struct{}), exited: make(chan struct{})}
 	// The console's reader of the control port ends with the boot, rather
 	// than wait for messages meant for the next.
 	proxy.queue.done = b.exited
 	s.mu.Lock()
+	if s.stopping {
+		s.mu.Unlock()
+		return nil
+	}
+	restarting := s.state.Status == container.Restarting
 	s.cur = b
 	s.mu.Unlock()
+	if restarting {
+		// Booting again: creating, as each boot is, with how the last run
+		// ended kept.
+		s.update(func(st *container.State) { st.Status = container.Creating })
+	}
 	s.serve.Do(func() { go s.serveConns() })
 	go s.clockLoop(b, clockPeriod(proxy.logf))
 	return b
@@ -188,7 +215,12 @@ func (s *supervisor) updateLater(f func(*container.State)) {
 
 func (s *supervisor) change(f func(*container.State)) {
 	s.mu.Lock()
+	was := s.state.Status
 	f(&s.state)
+	if s.state.Status != was {
+		close(s.changed)
+		s.changed = make(chan struct{})
+	}
 	s.mu.Unlock()
 }
 
@@ -237,18 +269,23 @@ func (s *supervisor) isReady(b *vmBoot) {
 // in the background, since the guest goes on meanwhile, and whoever needs
 // it recorded first, a start request say, persists it itself.
 func (s *supervisor) started(b *vmBoot, pid int) {
+	now := time.Now()
 	s.updateLater(func(st *container.State) {
-		st.Status, st.GuestPid, st.StartedAt = container.Running, pid, time.Now().UTC()
+		st.Status, st.GuestPid, st.StartedAt = container.Running, pid, now.UTC()
+		b.startedAt, s.armed = now, true
 	})
 	close(b.running)
 }
 
 // endBoot records how boot b's process ended, and answers whoever waits
-// for that.
-func (s *supervisor) endBoot(b *vmBoot, code int, err error) {
+// for that. It reports whether the restart policy starts the container
+// again, and after how long: not if the process never started, nor if it
+// ended by hand, by a stop or a kill, or by a signal to a foreground run.
+func (s *supervisor) endBoot(b *vmBoot, code int, err error) (restart bool, delay time.Duration) {
+	now := time.Now()
 	s.change(func(st *container.State) {
-		st.Status, st.Pid, st.GuestPid = container.Stopped, 0, 0
-		st.FinishedAt, st.ExitCode, st.Error = time.Now().UTC(), code, ""
+		st.GuestPid = 0
+		st.FinishedAt, st.ExitCode, st.Error = now.UTC(), code, ""
 		switch {
 		case b.hardStopped != "":
 			st.ExitCode, st.Error = guestspec.ExitSignalBase+guestspec.SIGKILL, b.hardStopped
@@ -260,6 +297,19 @@ func (s *supervisor) endBoot(b *vmBoot, code int, err error) {
 			st.Error = "runwhp failed"
 		}
 		b.vm = nil
+		byHand := s.stopping || b.killed || b.proxy.signaled.Load()
+		restart = s.armed && !byHand && s.policy.ShouldRestart(st.ExitCode, s.restarts)
+		if !restart {
+			st.Status, st.Pid = container.Stopped, 0
+			return
+		}
+		s.restarts++
+		st.Status, st.RestartCount = container.Restarting, s.restarts
+		var ran time.Duration
+		if !b.startedAt.IsZero() {
+			ran = now.Sub(b.startedAt)
+		}
+		delay = s.backoff.Next(ran)
 	})
 	s.pending.Wait()
 	if !s.rec.Config.AutoRemove {
@@ -270,6 +320,39 @@ func (s *supervisor) endBoot(b *vmBoot, code int, err error) {
 	b.exit = rep
 	s.mu.Unlock()
 	close(b.exited)
+	return restart, delay
+}
+
+// waitRestart waits delay before the next boot, and reports false if the
+// container was stopped meanwhile, which it then records.
+func (s *supervisor) waitRestart(delay time.Duration) bool {
+	t := time.NewTimer(delay)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-s.stopCh:
+		s.stoppedRestarting()
+		return false
+	}
+}
+
+// stoppedRestarting records that a container waiting to start again was
+// stopped instead, with how its last run ended.
+func (s *supervisor) stoppedRestarting() {
+	s.update(func(st *container.State) {
+		if st.Status == container.Restarting {
+			st.Status, st.Pid = container.Stopped, 0
+		}
+	})
+}
+
+// stopRestarts says no boot is to follow; mu must be held.
+func (s *supervisor) stopRestarts() {
+	if !s.stopping {
+		s.stopping = true
+		close(s.stopCh)
+	}
 }
 
 // finish ends the supervisor once the container has stopped for good: it
@@ -313,7 +396,7 @@ func (s *supervisor) reply() container.Reply {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r := container.Reply{OK: true, Status: s.state.Status}
-	if s.state.Status == container.Stopped {
+	if s.state.Status == container.Stopped || s.state.Status == container.Restarting {
 		// Until then, the state holds how it ended the time before.
 		r.ExitCode = s.state.ExitCode
 		if s.state.Error != "" {
@@ -342,10 +425,18 @@ var errNotRunning = errors.New("container is not running")
 func (s *supervisor) kill(sig int, all bool) error {
 	s.mu.Lock()
 	b, status := s.cur, s.state.Status
-	s.mu.Unlock()
-	if status == container.Stopped || b == nil {
+	switch {
+	case status == container.Restarting:
+		// Between boots, a kill ends the restarts.
+		s.stopRestarts()
+		s.mu.Unlock()
+		return nil
+	case status == container.Stopped || b == nil:
+		s.mu.Unlock()
 		return errNotRunning
 	}
+	b.killed = true
+	s.mu.Unlock()
 	if !b.proxy.listening() {
 		why := fmt.Sprintf("killed by %s", guestspec.SignalName(sig))
 		if status == container.Creating {
@@ -374,6 +465,9 @@ func (s *supervisor) stop(timeout time.Duration) {
 	if n, err := guestspec.ParseSignal(s.rec.Config.StopSignal); err == nil && s.rec.Config.StopSignal != "" {
 		sig = n
 	}
+	s.mu.Lock()
+	s.stopRestarts()
+	s.mu.Unlock()
 	if s.kill(sig, false) != nil {
 		return
 	}
@@ -391,6 +485,8 @@ func (s *supervisor) start() container.Reply {
 		return container.Reply{Error: "the container is still being created"}
 	case container.Stopped:
 		return container.Reply{Error: errNotRunning.Error()}
+	case container.Restarting:
+		return s.reply() // it starts again by itself, as docker start leaves it
 	case container.Created:
 		b.proxy.queue.send(guestspec.Control{Start: true})
 	}
@@ -411,13 +507,30 @@ func (s *supervisor) start() container.Reply {
 	}
 }
 
-// wait waits for the container's process to end, and says how it did.
+// wait waits for the container's process to end, and says how it did. A
+// container waiting to start again is waited for through its next run, as
+// docker wait does.
 func (s *supervisor) wait() container.Reply {
-	b := s.current()
-	<-b.exited
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return b.exit
+	for {
+		s.mu.Lock()
+		b, status, changed := s.cur, s.state.Status, s.changed
+		s.mu.Unlock()
+		if status == container.Restarting {
+			select {
+			case <-changed:
+				continue
+			case <-s.done:
+				return s.reply()
+			}
+		}
+		if b == nil {
+			return s.reply()
+		}
+		<-b.exited
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return b.exit
+	}
 }
 
 // serveConns answers requests on the container's pipe until it closes.

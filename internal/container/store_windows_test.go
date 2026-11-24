@@ -367,3 +367,20 @@ func TestReferencing(t *testing.T) {
 		t.Errorf("Referencing(other) = %v", got)
 	}
 }
+
+// TestRestartingDied checks a container whose runwhp died while it waited
+// to start it again: it is stopped, with the exit it had.
+func TestRestartingDied(t *testing.T) {
+	s := Open(testRoot(t))
+	c := mustCreate(t, s, "", "")
+	l, _ := s.Lock(c)
+	l.WriteState(State{Status: Restarting, Pid: 1, ExitCode: 3, FinishedAt: time.Now().UTC(), RestartCount: 2})
+	l.Close()
+	list, err := s.List()
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list: %v, %v", list, err)
+	}
+	if st := list[0].State; st.Status != Stopped || st.ExitCode != 3 || st.RestartCount != 2 || st.Error == "" {
+		t.Errorf("state %+v", st)
+	}
+}
