@@ -45,7 +45,7 @@ func (g *guestFreezer) set(frozen bool) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if !g.listening() {
-		return errNotRunning
+		return ErrNotRunning
 	}
 	select {
 	case <-g.replies:
@@ -53,7 +53,7 @@ func (g *guestFreezer) set(frozen bool) error {
 	}
 	g.seq++
 	if !g.send(guestspec.Control{Freeze: &guestspec.Freeze{Seq: g.seq, Frozen: frozen}}) {
-		return errNotRunning
+		return ErrNotRunning
 	}
 	timer := time.NewTimer(FreezeWait)
 	defer timer.Stop()
@@ -73,13 +73,13 @@ func (g *guestFreezer) set(frozen bool) error {
 	}
 }
 
-// pause freezes the container's processes, as docker pause does.
-func (s *Supervisor) pause() container.Reply {
+// Pause freezes the container's processes, as docker Pause does.
+func (s *Supervisor) Pause() container.Reply {
 	return s.setPaused(true)
 }
 
-// unpause thaws them.
-func (s *Supervisor) unpause() container.Reply {
+// Unpause thaws them.
+func (s *Supervisor) Unpause() container.Reply {
 	return s.setPaused(false)
 }
 

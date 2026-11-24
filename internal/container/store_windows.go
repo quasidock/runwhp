@@ -61,8 +61,15 @@ func (c *Container) Short() string { return c.ID[:12] }
 // Dir is the container's directory in the store.
 func (c *Container) Dir() string { return c.dir }
 
-// RW is the path of the container's writable layer.
-func (c *Container) RW() string { return filepath.Join(c.dir, "rw.ext4") }
+// RW is the path of the container's writable layer: rw.ext4 in its
+// directory, unless its configuration puts it elsewhere, where removing the
+// container leaves it.
+func (c *Container) RW() string {
+	if c.Config != nil && c.Config.RWPath != "" {
+		return c.Config.RWPath
+	}
+	return filepath.Join(c.dir, "rw.ext4")
+}
 
 // LogPath is the path of the container's log, the file being written; the
 // files rotated away from it are beside it, as log.1 and so on.

@@ -457,3 +457,35 @@ func TestAdoptLock(t *testing.T) {
 		t.Error("still locked once the second let it go")
 	}
 }
+
+func TestRWPath(t *testing.T) {
+	s := Open(testRoot(t))
+	c, err := s.Create(&Config{ID: NewID(), Args: []string{"true"}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.RW() != filepath.Join(c.Dir(), "rw.ext4") {
+		t.Errorf("RW = %s", c.RW())
+	}
+	elsewhere := filepath.Join(t.TempDir(), "snapshot", "rw.ext4")
+	os.MkdirAll(filepath.Dir(elsewhere), 0o755)
+	os.WriteFile(elsewhere, []byte("layer"), 0o644)
+	d, err := s.Create(&Config{ID: NewID(), Args: []string{"true"}, RWPath: elsewhere,
+		Containerd: &ContainerdTask{Namespace: "default", ID: "web"}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get(d.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RW() != elsewhere || got.Config.Containerd == nil || got.Config.Containerd.ID != "web" {
+		t.Errorf("RW = %s, containerd %+v", got.RW(), got.Config.Containerd)
+	}
+	if err := s.Remove(got); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(elsewhere); err != nil {
+		t.Errorf("removing the container removed its writable layer elsewhere: %v", err)
+	}
+}

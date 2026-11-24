@@ -338,6 +338,9 @@ type containerState struct {
 	Memory        uint64   `json:"memory"` // guest RAM, in bytes
 	Ports         []string `json:"ports,omitempty"`
 	Volumes       []string `json:"volumes,omitempty"`
+	// Containerd is the containerd task the container runs, for one a
+	// containerd shim runs.
+	Containerd *container.ContainerdTask `json:"containerd,omitempty"`
 }
 
 func stateOf(c *container.Container) containerState {
@@ -346,7 +349,7 @@ func stateOf(c *container.Container) containerState {
 		Name: c.Name, Image: imageOf(c.Config), ImageDigest: c.Config.ImageDigest, Command: c.Config.Args,
 		Created: c.Config.Created, StartedAt: c.State.StartedAt, FinishedAt: c.State.FinishedAt,
 		Error: c.State.Error, GuestPid: c.State.GuestPid, AutoRemove: c.Config.AutoRemove, Output: c.State.Output,
-		Memory: c.Config.Memory, RestartCount: c.State.RestartCount,
+		Memory: c.Config.Memory, RestartCount: c.State.RestartCount, Containerd: c.Config.Containerd,
 	}
 	if c.State.Status == container.Running && c.State.Paused {
 		s.Status = container.Paused

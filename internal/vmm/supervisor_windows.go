@@ -477,13 +477,13 @@ func (s *Supervisor) hardStop(b *vmBoot, why string) {
 	b.proxy.stop()
 }
 
-var errNotRunning = errors.New("container is not running")
+var ErrNotRunning = errors.New("container is not running")
 
-// kill sends sig to the container's process, or with all to every process
+// Kill sends sig to the container's process, or with all to every process
 // in it. Before init listens there is nothing to send it to, so the VM is
 // stopped instead. After SIGKILL the guest has killGrace to end the
 // container before the VM is stopped.
-func (s *Supervisor) kill(sig int, all bool) error {
+func (s *Supervisor) Kill(sig int, all bool) error {
 	s.mu.Lock()
 	b, status := s.cur, s.state.Status
 	switch {
@@ -494,7 +494,7 @@ func (s *Supervisor) kill(sig int, all bool) error {
 		return nil
 	case status == container.Stopped || b == nil:
 		s.mu.Unlock()
-		return errNotRunning
+		return ErrNotRunning
 	}
 	b.killed = true
 	s.mu.Unlock()
@@ -530,23 +530,23 @@ func (s *Supervisor) stop(timeout time.Duration) {
 	s.mu.Lock()
 	s.stopRestarts()
 	s.mu.Unlock()
-	if s.kill(sig, false) != nil {
+	if s.Kill(sig, false) != nil {
 		return
 	}
-	t := time.AfterFunc(timeout, func() { s.kill(guestspec.SIGKILL, false) })
+	t := time.AfterFunc(timeout, func() { s.Kill(guestspec.SIGKILL, false) })
 	<-s.done
 	t.Stop()
 }
 
-// start starts the process of a container booted to wait for its start,
+// Start starts the process of a container booted to wait for its Start,
 // and waits until it runs or has failed to.
-func (s *Supervisor) start() container.Reply {
+func (s *Supervisor) Start() container.Reply {
 	b := s.current()
 	switch s.status() {
 	case container.Creating:
 		return container.Reply{Error: "the container is still being created"}
 	case container.Stopped:
-		return container.Reply{Error: errNotRunning.Error()}
+		return container.Reply{Error: ErrNotRunning.Error()}
 	case container.Restarting:
 		return s.reply() // it starts again by itself, as docker start leaves it
 	case container.Created:
@@ -569,10 +569,10 @@ func (s *Supervisor) start() container.Reply {
 	}
 }
 
-// wait waits for the container's process to end, and says how it did. A
+// Wait waits for the container's process to end, and says how it did. A
 // container waiting to start again is waited for through its next run, as
-// docker wait does.
-func (s *Supervisor) wait() container.Reply {
+// docker Wait does.
+func (s *Supervisor) Wait() container.Reply {
 	for {
 		s.mu.Lock()
 		b, status, changed := s.cur, s.state.Status, s.changed
@@ -624,16 +624,16 @@ func (s *Supervisor) handle(c net.Conn) {
 	} else {
 		switch req.Op {
 		case container.OpStart:
-			rep = s.start()
+			rep = s.Start()
 		case container.OpKill:
-			if err := s.kill(req.Signal, req.All); err != nil {
+			if err := s.Kill(req.Signal, req.All); err != nil {
 				rep = container.Reply{Error: err.Error()}
 			}
 		case container.OpStop:
 			s.stop(time.Duration(req.Timeout * float64(time.Second)))
 			rep = s.reply()
 		case container.OpWait:
-			rep = s.wait()
+			rep = s.Wait()
 		case container.OpConnect:
 			s.connect(c, r, req)
 			return
@@ -643,9 +643,9 @@ func (s *Supervisor) handle(c net.Conn) {
 			s.attach(c, r, req)
 			return
 		case container.OpPause:
-			rep = s.pause()
+			rep = s.Pause()
 		case container.OpUnpause:
-			rep = s.unpause()
+			rep = s.Unpause()
 		default:
 			rep = container.Reply{Error: fmt.Sprintf("this runwhp does not know the request %q", req.Op)}
 		}
@@ -682,7 +682,7 @@ func (s *Supervisor) withRoot() *vmHandles {
 func (s *Supervisor) stats() container.Reply {
 	h := s.running()
 	if h == nil {
-		return container.Reply{Error: errNotRunning.Error()}
+		return container.Reply{Error: ErrNotRunning.Error()}
 	}
 	st := &container.Stats{Time: time.Now(), CPUs: s.rec.Config.CPUs, MemLimit: s.rec.Config.Memory}
 	if u, ok := h.probe.Usage(); ok {
@@ -715,34 +715,9 @@ func (s *Supervisor) connect(c net.Conn, r *bufio.Reader, req container.Request)
 		data, _ := json.Marshal(rep)
 		c.Write(append(data, '\n'))
 	}
-	var h *vmHandles
-	switch req.Port {
-	case guestspec.ExecPort:
-		h = s.running()
-	case guestspec.RootPort:
-		// The container's files, from the moment its root is ready.
-		h = s.withRoot()
-	default:
-		reply(container.Reply{Error: fmt.Sprintf("vsock port %d is not runwhp's", req.Port)})
-		return
-	}
-	if h == nil {
-		reply(container.Reply{Error: errNotRunning.Error()})
-		return
-	}
-	s.mu.Lock()
-	paused := s.state.Paused
-	s.mu.Unlock()
-	if paused && req.Port == guestspec.ExecPort {
-		// An exec's process would start frozen.
-		reply(container.Reply{Error: fmt.Sprintf("Container %s is paused, unpause the container before exec", s.rec.ID)})
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	vc, err := h.vsock.Dial(ctx, req.Port)
-	cancel()
+	vc, err := s.DialGuest(context.Background(), req.Port)
 	if err != nil {
-		reply(container.Reply{Error: fmt.Sprintf("connecting to the container's init: %v", err)})
+		reply(container.Reply{Error: err.Error()})
 		return
 	}
 	defer vc.Close()
@@ -752,4 +727,11 @@ func (s *Supervisor) connect(c net.Conn, r *bufio.Reader, req container.Request)
 		vc.CloseWrite()
 	}()
 	io.Copy(c, vc)
+}
+
+// State is the container's state as this runwhp has it.
+func (s *Supervisor) State() container.State {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.state
 }

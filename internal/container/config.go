@@ -29,10 +29,18 @@ type Config struct {
 	// ImageID is the image's ID, its configuration's digest, which commit
 	// builds on, and which keeps that configuration in the store.
 	ImageID string `json:"imageID,omitempty"`
-	// Layers are the image's layers by diff ID, bottom first. LayerFiles,
-	// for development, are ext4 files given with --layer instead.
+	// Layers are the image's layers by diff ID, bottom first. LayerFiles
+	// are ext4 files instead: given with --layer, for development, or a
+	// containerd snapshot's.
 	Layers     []string `json:"layers,omitempty"`
 	LayerFiles []string `json:"layerFiles,omitempty"`
+	// RWPath is the writable layer, when it is not the container's own
+	// rw.ext4: a containerd snapshot's, kept with it rather than with the
+	// container.
+	RWPath string `json:"rwPath,omitempty"`
+	// Containerd names the containerd task the container runs, for one a
+	// containerd shim made.
+	Containerd *ContainerdTask `json:"containerd,omitempty"`
 
 	// The process. Entrypoint and Cmd are Args, split as Docker keeps
 	// them, for commit; containers made before iteration 15 lack them.
@@ -87,6 +95,13 @@ type Config struct {
 	LogDriver   string `json:"logDriver,omitempty"`
 	LogMaxSize  int64  `json:"logMaxSize,omitempty"`
 	LogMaxFiles int    `json:"logMaxFiles,omitempty"`
+}
+
+// ContainerdTask is the containerd namespace and container ID of a
+// container a containerd shim runs.
+type ContainerdTask struct {
+	Namespace string `json:"namespace"`
+	ID        string `json:"id"`
 }
 
 // Log drivers.

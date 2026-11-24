@@ -105,7 +105,7 @@ func TestRestartByHand(t *testing.T) {
 	s := testSupervisor(t, "always")
 	b := s.beginBoot(testProxy(t))
 	s.started(b, 1)
-	if err := s.kill(1, false); err != nil {
+	if err := s.Kill(1, false); err != nil {
 		t.Fatal(err)
 	}
 	if restart, _ := s.endBoot(b, 0, nil); restart {
@@ -129,7 +129,7 @@ func TestRestartByHand(t *testing.T) {
 	}
 	go func() {
 		time.Sleep(20 * time.Millisecond)
-		if err := s.kill(guestspec.SIGTERM, false); err != nil {
+		if err := s.Kill(guestspec.SIGTERM, false); err != nil {
 			t.Error(err)
 		}
 	}()
@@ -153,11 +153,11 @@ func TestRestartByHand(t *testing.T) {
 func TestRestartWait(t *testing.T) {
 	s := testSupervisor(t, "always")
 	runBoot(t, s, 1, false)
-	if r := s.start(); !r.OK || r.Status != container.Restarting {
+	if r := s.Start(); !r.OK || r.Status != container.Restarting {
 		t.Errorf("start while restarting: %+v", r)
 	}
 	got := make(chan container.Reply, 1)
-	go func() { got <- s.wait() }()
+	go func() { got <- s.Wait() }()
 	time.Sleep(20 * time.Millisecond)
 	select {
 	case r := <-got:
@@ -193,7 +193,7 @@ func testFreezer(fail string) *guestFreezer {
 func TestPause(t *testing.T) {
 	s := testSupervisor(t, "")
 	id := s.rec.ID
-	if r := s.pause(); r.OK || r.Error != "container "+id+" is not running" {
+	if r := s.Pause(); r.OK || r.Error != "container "+id+" is not running" {
 		t.Errorf("pause before a boot: %+v", r)
 	}
 	b := s.beginBoot(testProxy(t))
@@ -201,10 +201,10 @@ func TestPause(t *testing.T) {
 	b.vm = &vmHandles{freezer: testFreezer("")}
 	s.mu.Unlock()
 	s.started(b, 1)
-	if r := s.unpause(); r.OK || r.Error != "Container "+id+" is not paused" {
+	if r := s.Unpause(); r.OK || r.Error != "Container "+id+" is not paused" {
 		t.Errorf("unpause of a running container: %+v", r)
 	}
-	if r := s.pause(); !r.OK {
+	if r := s.Pause(); !r.OK {
 		t.Fatalf("pause: %+v", r)
 	}
 	if !s.state.Paused {
@@ -219,15 +219,15 @@ func TestPause(t *testing.T) {
 	if !c.State.Paused || c.State.Status != container.Running {
 		t.Errorf("recorded state: %+v", c.State)
 	}
-	if r := s.pause(); r.OK || r.Error != "container "+id+" is already paused" {
+	if r := s.Pause(); r.OK || r.Error != "container "+id+" is already paused" {
 		t.Errorf("second pause: %+v", r)
 	}
-	if r := s.unpause(); !r.OK || s.state.Paused {
+	if r := s.Unpause(); !r.OK || s.state.Paused {
 		t.Errorf("unpause: %+v, paused %v", r, s.state.Paused)
 	}
 
 	// A signal thaws it.
-	s.pause()
+	s.Pause()
 	s.thawAfterSignal(b)
 	if s.state.Paused {
 		t.Error("still paused after a signal")
@@ -237,7 +237,7 @@ func TestPause(t *testing.T) {
 	s.mu.Lock()
 	b.vm = &vmHandles{freezer: testFreezer("no cgroup")}
 	s.mu.Unlock()
-	if r := s.pause(); r.OK || r.Error != "pausing container "+id+": no cgroup" || s.state.Paused {
+	if r := s.Pause(); r.OK || r.Error != "pausing container "+id+": no cgroup" || s.state.Paused {
 		t.Errorf("failed pause: %+v, paused %v", r, s.state.Paused)
 	}
 
@@ -245,7 +245,7 @@ func TestPause(t *testing.T) {
 	s.mu.Lock()
 	b.vm = &vmHandles{freezer: testFreezer("")}
 	s.mu.Unlock()
-	s.pause()
+	s.Pause()
 	s.endBoot(b, 0, nil)
 	if s.state.Paused {
 		t.Error("paused after the boot ended")

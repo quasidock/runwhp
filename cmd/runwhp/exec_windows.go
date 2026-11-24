@@ -5,7 +5,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,7 +13,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -127,8 +125,34 @@ func cmdExec(args []string) int {
 	return code
 }
 
+// dialExec connects to init's exec server through the pipe of the runwhp
+// running container id.
+func dialExec(root, id string) vmm.ExecDialer {
+	return func(ctx context.Context) (io.ReadWriteCloser, error) {
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		conn, err := container.Dial(ctx, root, id)
+		if errors.Is(err, container.ErrNoRunwhp) {
+			return nil, errors.New("the container is not running")
+		}
+		if err != nil {
+			return nil, err
+		}
+		rep, r, err := container.Exchange(conn, container.Request{Op: container.OpConnect, Port: guestspec.ExecPort})
+		if err == nil && !rep.OK {
+			err = errors.New(rep.Error)
+		}
+		if err != nil {
+			conn.Close()
+			return nil, err
+		}
+		return &execConn{conn, r}, nil
+	}
+}
+
 // execConn is one connection to init's exec server, through the runwhp
-// running the container.
+// running the container: what the pipe's reply left buffered is read
+// first.
 type execConn struct {
 	net.Conn
 	r *bufio.Reader
@@ -136,89 +160,24 @@ type execConn struct {
 
 func (c *execConn) Read(p []byte) (int, error) { return c.r.Read(p) }
 
-func dialExec(root, id string, hello guestspec.ExecHello) (*execConn, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	conn, err := container.Dial(ctx, root, id)
-	if errors.Is(err, container.ErrNoRunwhp) {
-		return nil, errors.New("the container is not running")
-	}
-	if err != nil {
-		return nil, err
-	}
-	rep, r, err := container.Exchange(conn, container.Request{Op: container.OpConnect, Port: guestspec.ExecPort})
-	if err == nil && !rep.OK {
-		err = errors.New(rep.Error)
-	}
-	if err != nil {
-		conn.Close()
-		return nil, err
-	}
-	c := &execConn{conn, r}
-	line, _ := json.Marshal(hello)
-	if _, err := c.Write(append(line, '\n')); err != nil {
-		c.Close()
-		return nil, err
-	}
-	return c, nil
-}
-
 // runExec runs ex in the container and returns its exit code.
 func runExec(root string, c *container.Container, ex *guestspec.Exec) (int, error) {
 	const fail = guestspec.ExitRuntime
-	ctl, err := dialExec(root, c.ID, guestspec.ExecHello{Exec: ex})
+	streams := vmm.ExecStreams{Stdout: os.Stdout, Stderr: os.Stderr}
+	if ex.Stdin {
+		streams.Stdin = os.Stdin
+		if vmm.IsTerminal(os.Stdin) {
+			streams.Stdin = vmm.NewConsoleReader(windows.Handle(os.Stdin.Fd()), !ex.TTY)
+		}
+	}
+	sess, err := vmm.StartExec(context.Background(), dialExec(root, c.ID), ex, streams)
 	if err != nil {
 		return fail, err
 	}
-	defer ctl.Close()
-	events := json.NewDecoder(ctl.r)
-	var ev guestspec.ExecEvent
-	if err := events.Decode(&ev); err != nil {
-		return fail, fmt.Errorf("init did not answer runwhp exec: %w", err)
-	}
-	if ev.Exited {
-		return ev.Exit, errors.New(ev.Error)
-	}
-
-	// The streams, one connection each.
-	var outputs sync.WaitGroup
-	for _, name := range ev.Streams {
-		sc, err := dialExec(root, c.ID, guestspec.ExecHello{Attach: ev.ID, Stream: name})
-		if err != nil {
-			return fail, fmt.Errorf("attaching %s: %w", name, err)
-		}
-		defer sc.Close()
-		switch name {
-		case guestspec.PortStdout, guestspec.PortStderr:
-			out := io.Writer(os.Stdout)
-			if name == guestspec.PortStderr {
-				out = os.Stderr
-			}
-			outputs.Add(1)
-			go func() {
-				defer outputs.Done()
-				io.Copy(out, sc)
-			}()
-		case guestspec.PortStdin:
-			var in io.Reader = os.Stdin
-			if vmm.IsTerminal(os.Stdin) {
-				in = vmm.NewConsoleReader(windows.Handle(os.Stdin.Fd()), !ex.TTY)
-			}
-			go func() {
-				io.Copy(sc, in)
-				sc.Close()
-			}()
-		}
-	}
+	defer sess.Close()
+	send := func(m guestspec.Control) { sess.Send(m) }
 
 	// Control messages: signals and, with a terminal, its size.
-	var ctlMu sync.Mutex
-	send := func(m guestspec.Control) {
-		line, _ := json.Marshal(m)
-		ctlMu.Lock()
-		ctl.Write(append(line, '\n'))
-		ctlMu.Unlock()
-	}
 	if ex.TTY && !ex.Detach {
 		term, err := vmm.SetupConsole(ex.Stdin, vmm.IsTerminal(os.Stdout))
 		if err != nil {
@@ -249,40 +208,10 @@ func runExec(root string, c *container.Container, ex *guestspec.Exec) (int, erro
 			}
 		}
 	}()
-
-	result := make(chan guestspec.ExecEvent, 1)
-	go func() {
-		for {
-			var ev guestspec.ExecEvent
-			if err := events.Decode(&ev); err != nil {
-				result <- guestspec.ExecEvent{Exited: true, Exit: guestspec.ExitSignalBase + guestspec.SIGKILL,
-					Error: "the container stopped while the command ran"}
-				return
-			}
-			if ev.Started && ex.Detach {
-				result <- guestspec.ExecEvent{Exited: true}
-				return
-			}
-			if ev.Exited {
-				result <- ev
-				return
-			}
-		}
-	}()
 	select {
-	case ev = <-result:
+	case <-sess.Done():
 	case <-interrupted:
 		return 130, nil
 	}
-	// Let the last of the output through.
-	done := make(chan struct{})
-	go func() { outputs.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-	}
-	if ev.Error != "" {
-		return ev.Exit, errors.New(ev.Error)
-	}
-	return ev.Exit, nil
+	return sess.Wait()
 }

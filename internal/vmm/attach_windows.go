@@ -281,7 +281,7 @@ func (s *Supervisor) attach(c net.Conn, r *bufio.Reader, req container.Request) 
 		return
 	}
 	if status == container.Stopped || b == nil {
-		reply(container.Reply{Error: errNotRunning.Error()})
+		reply(container.Reply{Error: ErrNotRunning.Error()})
 		return
 	}
 	cl := newAttachClient(c)
@@ -311,7 +311,7 @@ func (s *Supervisor) attach(c net.Conn, r *bufio.Reader, req container.Request) 
 			case container.AttachControl:
 				var m guestspec.Control
 				if json.Unmarshal(p, &m) == nil {
-					s.control(m)
+					s.Control(m)
 				}
 			}
 		}
@@ -333,9 +333,9 @@ func (s *Supervisor) attach(c net.Conn, r *bufio.Reader, req container.Request) 
 	}
 }
 
-// control passes on what an attached runwhp may send the container: its
+// Control passes on what an attached runwhp may send the container: its
 // terminal's size, and signals.
-func (s *Supervisor) control(m guestspec.Control) {
+func (s *Supervisor) Control(m guestspec.Control) {
 	var out guestspec.Control
 	if m.Rows > 0 && m.Cols > 0 {
 		out.Rows, out.Cols = m.Rows, m.Cols
