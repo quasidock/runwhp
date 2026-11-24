@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -574,5 +575,28 @@ func TestUntaggedDangling(t *testing.T) {
 	}
 	if got := diffIDs(p.Layers); len(got) != 1 || got[0] != a {
 		t.Errorf("Dangling layers: %v", got)
+	}
+}
+
+// TestContainerKeepsBlob keeps the configuration of a container's image,
+// which commit builds on, after the image's records are gone.
+func TestContainerKeepsBlob(t *testing.T) {
+	s := newStore(t)
+	is := image.Open(s.root)
+	data := []byte(`{"id":"removed"}`)
+	p := filepath.Join(s.root, "blobs", "sha256", strings.TrimPrefix(digestOf("removed"), "sha256:"))
+	os.MkdirAll(filepath.Dir(p), 0o755)
+	os.WriteFile(p, data, 0o644)
+	f := &fixture{t, s.root}
+	f.container("c4", container.Stopped, func(cfg *container.Config) {
+		cfg.Image, cfg.Layers, cfg.ImageID = "removed:1", []string{s.a}, digestOf("removed")
+	})
+	u := load(t, s.root)
+	if r := u.Apply(u.Dangling()); len(r.Errors) > 0 {
+		t.Fatal(r.Errors)
+	}
+	blobs, _ := is.Blobs()
+	if !slices.Contains(blobs, digestOf("removed")) {
+		t.Errorf("the container's image's configuration was removed: %v", blobs)
 	}
 }

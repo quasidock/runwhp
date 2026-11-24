@@ -389,10 +389,11 @@ func resolveConfig(ctx context.Context, root string, o *runOptions, entrypointSe
 		if cfg.Layers, err = img.Layers(); err != nil {
 			return nil, err
 		}
-		cfg.Image, cfg.ImageName, cfg.ImageDigest = args[0], img.Ref, img.Digest
+		cfg.Image, cfg.ImageName, cfg.ImageDigest, cfg.ImageID = args[0], img.Ref, img.Digest, img.ID()
 		cfg.StopSignal = cf.Config.StopSignal
 	}
 	cfg.Args, cfg.Env, cfg.Cwd, cfg.User = process.Args, process.Env, process.Cwd, process.User
+	cfg.Entrypoint, cfg.Cmd = process.Entrypoint, process.Cmd
 
 	if err := checkDevices(cfg, len(plan.volumes)); err != nil {
 		return nil, err

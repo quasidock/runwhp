@@ -26,6 +26,7 @@ const usage = `Usage:
   runwhp cp [-a] [-L] SRC DEST                  copy files into or out of a container, named as CONTAINER:PATH
   runwhp export [-o FILE] CONTAINER             write a container's files to a tar
   runwhp diff CONTAINER                         list what a container changed in its image's files
+  runwhp commit CONTAINER [REPOSITORY[:TAG]]    make an image of a container's changes
   runwhp logs [-f] CONTAINER                    print the output of a container in the background
   runwhp list [-q] [--format table|json]        list containers
   runwhp state CONTAINER                        describe a container's state as JSON
@@ -123,6 +124,8 @@ func realMain(args []string) int {
 		return cmdExport(args[1:], os.Stdout)
 	case "diff":
 		return cmdDiff(args[1:], os.Stdout)
+	case "commit":
+		return cmdCommit(args[1:], os.Stdout)
 	case "pause":
 		return cmdPause(args[1:], os.Stdout)
 	case "unpause":

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -52,9 +53,58 @@ func (s *Store) Backfill(ctx context.Context, recs []*Record) error {
 			break
 		}
 	}
+	if from == nil && !config {
+		// An image tagged, committed or loaded from another has no
+		// registry of its own: its layers come from images that have
+		// them and do.
+		return s.backfillFromOthers(ctx, recs[0], missing)
+	}
 	if from == nil {
 		return fmt.Errorf("image %s lacks its layers' tar metadata, and no record says what registry it came from: pull it again", Familiar(recs[0].Ref))
 	}
+	return s.backfillFrom(ctx, from, recs, missing, config)
+}
+
+// backfillFromOthers fetches the tar metadata of the layers missing, of
+// the image rec, through other images' records that came from a registry
+// and list them.
+func (s *Store) backfillFromOthers(ctx context.Context, rec *Record, missing []string) error {
+	all, err := s.List()
+	if err != nil {
+		return err
+	}
+	bySource := map[*Record][]string{}
+	var order []*Record
+	for _, d := range missing {
+		var src *Record
+		for _, r := range all {
+			if r.Image == nil || r.Digest == "" || Untagged(r.Ref) {
+				continue
+			}
+			if layers, err := r.Layers(); err == nil && slices.Contains(layers, d) {
+				src = r
+				break
+			}
+		}
+		if src == nil {
+			return fmt.Errorf("image %s lacks its layers' tar metadata, and no record says what registry it came from: pull it again, or an image it was made from", Familiar(rec.Ref))
+		}
+		if bySource[src] == nil {
+			order = append(order, src)
+		}
+		bySource[src] = append(bySource[src], d)
+	}
+	for _, src := range order {
+		if err := s.backfillFrom(ctx, src, nil, bySource[src], false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// backfillFrom fetches the layers' tar metadata, and with config the
+// configuration blob of recs' image, through from's registry.
+func (s *Store) backfillFrom(ctx context.Context, from *Record, recs []*Record, missing []string, config bool) error {
 	tag, err := name.ParseReference(from.Ref)
 	if err != nil {
 		return err

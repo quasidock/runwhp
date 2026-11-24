@@ -242,6 +242,13 @@ func (u *Usage) sweepBlobs(removed []*image.Record, r *Report) int64 {
 			kept[img.ID()] = true
 		}
 	}
+	// A container keeps its image's, which commit builds on, even once
+	// the image is removed.
+	for _, c := range u.Containers {
+		if c.Config.ImageID != "" {
+			kept[c.Config.ImageID] = true
+		}
+	}
 	blobs, err := u.images.Blobs()
 	if err != nil {
 		r.Errors = append(r.Errors, err)

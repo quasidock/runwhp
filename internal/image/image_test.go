@@ -220,15 +220,15 @@ func TestBuildProcess(t *testing.T) {
 		want Process
 	}{
 		{"image defaults", Overrides{},
-			Process{[]string{"/entry", "default"}, cfg.Env, "/app", "app"}},
+			Process{[]string{"/entry", "default"}, cfg.Env, "/app", "app", []string{"/entry"}, []string{"default"}}},
 		{"command replaces cmd", Overrides{Cmd: []string{"x", "y"}},
-			Process{[]string{"/entry", "x", "y"}, cfg.Env, "/app", "app"}},
+			Process{[]string{"/entry", "x", "y"}, cfg.Env, "/app", "app", []string{"/entry"}, []string{"x", "y"}}},
 		{"entrypoint drops cmd", Overrides{Entrypoint: "/other", EntrypointSet: true},
-			Process{[]string{"/other"}, cfg.Env, "/app", "app"}},
+			Process{[]string{"/other"}, cfg.Env, "/app", "app", []string{"/other"}, nil}},
 		{"empty entrypoint", Overrides{EntrypointSet: true, Cmd: []string{"sh"}},
-			Process{[]string{"sh"}, cfg.Env, "/app", "app"}},
+			Process{[]string{"sh"}, cfg.Env, "/app", "app", nil, []string{"sh"}}},
 		{"env, workdir, user", Overrides{Env: []string{"A=2", "B=3", "HOSTVAR", "UNSET"}, Workdir: "/tmp", User: "0:0", LookupEnv: lookup},
-			Process{[]string{"/entry", "default"}, []string{"PATH=/bin", "A=2", "B=3", "HOSTVAR=fromhost"}, "/tmp", "0:0"}},
+			Process{[]string{"/entry", "default"}, []string{"PATH=/bin", "A=2", "B=3", "HOSTVAR=fromhost"}, "/tmp", "0:0", []string{"/entry"}, []string{"default"}}},
 	} {
 		got, err := BuildProcess(cfg, tc.o)
 		if err != nil {

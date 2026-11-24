@@ -26,13 +26,19 @@ type Config struct {
 	Image       string `json:"image"`
 	ImageName   string `json:"imageName,omitempty"`
 	ImageDigest string `json:"imageDigest,omitempty"`
+	// ImageID is the image's ID, its configuration's digest, which commit
+	// builds on, and which keeps that configuration in the store.
+	ImageID string `json:"imageID,omitempty"`
 	// Layers are the image's layers by diff ID, bottom first. LayerFiles,
 	// for development, are ext4 files given with --layer instead.
 	Layers     []string `json:"layers,omitempty"`
 	LayerFiles []string `json:"layerFiles,omitempty"`
 
-	// The process.
+	// The process. Entrypoint and Cmd are Args, split as Docker keeps
+	// them, for commit; containers made before iteration 15 lack them.
 	Args       []string `json:"args"`
+	Entrypoint []string `json:"entrypoint,omitempty"`
+	Cmd        []string `json:"cmd,omitempty"`
 	Env        []string `json:"env,omitempty"`
 	Cwd        string   `json:"cwd,omitempty"`
 	User       string   `json:"user,omitempty"`

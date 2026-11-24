@@ -28,6 +28,9 @@ type Process struct {
 	Env  []string
 	Cwd  string
 	User string
+	// Entrypoint and Cmd are Args, split as Docker keeps a container's,
+	// which commit writes into the image it makes.
+	Entrypoint, Cmd []string
 }
 
 // ErrNoCommand means neither the image nor the command line gave a command.
@@ -47,6 +50,7 @@ func BuildProcess(cfg v1.Config, o Overrides) (Process, error) {
 	if len(o.Cmd) > 0 {
 		cmd = o.Cmd
 	}
+	p.Entrypoint, p.Cmd = entrypoint, cmd
 	p.Args = append(append([]string(nil), entrypoint...), cmd...)
 	if len(p.Args) == 0 {
 		return p, ErrNoCommand
