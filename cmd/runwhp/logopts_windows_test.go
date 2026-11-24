@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseLogOptions(t *testing.T) {
@@ -77,5 +78,43 @@ func TestTeeWriter(t *testing.T) {
 	n, err := teeWriter{failWriter{}, &log}.Write([]byte("hello"))
 	if n != 2 || err == nil || log.String() != "he" {
 		t.Errorf("tee: %d, %v, log %q", n, err, log.String())
+	}
+}
+
+func TestParseLogTime(t *testing.T) {
+	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		in   string
+		want time.Time
+		ok   bool
+	}{
+		{"", time.Time{}, true},
+		{"10m", now.Add(-10 * time.Minute), true},
+		{"1h30m", now.Add(-90 * time.Minute), true},
+		{"-5m", time.Time{}, false},
+		{"1764000000", time.Unix(1764000000, 0), true},
+		{"1764000000.5", time.Unix(1764000000, 5e8), true},
+		{"1764000000.000000001", time.Unix(1764000000, 1), true},
+		{"2026-11-24T05:55:57.718492400Z", time.Date(2026, 11, 24, 5, 55, 57, 718492400, time.UTC), true},
+		{"2026-11-24T12:00:00+07:00", time.Date(2026, 11, 24, 5, 0, 0, 0, time.UTC), true},
+		{"2026-11-24T12:00:00", time.Date(2026, 11, 24, 12, 0, 0, 0, time.Local), true},
+		{"2026-11-24", time.Date(2026, 11, 24, 0, 0, 0, 0, time.Local), true},
+		{"yesterday", time.Time{}, false},
+		{"12.x", time.Time{}, false},
+	} {
+		got, err := parseLogTime(c.in, now)
+		if (err == nil) != c.ok || !got.Equal(c.want) {
+			t.Errorf("parseLogTime(%q) = %v, %v; want %v", c.in, got, err, c.want)
+		}
+	}
+	for in, want := range map[string]int{"all": -1, "": -1, "ALL": -1, "0": 0, "25": 25} {
+		if got, err := parseTail(in); got != want || err != nil {
+			t.Errorf("parseTail(%q) = %d, %v", in, got, err)
+		}
+	}
+	for _, in := range []string{"-1", "x", "1.5"} {
+		if _, err := parseTail(in); err == nil {
+			t.Errorf("parseTail(%q) took it", in)
+		}
 	}
 }

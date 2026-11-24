@@ -566,24 +566,52 @@ func cmdRestart(args []string, stdout io.Writer) int {
 	return code
 }
 
-const logsUsage = `Usage: runwhp logs [-f] CONTAINER
+const logsUsage = `Usage: runwhp logs [-f] [-t] [-n N] [--since TIME] [--until TIME] CONTAINER
 
 Print a container's output, stdout to stdout and stderr to stderr, as its
 log holds it. Every container keeps a log, but one run with --rm, with
 --log-driver none, or in the background with files for its output; the
 log is rotated as --log-opt says, by default at 20 MB, keeping 5 files.
 
-  -f, --follow   keep printing what the container writes until it stops
+  -f, --follow        keep printing what the container writes until it stops
+  -t, --timestamps    print the time each line was written before it
+  -n, --tail N        print only the last N lines (default all)
+      --since TIME    print only lines written at or after TIME
+      --until TIME    print only lines written at or before TIME
+
+TIME is a date and time such as 2026-11-24T12:00:00Z (local time without
+a zone), Unix seconds, or a duration before now, such as 10m or 1h30m.
 `
 
 func cmdLogs(args []string, stdout, stderr io.Writer) int {
 	fs := newFlags("logs", logsUsage)
 	var follow bool
+	var f container.LogFilter
+	var tail, since, until string
 	fs.BoolVar(&follow, "f", false, "")
 	fs.BoolVar(&follow, "follow", false, "")
+	fs.BoolVar(&f.Timestamps, "t", false, "")
+	fs.BoolVar(&f.Timestamps, "timestamps", false, "")
+	fs.StringVar(&tail, "n", "all", "")
+	fs.StringVar(&tail, "tail", "all", "")
+	fs.StringVar(&since, "since", "", "")
+	fs.StringVar(&until, "until", "", "")
 	if fs.Parse(args) != nil || fs.NArg() != 1 {
 		fs.Usage()
 		return 2
+	}
+	var err error
+	now := time.Now()
+	if f.Tail, err = parseTail(tail); err != nil {
+		errorf("%v", err)
+		return 2
+	}
+	if f.Since, err = parseLogTime(since, now); err == nil {
+		f.Until, err = parseLogTime(until, now)
+	}
+	if err != nil {
+		errorf("%v", err)
+		return 1
 	}
 	store, ok := openContainers()
 	if !ok {
@@ -594,7 +622,7 @@ func cmdLogs(args []string, stdout, stderr io.Writer) int {
 		errorf("%v", err)
 		return 1
 	}
-	return printLogs(c, container.LogFilter{Tail: -1}, follow, stdout, stderr)
+	return printLogs(c, f, follow, stdout, stderr)
 }
 
 // printLogs prints a container's log through f, and with follow, what it
@@ -629,7 +657,7 @@ func printLogs(c *container.Container, f container.LogFilter, follow bool, stdou
 			errorf("container %s: %v", c.Short(), err)
 			return 1
 		}
-		if !follow || p.Done {
+		if !follow || p.Done || (!f.Until.IsZero() && time.Now().After(f.Until)) {
 			return 0
 		}
 		if !c.Locked() {

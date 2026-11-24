@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/quasidock/runwhp/internal/container"
 )
@@ -143,4 +144,67 @@ func (t teeWriter) Write(p []byte) (int, error) {
 	n, err := t.w.Write(p)
 	t.log.Write(p[:n])
 	return n, err
+}
+
+// parseLogTime reads a time for logs --since and --until as Docker does:
+// an RFC 3339 date and time, with or without a zone (without, it is local
+// time), or a date alone; Unix seconds, with a fraction if need be; or a
+// duration such as 10m or 1h30m, that long before now.
+func parseLogTime(s string, now time.Time) (time.Time, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, nil
+	}
+	if d, err := time.ParseDuration(s); err == nil {
+		if d < 0 {
+			return time.Time{}, fmt.Errorf("invalid time %q: a duration before now cannot be negative", s)
+		}
+		return now.Add(-d), nil
+	}
+	if sec, frac, ok := strings.Cut(s, "."); isDigits(sec) && (!ok || isDigits(frac)) {
+		n, err := strconv.ParseInt(sec, 10, 64)
+		if err == nil {
+			var ns int64
+			if ok {
+				frac = (frac + "000000000")[:9]
+				ns, _ = strconv.ParseInt(frac, 10, 64)
+			}
+			return time.Unix(n, ns), nil
+		}
+	}
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02T15:04:05Z07:00"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, nil
+		}
+	}
+	for _, layout := range []string{"2006-01-02T15:04:05.999999999", "2006-01-02T15:04:05", "2006-01-02T15:04", "2006-01-02"} {
+		if t, err := time.ParseInLocation(layout, s, time.Local); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("invalid time %q: give a date and time such as 2026-11-24T12:00:00Z, Unix seconds, or a duration such as 10m", s)
+}
+
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// parseTail reads logs --tail: a number of lines, or all.
+func parseTail(s string) (int, error) {
+	if strings.EqualFold(s, "all") || s == "" {
+		return -1, nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("invalid --tail %q: give a number of lines, or all", s)
+	}
+	return n, nil
 }

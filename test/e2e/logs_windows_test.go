@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -218,5 +219,87 @@ func TestForegroundLog(t *testing.T) {
 		if r.code != 125 || !strings.Contains(r.stderr, "--log-") {
 			t.Errorf("run %s: %+v", strings.Join(args, " "), r)
 		}
+	}
+}
+
+// TestLogTimestamps checks logs -t, --since and --until on a container
+// that writes a line every 300 ms.
+func TestLogTimestamps(t *testing.T) {
+	name := newName(t)
+	before := time.Now()
+	detached(t, "--name", name, alpine, "sh", "-c", "for i in 1 2 3 4 5; do echo line $i; sleep 0.3; done; echo err >&2")
+	waitStatus(t, name, "stopped", time.Minute)
+	after := time.Now()
+	r := cli(t, "logs", "-t", name)
+	lines := strings.Split(strings.TrimSuffix(r.stdout, "\n"), "\n")
+	if len(lines) != 5 || !strings.HasSuffix(r.stderr, " err\n") {
+		t.Fatalf("logs -t: %+v", r)
+	}
+	var times []time.Time
+	for i, l := range lines {
+		ts, rest, _ := strings.Cut(l, " ")
+		at, err := time.Parse(time.RFC3339Nano, ts)
+		if err != nil || len(ts) != len("2006-01-02T15:04:05.000000000Z") || rest != fmt.Sprintf("line %d", i+1) {
+			t.Fatalf("line %q: %v", l, err)
+		}
+		if at.Before(before) || at.After(after) || (i > 0 && at.Sub(times[i-1]) < 200*time.Millisecond) {
+			t.Errorf("line %d at %v; run from %v to %v", i+1, at, before, after)
+		}
+		times = append(times, at)
+	}
+	// The middle three lines, by the times printed.
+	since := times[1].Add(-time.Millisecond).Format(time.RFC3339Nano)
+	until := times[3].Add(time.Millisecond).Format(time.RFC3339Nano)
+	if r := cli(t, "logs", "--since", since, "--until", until, name); r.stdout != "line 2\nline 3\nline 4\n" || r.stderr != "" {
+		t.Errorf("--since %s --until %s: %+v", since, until, r)
+	}
+	unix := fmt.Sprintf("%d.%09d", times[4].Unix(), times[4].Nanosecond())
+	if r := cli(t, "logs", "--since", unix, name); r.stdout != "line 5\n" || r.stderr != "err\n" {
+		t.Errorf("--since %s: %+v", unix, r)
+	}
+	if r := cli(t, "logs", "--since", "1h", name); !strings.HasPrefix(r.stdout, "line 1\n") {
+		t.Errorf("--since 1h: %+v", r)
+	}
+	if r := cli(t, "logs", "--until", "1h", name); r.stdout != "" || r.stderr != "" {
+		t.Errorf("--until 1h: %+v", r)
+	}
+	if r := cli(t, "logs", "--since", "yesterday", name); r.code != 1 || !strings.Contains(r.stderr, "invalid time") {
+		t.Errorf("--since yesterday: %+v", r)
+	}
+}
+
+// TestLogTail checks logs -n.
+func TestLogTail(t *testing.T) {
+	name := newName(t)
+	detached(t, "--name", name, alpine, "sh", "-c", "echo one; echo two; sleep 0.3; echo e >&2; sleep 0.3; printf three")
+	waitStatus(t, name, "stopped", time.Minute)
+	for _, c := range []struct {
+		args           []string
+		stdout, stderr string
+	}{
+		{[]string{"-n", "2"}, "three", "e\n"},
+		{[]string{"--tail", "1"}, "three", ""},
+		{[]string{"-n", "0"}, "", ""},
+		{[]string{"--tail", "all"}, "one\ntwo\nthree", "e\n"},
+		{[]string{"-n", "10"}, "one\ntwo\nthree", "e\n"},
+	} {
+		r := cli(t, append(append([]string{"logs"}, c.args...), name)...)
+		if r.stdout != c.stdout || r.stderr != c.stderr || r.code != 0 {
+			t.Errorf("logs %s: %+v", strings.Join(c.args, " "), r)
+		}
+	}
+	if r := cli(t, "logs", "-n", "-1", name); r.code != 2 && r.code != 1 {
+		t.Errorf("logs -n -1: %+v", r)
+	}
+}
+
+// TestLogFollowTail checks logs -f -n 0, which prints only what comes.
+func TestLogFollowTail(t *testing.T) {
+	name := newName(t)
+	detached(t, "--name", name, alpine, "sh", "-c", "echo early; sleep 1.5; echo late")
+	waitLog(t, name, "early")
+	r := cli(t, "logs", "-f", "-n", "0", name)
+	if r.stdout != "late\n" || r.code != 0 {
+		t.Errorf("logs -f -n 0: %+v", r)
 	}
 }
