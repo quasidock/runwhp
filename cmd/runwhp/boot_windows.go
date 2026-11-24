@@ -143,34 +143,11 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 		defer layer.close()
 	}
 
-	layerFiles, err := layerPaths(root, cfg)
+	storage, err := openStorage(root, cfg, logf)
 	if err != nil {
 		return fail, err
 	}
-
-	// Volumes, opened exclusively: a volume is in one container at a time.
-	var volumeDevices []virtio.Device
-	volumes := volume.Open(root)
-	for i, u := range cfg.Volumes {
-		v, _, err := volumes.Ensure(u.Name, u.Size)
-		if err != nil {
-			return fail, err
-		}
-		f, err := disk.Open(v.Disk(), disk.Exclusive)
-		if errors.Is(err, disk.ErrInUse) {
-			return fail, fmt.Errorf("volume %s is in use by another container", v.Name)
-		}
-		if err != nil {
-			return fail, fmt.Errorf("volume %s: %w", v.Name, err)
-		}
-		defer f.Close()
-		fsize, err := f.Size()
-		if err != nil {
-			return fail, err
-		}
-		volumeDevices = append(volumeDevices, &virtio.Blk{File: f, Sectors: uint64(fsize) / 512, Flush: true, Discard: true,
-			Serial: guestspec.VolumeSerial(i)})
-	}
+	defer storage.close()
 
 	guestFiles, err := loadGuest(ctx, root, cfg.Kernel, cfg.Modules, cfg.Init, policy)
 	if err != nil {
@@ -188,8 +165,8 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 
 	spec := guestspec.Spec{
 		Args: cfg.Args, Env: cfg.Env, Cwd: cfg.Cwd, User: cfg.User,
-		Hostname: cfg.Hostname, Hosts: cfg.Hosts, Layers: len(layerFiles), Scratch: lr.file != nil, KeepLayer: keep,
-		Volumes: len(volumeDevices), Debug: cfg.Debug, Stdin: cfg.Stdin, TTY: cfg.TTY, Network: guestNetwork(cfg.Network),
+		Hostname: cfg.Hostname, Hosts: cfg.Hosts, Layers: len(storage.layers), Scratch: lr.file != nil, KeepLayer: keep,
+		Volumes: len(storage.volumes), Debug: cfg.Debug, Stdin: cfg.Stdin, TTY: cfg.TTY, Network: guestNetwork(cfg.Network),
 		Mounts: cfg.Mounts, WaitStart: hooks.waitStart, Reclaim: reclaimPolicy(logf),
 		ClockSync: clockPeriod(logf) > 0,
 	}
@@ -255,58 +232,14 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 		nic.Recv = stack.Inject
 		devices = append(devices, nic)
 	}
-	// Delegated shares get a file system of their own, since a FUSE
-	// connection takes the writeback cache, or not, as a whole.
-	for _, delegated := range []bool{false, true} {
-		var group []container.Share
-		for _, s := range cfg.Shares {
-			if s.Delegated == delegated {
-				group = append(group, s)
-			}
-		}
-		if len(group) == 0 {
-			continue
-		}
-		shares, err := hostShares(group)
-		if err != nil {
-			return fail, err
-		}
-		fsys, err := hostfs.New(shares, logf)
-		if err != nil {
-			return fail, err
-		}
-		defer fsys.Close()
-		fsys.Writeback = delegated
-		server := &fuse.Server{FS: fsys, Logf: logf, Writeback: delegated}
-		defer func() { logf("%s", server.Stats()) }()
-		tag := guestspec.FSTag
-		if delegated {
-			tag = guestspec.FSTagDelegated
-		}
-		devices = append(devices, &virtio.Fs{Tag: tag, Handler: server})
-	}
-	for i, path := range layerFiles {
-		f, err := disk.Open(path, disk.ReadOnly)
-		if err != nil {
-			return fail, err
-		}
-		defer f.Close()
-		size, err := f.Size()
-		if err != nil {
-			return fail, err
-		}
-		devices = append(devices, &virtio.Blk{File: f, Sectors: uint64(size) / 512, ReadOnly: true,
-			Serial: guestspec.LayerSerial(i)})
-	}
 	if lr.file != nil {
 		// A kept layer offers FLUSH, so fsync in the container reaches the
 		// host's disk, as it would under Docker. A scratch disk does not:
 		// it is thrown away after the run, so the guest need never wait for
 		// the host's disk.
-		devices = append(devices, &virtio.Blk{File: lr.file, Sectors: uint64(cfg.StorageSize) / 512, Discard: true, Flush: keep,
-			Serial: guestspec.ScratchSerial})
+		storage.setScratch(lr.file, cfg.StorageSize, keep)
 	}
-	devices = append(devices, volumeDevices...)
+	devices = append(devices, storage.devices()...)
 	for _, d := range devices {
 		if b, ok := d.(*virtio.Blk); ok {
 			handles.blks = append(handles.blks, b)
@@ -370,6 +303,125 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 		return st.Exit, errors.New(st.Error)
 	}
 	return st.Exit, nil
+}
+
+// containerStorage is what a container's guest stores its files on, as
+// devices, in the order it numbers them: the shares' file systems, the
+// delegated shares' second, one disk per layer, bottom first, the writable
+// layer, and the volumes.
+type containerStorage struct {
+	fs      []virtio.Device
+	layers  []virtio.Device
+	scratch virtio.Device
+	volumes []virtio.Device
+	closers []func()
+}
+
+// openStorage opens a container's storage but its writable layer: its
+// layers, read-only, its volumes, exclusively, as a volume is in one
+// container at a time, and its shares' file systems.
+func openStorage(root string, cfg *container.Config, logf func(string, ...any)) (_ *containerStorage, err error) {
+	s := &containerStorage{}
+	defer func() {
+		if err != nil {
+			s.close()
+		}
+	}()
+	layerFiles, err := layerPaths(root, cfg)
+	if err != nil {
+		return nil, err
+	}
+	volumes := volume.Open(root)
+	for i, u := range cfg.Volumes {
+		v, _, err := volumes.Ensure(u.Name, u.Size)
+		if err != nil {
+			return nil, err
+		}
+		f, err := disk.Open(v.Disk(), disk.Exclusive)
+		if errors.Is(err, disk.ErrInUse) {
+			return nil, fmt.Errorf("volume %s is in use by another container", v.Name)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("volume %s: %w", v.Name, err)
+		}
+		s.closers = append(s.closers, func() { f.Close() })
+		fsize, err := f.Size()
+		if err != nil {
+			return nil, err
+		}
+		s.volumes = append(s.volumes, &virtio.Blk{File: f, Sectors: uint64(fsize) / 512, Flush: true, Discard: true,
+			Serial: guestspec.VolumeSerial(i)})
+	}
+	// Delegated shares get a file system of their own, since a FUSE
+	// connection takes the writeback cache, or not, as a whole.
+	for _, delegated := range []bool{false, true} {
+		var group []container.Share
+		for _, sh := range cfg.Shares {
+			if sh.Delegated == delegated {
+				group = append(group, sh)
+			}
+		}
+		if len(group) == 0 {
+			continue
+		}
+		shares, err := hostShares(group)
+		if err != nil {
+			return nil, err
+		}
+		fsys, err := hostfs.New(shares, logf)
+		if err != nil {
+			return nil, err
+		}
+		fsys.Writeback = delegated
+		server := &fuse.Server{FS: fsys, Logf: logf, Writeback: delegated}
+		s.closers = append(s.closers, func() {
+			logf("%s", server.Stats())
+			fsys.Close()
+		})
+		tag := guestspec.FSTag
+		if delegated {
+			tag = guestspec.FSTagDelegated
+		}
+		s.fs = append(s.fs, &virtio.Fs{Tag: tag, Handler: server})
+	}
+	for i, path := range layerFiles {
+		f, err := disk.Open(path, disk.ReadOnly)
+		if err != nil {
+			return nil, err
+		}
+		s.closers = append(s.closers, func() { f.Close() })
+		size, err := f.Size()
+		if err != nil {
+			return nil, err
+		}
+		s.layers = append(s.layers, &virtio.Blk{File: f, Sectors: uint64(size) / 512, ReadOnly: true,
+			Serial: guestspec.LayerSerial(i)})
+	}
+	return s, nil
+}
+
+// setScratch adds the writable layer, f, of size bytes; flush offers the
+// guest FLUSH.
+func (s *containerStorage) setScratch(f *disk.File, size int64, flush bool) {
+	s.scratch = &virtio.Blk{File: f, Sectors: uint64(size) / 512, Discard: true, Flush: flush, Serial: guestspec.ScratchSerial}
+}
+
+// devices lists the storage's devices in the guest's order.
+func (s *containerStorage) devices() []virtio.Device {
+	out := append(append([]virtio.Device(nil), s.fs...), s.layers...)
+	if s.scratch != nil {
+		out = append(out, s.scratch)
+	}
+	return append(out, s.volumes...)
+}
+
+// close lets go of what openStorage opened, last first; not the writable
+// layer.
+func (s *containerStorage) close() {
+	for i := len(s.closers) - 1; i >= 0; i-- {
+		s.closers[i]()
+	}
+	s.closers = nil
 }
 
 // layerPaths returns the ext4 files of a container's layers, bottom first.
