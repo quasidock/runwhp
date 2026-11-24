@@ -11,7 +11,9 @@ HCS, and no administrator rights at run time.
 interactively or not, with a network, the host's files and volumes of their
 own, on a kernel of its own and on several processors. Containers are kept
 after they stop, can run in the background, and can be started again,
-stopped, signalled, attached to and run more commands in. A container has half the
+stopped, signalled, attached to and run more commands in, and started
+again by Docker's restart policies; their logs carry the time of each
+line and are rotated. A container has half the
 machine's memory by default, but takes only what it uses, and gives back
 what it frees. Images, containers and volumes can be listed, measured and
 pruned as Docker's can.
@@ -89,8 +91,9 @@ Get-Content data.csv | .\out\runwhp.exe run -i alpine:3.20 wc -l
 Containers that outlive the command, in the background:
 
 ```powershell
-.\out\runwhp.exe run -d --name web -p 8080:80 nginx:alpine
+.\out\runwhp.exe run -d --name web --restart always -p 8080:80 nginx:alpine
 .\out\runwhp.exe logs -f web
+.\out\runwhp.exe logs -t --since 10m -n 20 web
 .\out\runwhp.exe exec -it web sh
 .\out\runwhp.exe stop web
 .\out\runwhp.exe start web
@@ -113,6 +116,9 @@ Keeping the store small:
 | --- | --- | --- |
 | `-d`, `--detach` | off | Run the container in the background and print its ID; see [Containers](#containers) |
 | `--rm` | off | Remove the container when it stops. Without it, the container is kept, with its writable layer, until `runwhp delete` |
+| `--restart` | `no` | Start the container again when its process ends: `on-failure[:N]` when it exits non-zero, at most N times, `always`, or `unless-stopped`, the same here. Not with `--rm`; see **Restarting** under [Containers](#containers) |
+| `--log-driver` | `local` | `local` keeps the container's output in its log; `none` keeps none |
+| `--log-opt` | `max-size=20m`, `max-file=5` | `max-size=SIZE` rotates the log as a file would grow past SIZE, `-1` never; `max-file=N` keeps N files, the one being written included; repeatable. See **Output** under [Containers](#containers) |
 | `--name` | none | Name the container, as well as its 64-digit ID. Names are case-insensitive |
 | `-i`, `--interactive` | off | Pass stdin to the container. Without it, the container reads `/dev/null`. In the background, without a file or pipe for stdin, the container's input is open to `attach` |
 | `-t`, `--tty` | off | Run the container on a pseudo-terminal of the console's size, with stderr merged into stdout. With `-i`, stdin must be a console, and keys go to the container raw. `-it` works as a shorthand |
@@ -184,15 +190,17 @@ its ID, its name, or any unique prefix of its ID.
 | `restart [-t SECONDS] CONTAINER...` | `stop`, then `start` |
 | `kill [-a] CONTAINER [SIGNAL]` | Send a signal, by name or number, to the container's process, or with `-a` to every process in it. The default is SIGTERM, as with runc; Docker's `kill` sends SIGKILL. A created container ends without starting |
 | `exec [-i] [-t] [-d] [-e] [-w] [-u] CONTAINER COMMAND...` | Run another command in a running container |
-| `logs [-f] CONTAINER` | Print the output of a container in the background |
+| `logs [-f] [-t] [-n N] [--since TIME] [--until TIME] CONTAINER` | Print a container's output as its log holds it: `-t` with the time each line was written, `-n` the last N lines, `--since` and `--until` the lines written in a window, given as a date and time, Unix seconds, or a duration before now such as `10m` |
 | `list [-q] [--format table\|json]` | List containers, newest first |
 | `state CONTAINER` | Describe a container as JSON: runc's fields (`ociVersion`, `id`, `status`, `pid`, `bundle`), then runwhp's own |
 | `stats [--no-stream] [--format table\|json] [CONTAINER...]` | Show what running containers use, every second until Ctrl+C, or once with `--no-stream`; see [Memory](#memory) |
 | `delete [-f] CONTAINER...` | Remove containers, with their writable layers, logs and anonymous volumes. A running one needs `-f`, which kills it first |
 | `rename CONTAINER NAME` | Rename a container |
 
-States are runc's: `creating`, `created`, `running` and `stopped`. Unlike
-with runc, a stopped container can be started again.
+States are runc's: `creating`, `created`, `running` and `stopped`, and
+runwhp's own `restarting`, for a container waiting to be started again by
+its restart policy. Unlike with runc, a stopped container can be started
+again.
 
 **Who runs a container.** A container has a VM only while a runwhp process
 runs it, holding the record's `lock` file exclusively; whether that file is
@@ -218,9 +226,23 @@ prints, stdout to stdout and stderr to stderr. Pipes are not handed over:
 capturing one, as `id=$(runwhp run -d ...)` does, would then wait for the
 container to end. With `-i`, its stdin is the caller's if that is a file
 or a pipe, and otherwise open to `attach`. With `-t`, its terminal is 24 by
-80 until someone attaches. A log grows until the
-container is deleted. runwhp's own messages about a container in the
-background go to `runwhp.log` beside the log.
+80 until someone attaches. A container run in the foreground writes its
+output to its log as well as to the terminal, unless it is run with
+`--rm`, so `logs` works on every kept container; `--log-driver none` keeps
+no log. runwhp's own messages about a container in the background go to
+`runwhp.log` beside the log, kept to two files of 1 MiB.
+
+**Logs.** A log records when each piece of output was written, by the
+host's clock, and rotates as Docker's `local` driver does: once its file
+would grow past 20 MB it is renamed `log.1`, the files before it moving up
+one, and the fifth is dropped, so a container's log takes at most 100 MB;
+`--log-opt max-size` and `max-file` change that. `logs -t` prints the time
+each line was written, which is when its first byte was. Lines of stdout
+and stderr are in the order runwhp received them, which, for writes
+close together, need not be the order the container made them in.
+`logs -f` follows the log from file to file as it rotates, and loses
+output only if it falls more than the files kept behind. Logs written by
+runwhp before iteration 13 have no times, and still print.
 
 **What start uses.** A container's configuration is resolved when it is
 made: the image's layers, the command and environment, `-e KEY` values,
@@ -264,8 +286,37 @@ socket device, which nothing inside the container can connect to. When the
 container's process exits, everything exec started is killed, and `exec`
 exits with 137.
 
+**Restarting.** `--restart` starts a container again when its process
+ends, in a new VM on the writable layer it left: `on-failure` when it
+exits other than 0, at most N times with `on-failure:N`, and `always` or
+`unless-stopped` whatever it exits with; without a daemon that starts
+containers as it starts, the last two do the same. The runwhp running the
+container restarts it, after Docker's delays: 100 ms, doubling each time
+up to a minute, and back to 100 ms once a run has lasted 10 seconds.
+Meanwhile the container is `restarting`, which `list` shows as
+`Restarting (CODE) ... ago`, with how many times it has been started again
+in `state`'s `restartCount`. A container is not started again when:
+
+- `stop`, `kill`, with any signal, or `delete -f` ended it, as with Docker;
+- its first run never started its process: a port taken, say, fails
+  `run`. Later boots that fail, the same port taken, are retried like a
+  run that ended;
+- the runwhp running it ends, killed or with the logon session, which also
+  ends the container. Nothing starts containers again at logon.
+
+While it waits, `start` leaves it be, `wait` waits for its next run to end,
+`stop`, `kill` and `delete -f` end it for good, and `exec`, `attach` and
+`delete` without `-f` refuse it. `restart` stops it and starts it again,
+counting restarts from 0. A container run in the foreground with
+`--restart` is handed over, as Docker's daemon keeps it: `run` exits with
+the first run's exit code, and a runwhp in the background takes the
+container over, with its lock, and starts it again, its output going to
+the log, its `-i` input open to `attach`. A foreground run interrupted
+with Ctrl+C, or ended with its console, is not handed over. Input from a
+file or pipe goes to the first run only.
+
 **Removing.** `--rm` removes a container when it stops, however it stops,
-and such a container cannot be started again. Other containers stay until
+and such a container cannot be started again, nor given `--restart`. Other containers stay until
 `delete`; in Git Bash, `runwhp delete $(runwhp list -q)` removes every one
 that is not running.
 
@@ -730,12 +781,13 @@ bzImage.
    the host; from init, when the container is ready, when the process has
    started, the statistics asked for, and how the process ended. The
    kernel boots with the CMOS stub's whole seconds, so runwhp sends its
-   time as soon as init listens, every minute after that
+   time as init opens the control port, every minute after that
    (`RUNWHP_CLOCK_SYNC=SECONDS` changes it, and 0 turns it off), and as
    Windows resumes from sleep; it reads the clock as the message leaves,
    which then takes about 0.3 ms to arrive. Init steps the guest's clock
    by more than 20 ms off, slews it within that, and leaves it within
-   1 ms. Init drops CAP_SYS_BOOT from everything it starts, and ignores
+   1 ms, and starts the container's process only once the first time has
+   come, waiting up to 500 ms for it. Init drops CAP_SYS_BOOT from everything it starts, and ignores
    the signals that `reboot` and `halt` send it, so only init resets the
    machine; the ACPI tables also offer a power-off, which stops the VM
    as a reset does. While the process
@@ -773,7 +825,7 @@ bzImage.
 | [`internal/disk`](internal/disk) | The files behind virtual disks: overlapped I/O from many goroutines, sparse files, freeing ranges, exclusive and delete-on-close opens |
 | [`internal/ext4`](internal/ext4) | Makes empty ext4 file systems as mke2fs would, and reads back whether one was left clean. Builds on any OS |
 | [`internal/volume`](internal/volume) | Named volumes in the store: names, making, listing and removing them |
-| [`internal/container`](internal/container) | Containers in the store: records, names, locks, state, logs, and the pipe of the runwhp running one, whose attach requests carry frames as logs hold them |
+| [`internal/container`](internal/container) | Containers in the store: records, names, locks, state, restart policies, logs, written, rotated and read with their times, and the pipe of the runwhp running one, whose attach requests carry frames in the framing of logs before iteration 13 |
 | [`internal/hostfs`](internal/hostfs) | The host end of bind mounts: Windows files served as that file system, with WSL's metadata |
 | [`internal/image`](internal/image), [`internal/layer`](internal/layer) | Registry pulls, image records, layer conversion and cache, and listing and removing them |
 | [`internal/gc`](internal/gc) | What in the store is in use: which images and containers list each layer, which volumes and kernels are used; removals planned from that, and the store lock that keeps pulls and runs from racing them |
@@ -819,7 +871,8 @@ container's supervisor, with no daemon.
 | Host to guest | Console ports for the main process; a virtio socket device for further connections | Done: `runwhp exec` uses vsock |
 | Bind mounts and volumes | virtio-fs, with a FUSE server in Go serving Windows files and keeping Unix metadata as WSL does, and the writeback cache for delegated mounts; volumes as journaled ext4 disk images on virtio-blk | Done; a volume is used by one container at a time |
 | Networking | User-mode network stack in the VMM (gVisor netstack); published ports are loopback listeners | Done, IPv4 only, TCP ports only |
-| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | Done over runwhp's own images, plus `run`, `list`, `stats`, `stop`, `restart`, `rename`, `logs`, `attach`, `wait`, `images`, `rmi`, the prunes and `system df`; no OCI bundles |
+| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | Done over runwhp's own images, plus `run`, `list`, `stats`, `stop`, `restart`, `rename`, `logs`, `attach`, `wait`, `images`, `rmi`, the prunes and `system df`, and restart policies; no OCI bundles |
+| Container logs | Frames stamped with the host's time, rotated as Docker's `local` driver rotates | Done; every kept container has one |
 | Kernel | Our own build with virtio drivers built in, shipped as a signed OCI artifact | Done: Linux 6.18 LTS on ghcr.io, pinned by digest rather than signed |
 
 ### Out of scope for now

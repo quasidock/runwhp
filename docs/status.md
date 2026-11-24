@@ -1,5 +1,17 @@
 # Status
 
+- **Iteration 13** (2026-11-24): containers restart, and their logs are
+  bounded and tell the time. `--restart` takes Docker's policies: the
+  runwhp running a container boots it again when its process ends, after
+  Docker's delays, unless it was stopped or killed, and a foreground run
+  hands its container over to a runwhp in the background to do so. Logs
+  record when each line was written, rotate at 20 MB keeping five files
+  unless `--log-opt` says otherwise, and every kept container has one,
+  foreground runs included; `logs` takes `-t`, `-n`, `--since` and
+  `--until`. The container's process no longer starts before init has
+  set the guest's clock, and a kept container whose runwhp died starting
+  it again is no longer swept away. See [Containers](../README.md#containers)
+  and [Iteration 13 results](#iteration-13-results).
 - **Iteration 12** (2026-11-24): the store no longer only grows.
   `images` lists what is cached, with Docker's image IDs. `rmi` removes
   images, and `image prune`, `container prune` and `system prune` remove
@@ -1041,3 +1053,107 @@ WSL kernel with its vsock modules passed with `--module`. With one vCPU
 it passes but for `TestKernelClock`, which fails now and then, as it did
 with iteration 11's build: the container can read the clock before init
 has set it at boot. See [Known gaps](gaps.md).
+
+## Iteration 13 results
+
+Measured on the test machine with runwhp's kernel, from Git Bash, with the
+store on NTFS (`C:`). "Iteration 12" is that iteration's build, run in turn
+with this one.
+
+Runs cost the same, though init now waits for the host's time before it
+starts the process, over seven runs:
+
+| Measurement | Iteration 12 | Iteration 13 |
+| --- | --- | --- |
+| `run --rm alpine:3.20 true`, `-m 512m` | 191-198 ms, and 333 ms once | 186-199 ms |
+| the same, default memory | 262-266 ms | 256-268 ms |
+
+The guest's clock as the container's process first reads it, with one
+vCPU, from `adjtimex` in a foreground run, against the host's before and
+after the run, with 50 ms of slack:
+
+| Build | Outside the bound |
+| --- | --- |
+| iteration 12 | 1 of 50 runs |
+| iteration 13 | 0 of 100 runs |
+
+Logs, over four or five runs each. A kept foreground run now also writes
+its output to its log, and a log in the background stamps each frame and
+rotates:
+
+| Measurement | Iteration 12 | Iteration 13 |
+| --- | --- | --- |
+| kept foreground run writing 200 MB to stdout, to a file, `-m 1g` | 0.98-1.74 s | 1.08-1.21 s |
+| `run -d` writing 200 MB to its log, until it has stopped | 1.03-1.54 s | 1.12-1.52 s |
+
+Console output takes either about 1.0 s or about 1.75 s, run to run, as
+before, so the log costs nothing measurable here. The 200 MB left four
+files of 20 MiB and the start of a fifth, the oldest dropped.
+
+Reading a full log, five files and 89 MB of numbered lines, the default
+limit, three runs each:
+
+| Measurement | Result |
+| --- | --- |
+| `logs` | 0.46-0.48 s |
+| `logs -t` | 0.56-0.57 s |
+| `logs -n 10`, which reads the log through twice | 0.70-0.73 s |
+| `logs --since 1s`, which prints nothing | 0.45-0.50 s |
+
+Before its output was buffered, `logs` of the same took 3.9-4.0 s, and
+`logs -t` 12.4-13.2 s; see [Findings](findings.md).
+
+Restarting: a container in a 512 MiB guest that exits 1 at once, with
+`--restart on-failure:20` and `RUNWHP_RESTART_BACKOFF=10ms`, started again
+every 121-134 ms, the time between its runs' first lines, so booting it
+again takes about 115 ms beyond the delay. Docker's own delays start at
+100 ms. Booted 50 times in one runwhp, the runwhp held 206 handles and
+112 MiB of commit after 10 restarts, and 212 handles and 94 MiB after 50.
+
+Fixed along the way:
+
+- A kept container whose runwhp died while booting it again, as `start`
+  does, was taken by `list` for a record never finished, and removed
+  with its writable layer. It is now recorded as stopped, with 255.
+- The console's readers of the control port and of attached input
+  outlived their VM, waiting for input meant for the next; with restarts,
+  they would have taken it.
+
+The new tests cover:
+
+- log files: the format's round trip, rotation at the size given with the
+  files' generations, a lower `max-file` dropping files, a log of
+  iteration 12 rotated aside, a frame cut short dropped, a damaged log,
+  and a write that fails dropped once and reported once, on NTFS and,
+  through `RUNWHP_TEST_DIR`, on ReFS
+- reading logs: lines over frames and frames of several lines, partial
+  lines of both streams, `-t`, `--tail` over files, `--since` and
+  `--until` by each line's first byte, following through rotations, and
+  a reader that starts, or falls behind into, a file starting in the
+  middle of a line
+- `--log-driver`, `--log-opt`, `--restart`, `--since` and `--until`
+  times, `--tail`, `runwhp.log` kept to two files, and the foreground tee
+- restart policies, Docker's delays, and the supervisor's decisions
+  without a VM: on-failure's count, a process that never started, a kill,
+  a signal to a foreground run, a stop while waiting, `wait` through the
+  next run, and `start` leaving a restarting container be
+- the store: a dead `restarting` record keeps its exit code, a dead
+  container started again is kept, and a lock handed to another process
+- the console's control port and attached input ending with their boot,
+  and input left for the next
+- init waiting for the host's time
+- end to end:
+  - logs: a million lines rotated at 1 MiB, `logs -f` seeing every one,
+    `system df` counting the files, the default 20 MB rotation, a log of
+    iteration 12, a foreground run's log, `--log-driver none`, refused
+    options, `-t` times within the run, `--since` and `--until` in each
+    form, `-n` with a partial last line, and `-f -n 0`
+  - restarts: `on-failure:2`, `always` through `stop`, `start` and `kill`,
+    a trapped `kill -s HUP`, a container waiting to start again refusing
+    `exec`, `attach` and `delete` and left by `container prune`, `wait`
+    and `stop` while it waits, `delete -f`, a port taken between runs, a
+    runwhp killed while it waits, 50 boots in one runwhp, a foreground run
+    handed over, and one interrupted and not
+
+The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
+the WSL kernel with its vsock modules passed with `--module`.

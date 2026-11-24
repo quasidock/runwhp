@@ -4,17 +4,29 @@
   cannot type into it: its input belongs to the runwhp that runs it. An
   attached runwhp that falls 4 MiB behind the container's output is cut
   off, rather than holding the output up.
-- There are no restart policies. Containers a plain `run` keeps stay
-  until `delete` or `container prune`.
-- Logs grow until the container is deleted, carry no timestamps, and are
-  not rotated.
+- Restart policies end with the runwhp running the container: a logoff,
+  or killing that runwhp, ends the container for good, and nothing starts
+  containers at logon, so `unless-stopped` is `always`. There is no
+  `update --restart`: a container's policy is the one it was made with.
+- A newer runwhp's `system prune` can remove the kernel an older runwhp's
+  container is waiting to restart on; it then fails to boot, and is
+  tried again every minute.
+- Logs are not compressed, and take no `--details`. A `logs -f` that falls
+  more files behind than the log keeps loses what was rotated away, and
+  says nothing of it. stdout and stderr are interleaved in the order
+  runwhp received them, which, for writes close together, may not be the
+  order the container made them in.
 - A foreground `run` ends with its terminal. A container in the background
   outlives the terminal, but not a logoff, which ends it as killing its
   runwhp would, nor a session whose job object keeps its processes in, as
   some ssh servers and CI runners do. Whether it outlives closing Windows
   Terminal, VS Code or mintty has been checked only with a pseudo console
   closed under it.
-- A container run with `--rm` cannot be restarted.
+- A container run with `--rm` cannot be restarted, nor given `--restart`.
+- A container handed over to restart, after a foreground `run`, is served
+  by no runwhp for a moment: commands sent to it wait while its lock is
+  held, but a `wait` already waiting on the foreground runwhp loses its
+  answer, and waits 10 s for the container to stop before failing.
 - A container in the background holds `runwhp.exe` open, so a build of
   runwhp has to move it aside, as `build.ps1` does.
 - Keeping a record makes `run alpine:3.20 true` about 10 ms slower with
@@ -106,11 +118,8 @@
   Windows resumes: a container that sets its own clock has it put back.
   The resume hook is untested: the test machine's Modern Standby never
   paused a container, and it has no other sleep state.
-- The container's process can start before init has set the clock from
-  the host's at boot, and then sees it up to a second behind, as the
-  CMOS stub left it, until the time arrives. With one vCPU,
-  `TestKernelClock` caught this in 3 of 25 runs, and 7 of 25 with
-  iteration 11's build.
+- With `RUNWHP_CLOCK_SYNC=0`, the guest keeps the CMOS stub's whole
+  seconds, up to a second behind the host's clock.
 - String port I/O is not handled and stops the VMM with an error.
 - It is unknown whether hosted Windows CI runners expose WHP, so the
   end-to-end tests run only by hand.

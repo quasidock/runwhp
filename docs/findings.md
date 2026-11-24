@@ -361,3 +361,37 @@
   anonymous pulls an hour, which the new tests, each pulling into a store
   of its own, used up within a few runs; they now pull from a registry in
   the test process, fed once from Docker Hub.
+- **A log can be rotated under its readers.** A file a reader holds open
+  through `storefile.Open`, which shares delete, can be renamed, renamed
+  again and removed, on NTFS and on ReFS: the name goes at once, and the
+  reader goes on reading what it had to its end. Rotation needs no help
+  from `logs -f`.
+- **A lock can be handed to another process.** Made inheritable and passed
+  in a child's handle list, the handle of a container's lock, opened with
+  no sharing, keeps the container locked after the parent closes its own
+  and exits, and nobody else can take it until the child lets it go.
+- **Docker 29.10's own rules settled the edge cases.** `logs -t` prints
+  nine digits of fraction; `--tail` counts the lines of both streams, a
+  last line without its newline included; `wait` on a restarting
+  container waits for its next run to end; `start` of one does nothing;
+  and a container sent `kill -s HUP`, which it trapped, then exiting by
+  itself later, was not restarted: any kill counts as stopping it by
+  hand. `--rm` with `--restart` exits 125.
+- **A rotated log can start in the middle of a line.** With a million
+  numbered lines rotated at 1 MiB, `logs` began with the end of a line
+  whose start was in the file dropped. A file's header now says which
+  streams it starts in the middle of a line of, and a reader starting
+  there skips to the next line.
+- **The guest's process could beat the clock.** On iteration 12's build,
+  with one vCPU, the guest's clock was more than 50 ms off the host's as
+  the process read it in 1 of 50 runs: init set it on another goroutine,
+  and nothing waited for it. Init now waits for the host's first time,
+  which comes as it opens the control port, and was off in none of 100.
+- **Writing a line at a time is slow.** `logs` wrote each line of a log
+  with a write of its own, and formatted each line's time: 89 MB of short
+  lines took 4.0 s to print, 12.4 s with `-t`. Buffered, 0.46 s and
+  0.56 s.
+- **50 boots in one process leak nothing measurable.** A container
+  restarted every 10 ms, `true` in a 512 MiB guest, left its runwhp with
+  206 handles and 112 MiB committed after 10 restarts, and 212 handles and
+  94 MiB after 50.
