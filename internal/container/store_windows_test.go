@@ -320,6 +320,14 @@ func TestListSweeps(t *testing.T) {
 	s.Create(old, "old")
 	fresh := mustCreate(t, s, "", "fresh")
 
+	// A container that had stopped, whose runwhp died starting it again.
+	again := newConfig("")
+	again.Created = time.Now().Add(-3 * creatingGrace)
+	re, _ := s.Create(again, "again")
+	l, _ = s.Lock(re)
+	l.WriteState(State{Status: Creating, Pid: 1, FinishedAt: time.Now().Add(-time.Hour).UTC(), ExitCode: 2})
+	l.Close()
+
 	list, err := s.List()
 	if err != nil {
 		t.Fatal(err)
@@ -328,11 +336,14 @@ func TestListSweeps(t *testing.T) {
 	for _, c := range list {
 		names = append(names, c.Name)
 	}
-	if strings.Join(names, ",") != "fresh,keep" {
+	if strings.Join(names, ",") != "fresh,keep,again" {
 		t.Errorf("listed %v", names)
 	}
 	if list[0].State.Status != Creating || list[1].State.ExitCode != 3 {
 		t.Errorf("states %+v %+v", list[0].State, list[1].State)
+	}
+	if st := list[2].State; st.Status != Stopped || st.ExitCode != 255 || st.Error == "" {
+		t.Errorf("started again: %+v", st)
 	}
 	for _, name := range []string{"rm", "old"} {
 		if _, err := s.Resolve(name); !errors.Is(err, ErrNotFound) {

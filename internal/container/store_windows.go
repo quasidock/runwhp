@@ -334,7 +334,9 @@ func (s *Store) refresh(c *Container) {
 		return
 	}
 	if st.Active() {
-		if st.Status != Creating {
+		// A record that was never finished has nothing to say; a container
+		// being started again had ended before.
+		if st.Status != Creating || !st.FinishedAt.IsZero() {
 			st.ExitCode = 255
 			st.Error = "runwhp's process ended without recording how the container ended"
 		}
@@ -361,9 +363,11 @@ func (s *Store) List() ([]*Container, error) {
 		if err != nil {
 			continue // being removed
 		}
-		wasCreating := c.State.Status == Creating
+		// A record whose runwhp died while making it was never finished; one
+		// that had stopped before and was being started again is kept.
+		unfinished := c.State.Status == Creating && c.State.FinishedAt.IsZero()
 		s.refresh(c)
-		if !c.State.Active() && (c.Config.AutoRemove || wasCreating) {
+		if !c.State.Active() && (c.Config.AutoRemove || unfinished) {
 			s.Remove(c)
 			continue
 		}

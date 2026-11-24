@@ -86,10 +86,13 @@ func supervise(root string, store *container.Store, rec *container.Container, ou
 		lock.Close()
 		return nil, fmt.Errorf("serving container %s's pipe: %w", rec.Short(), err)
 	}
-	// A container this process made already records it.
+	// A container this process made already records it. One started again
+	// keeps how it last ended, which also tells the store it is not a
+	// record that was never finished.
 	if rec.State.Pid != os.Getpid() || rec.State.Output != output {
 		s.update(func(st *container.State) {
-			*st = container.State{Status: container.Creating, Pid: os.Getpid(), Output: output}
+			*st = container.State{Status: container.Creating, Pid: os.Getpid(), Output: output,
+				FinishedAt: st.FinishedAt, ExitCode: st.ExitCode}
 		})
 	}
 	go s.serve()
@@ -271,9 +274,13 @@ func (s *supervisor) finish(code int, err error) {
 func (s *supervisor) reply() container.Reply {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	r := container.Reply{OK: true, Status: s.state.Status, ExitCode: s.state.ExitCode}
-	if s.state.Status == container.Stopped && s.state.Error != "" {
-		r.Error = s.state.Error
+	r := container.Reply{OK: true, Status: s.state.Status}
+	if s.state.Status == container.Stopped {
+		// Until then, the state holds how it ended the time before.
+		r.ExitCode = s.state.ExitCode
+		if s.state.Error != "" {
+			r.Error = s.state.Error
+		}
 	}
 	return r
 }
