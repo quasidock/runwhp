@@ -61,6 +61,27 @@ func prepareVolumes(spec *guestspec.Spec) error {
 	}
 	for i, m := range spec.Mounts {
 		switch m.Kind {
+		case guestspec.MountBind:
+			// A containerd volume: a host directory, filled from the image
+			// while it is empty, as a volume of runwhp's own is.
+			if !m.CopyUp || m.File || m.ReadOnly {
+				continue
+			}
+			data := shareSource(m)
+			if empty, err := emptyDir(data); err != nil || !empty {
+				continue
+			}
+			src, err := imageDir(m.Target)
+			if err != nil {
+				return fmt.Errorf("volume on %s: %w", m.Target, err)
+			}
+			if src == "" {
+				continue
+			}
+			if err := copyTree(src, data); err != nil {
+				return fmt.Errorf("filling the volume on %s from the image's: %w", m.Target, err)
+			}
+			debugf("filled the volume on %s from the image's", m.Target)
 		case guestspec.MountVolume:
 			if m.NoCopy {
 				continue

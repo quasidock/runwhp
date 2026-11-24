@@ -187,6 +187,11 @@ type Mount struct {
 	// NoCopy leaves a new volume empty, instead of filling it with what the
 	// image has at Target.
 	NoCopy bool `json:"nocopy,omitempty"`
+	// CopyUp fills an empty bind mount's share with what the image has at
+	// Target, as a new volume is filled: containerd's volumes are host
+	// directories, which nerdctl cannot fill, since runwhp's snapshotter
+	// shows it no image files.
+	CopyUp bool `json:"copyUp,omitempty"`
 	// Options are a tmpfs's mount options: noexec, nosuid, nodev, ro, and
 	// size, mode, uid, gid and nr_inodes as tmpfs takes them.
 	Options string `json:"options,omitempty"`
