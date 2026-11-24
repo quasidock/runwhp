@@ -19,7 +19,9 @@ what it frees. Images, containers and volumes can be listed, measured and
 pruned as Docker's can, and images tagged, imported, and saved to and
 loaded from archives Docker takes, with the same IDs. A container's files
 can be copied in and out, running or stopped, exported, listed as its
-changes and committed to an image, and a container paused.
+changes and committed to an image, and a container paused. Stock nerdctl
+runs Linux containers on it too, through a containerd of the user's own
+and runwhp's containerd shim, unelevated.
 
 See [status](docs/status.md) for details.
 
@@ -776,6 +778,84 @@ and come into it from them, keeping their IDs, as well as by `pull`.
 | `tag SOURCE TARGET` | Name an image anew, replacing what TARGET named. `image tag` too |
 | `history [-H=false] [--no-trunc] [-q] [--format table\|json] IMAGE` | Show how an image was built. `image history` too |
 
+### nerdctl and containerd
+
+runwhp is also a containerd runtime: stock nerdctl, through a containerd of
+the user's own, runs Linux containers on it, unelevated. `runwhp
+containerd` starts that containerd, already set up, and prints what
+nerdctl needs:
+
+```powershell
+runwhp containerd
+# in another terminal, with the nerdctl.toml lines it printed:
+nerdctl run --rm --runtime io.containerd.runwhp.v1 --platform linux/amd64 --network none alpine echo hello
+```
+
+containerd 2.4 and nerdctl 2.4 must be installed, `containerd.exe` on
+PATH or given with `--containerd`. runwhp works with neither unless asked.
+
+- **What runs.** containerd runs runwhp's shim,
+  `containerd-shim-runwhp-v1.exe`, which build.ps1 builds beside
+  runwhp.exe, for each task of the runtime `io.containerd.runwhp.v1`. The
+  shim is the task's VMM: it boots the container's VM, as runwhp does,
+  in its own process, which outlives containerd, and serves containerd the
+  task API. `nerdctl run`, `create`, `start`, `stop`, `kill`, `rm`, `ps`,
+  `logs`, `exec`, `wait`, `pause`, `unpause` and `inspect` work as with any
+  runtime, with input (`-i`) and, run detached, a terminal (`-t`), whose
+  size the shim passes on. Containers survive `runwhp containerd` ending,
+  and containerd finds them again when it starts.
+- **Images and snapshots.** nerdctl pulls images into containerd's own
+  store. Each layer is converted to an ext4 image, `layer.vhd`, by
+  containerd's LCOW differ, which uses the same converter as runwhp, and
+  kept by runwhp's snapshotter, containerd's LCOW snapshotter served by the
+  shim beside containerd. It differs in two ways: a view of an image has no
+  mounts, since nerdctl mounts one on the host for every container, which
+  Windows cannot do with Linux layers; and a container's snapshot holds
+  runwhp's writable layer, `rw.ext4`, which outlives the task, so
+  `nerdctl start` keeps what a stopped container wrote. These layers are
+  not runwhp's: `runwhp images` does not list them, and `runwhp pull` does
+  not share them.
+- **The spec.** nerdctl on Windows writes a Linux image's spec with
+  memory and CPUs in its Windows section, destinations as Windows paths and
+  no hostname but in an annotation; the shim reads it that way, and reads a
+  Linux spec, as ctr writes one, too. `--memory` sizes the guest's RAM and
+  `--cpus` counts vCPUs, rounded up, as `runwhp run` takes them; without
+  them, runwhp's defaults apply. `-u` takes a name, or a uid with a group:
+  containerd resolves a uid alone through a host mount of the image, which
+  fails.
+- **The network.** nerdctl's own networks need HNS, which needs an
+  administrator, so runs say `--network none`, and every container gets
+  runwhp's network anyway, with nerdctl's `-p` ports published on the host
+  as `runwhp run -p` publishes them, TCP only, on `0.0.0.0` unless an
+  address is given. `--annotation io.runwhp.network=none` leaves a container
+  with loopback alone. `--add-host NAME:host-gateway` reaches the host's
+  loopback with `host_gateway_ip = '10.0.2.2'` in nerdctl.toml.
+- **Mounts.** nerdctl on Windows takes `-v` destinations as Windows paths:
+  `-v C:\src:C:\data` mounts `C:\src` at `/data`, the drive letter
+  dropped. Bind mounts, named volumes and an image's VOLUMEs are host
+  directories, shared as bind mounts are; a volume is filled from the
+  image while it is empty, as Docker fills one. `--mount` and `--tmpfs`
+  are not on nerdctl for Windows.
+- **Output.** A foreground run's output goes to nerdctl's pipes; `run -d`'s
+  to nerdctl's logging binary, which keeps the log `nerdctl logs` reads,
+  started by the shim as containerd's logging protocol has it. nerdctl
+  keeps no log of a foreground run on Windows.
+
+`runwhp containerd` keeps everything in one directory,
+`%LOCALAPPDATA%\runwhp\containerd` unless `--dir` says, on NTFS:
+containerd's root and state, which it makes itself first, since
+containerd run unelevated makes them for Administrators and SYSTEM alone
+and locks itself out; the snapshots; the shims' containers, in a runwhp
+store of their own that runwhp's prunes leave alone; the generated
+`config.toml`; and `containerd.log`. The configuration disables CRI and the
+CimFS snapshotters, which cannot start unelevated, and points containerd at
+runwhp's snapshotter. containerd and the snapshotter run in a job that ends
+with `runwhp containerd`; the shims leave it.
+
+| Command | |
+| --- | --- |
+| `containerd [--address PIPE] [--dir DIR] [--containerd EXE] [--debug]` | Run a containerd of your own for nerdctl until Ctrl+C, at `\\.\pipe\containerd-runwhp` unless `--address` names another pipe; `--debug` also prints its log |
+
 ### Kernel
 
 runwhp boots unmodified upstream Linux, currently 6.18.64 (a longterm
@@ -980,6 +1060,10 @@ bzImage.
 | Path | Contents |
 | --- | --- |
 | [`cmd/runwhp`](cmd/runwhp) | Command line |
+| [`cmd/containerd-shim-runwhp-v1`](cmd/containerd-shim-runwhp-v1) | The containerd shim, and runwhp's snapshotter |
+| [`internal/ocispec`](internal/ocispec) | An OCI runtime spec, as nerdctl writes one on Windows or ctr one for Linux, turned into a container's configuration |
+| [`cmd/containerd-shim-runwhp-v1`](cmd/containerd-shim-runwhp-v1) | The containerd shim, and runwhp's snapshotter |
+| [`internal/ocispec`](internal/ocispec) | An OCI runtime spec, as nerdctl writes one on Windows or ctr on Linux, turned into a container's configuration |
 | [`internal/vmm`](internal/vmm) | Running a container's VM: its devices and storage, the guest's boot, the supervisor that holds the container and serves its pipe, attached clients and pause, and the helper guests that read image layers and stopped containers' files |
 | [`internal/whp`](internal/whp) | Bindings for `WinHvPlatform.dll` and `WinHvEmulation.dll` |
 | [`internal/vm`](internal/vm) | Partition setup, guest memory committed as it is touched, vCPU loops, decoding of device register accesses, processor topology, serial port, RTC stub, I/O APIC |
@@ -1036,7 +1120,8 @@ container's supervisor, with no daemon.
 | Host to guest | Console ports for the main process; a virtio socket device for further connections | Done: `runwhp exec` uses vsock |
 | Bind mounts and volumes | virtio-fs, with a FUSE server in Go serving Windows files and keeping Unix metadata as WSL does, and the writeback cache for delegated mounts; volumes as journaled ext4 disk images on virtio-blk | Done; a volume is used by one container at a time |
 | Networking | User-mode network stack in the VMM (gVisor netstack); published ports are loopback listeners | Done, IPv4 only, TCP ports only |
-| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | Done over runwhp's own images, plus `run`, `list`, `stats`, `stop`, `restart`, `rename`, `logs`, `attach`, `wait`, `pause`, `unpause`, `cp`, `export`, `diff`, `commit`, `images`, `rmi`, the prunes, `system df`, `tag`, `history`, `save`, `load` and `import`, and restart policies; no OCI bundles |
+| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | Done over runwhp's own images, plus `run`, `list`, `stats`, `stop`, `restart`, `rename`, `logs`, `attach`, `wait`, `pause`, `unpause`, `cp`, `export`, `diff`, `commit`, `images`, `rmi`, the prunes, `system df`, `tag`, `history`, `save`, `load`, `import` and `containerd`, and restart policies; OCI bundles only through the shim |
+| containerd | A shim v2 (`containerd-shim-runwhp-v1`) that is the task's VMM, taking nerdctl's spec and containerd's LCOW layers; a snapshotter whose views have no mounts; a user containerd set up by `runwhp containerd` | Done: stock nerdctl 2.4, unelevated, `--network none` and runwhp's network |
 | Container files | A file server in init, reached through the container's runwhp, or for a stopped container through a guest booted with its storage; tars written and read as Docker's daemon does | Done: `cp`, `export`, `diff`, `commit` |
 | Container logs | Frames stamped with the host's time, rotated as Docker's `local` driver rotates | Done; every kept container has one |
 | Image archives | Docker 29's `docker save` format, rebuilt from each layer's tar-split metadata and its files, read in a guest booted for the purpose | Done; same IDs and blobs as Docker |
@@ -1182,10 +1267,11 @@ starts, which covers decompressing the kernel and early memory setup.
 
 ## Open questions
 
-- Is `runwhp` a general OCI runtime that containerd or nerdctl can drive, or a
-  backend used only by Quasidock? runwhp has runc's verbs now, over its own
-  images; whether it should also take OCI bundles, a `config.json` and a
-  root file system on Windows, as a shim would hand it, is still open.
+- containerd and nerdctl can drive runwhp now, through its shim and
+  snapshotter. Whether runwhp's own command line should also take OCI
+  bundles, as runc's does, is still open; and whether nerdctl should run
+  Linux containers on Windows without the flags it needs today
+  (`--runtime`, `--platform`, `--network none`) is nerdctl's to settle.
 - Is a one-time administrator step acceptable on machines where the hypervisor
   is off, or must there be a fallback that needs none?
 - virtio-mmio with generated ACPI, as spiked, or virtio over PCI with MSI-X,

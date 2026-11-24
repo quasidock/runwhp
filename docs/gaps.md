@@ -171,3 +171,39 @@
 - `cp` of many small files out to Windows takes about 1 ms a file,
   extracting them through go-archive, as Docker's CLI does: 11.7 s for
   10,000, where GNU tar takes 2.7 s for the same tar.
+- nerdctl runs Linux containers on runwhp only when told to, every time:
+  `--runtime io.containerd.runwhp.v1 --platform linux/amd64 --network
+  none`, as nerdctl.toml has no setting for the runtime or the platform.
+- nerdctl's own networks, `nat` and CNI's, need HNS and an administrator,
+  so its containers run with `--network none`, and get runwhp's network
+  anyway, unless annotated `io.runwhp.network=none`. They cannot reach
+  each other by name, and nerdctl on Windows has no `-P`, nor `-p` without
+  a host port.
+- nerdctl on Windows takes `-v` destinations as Windows paths only: the
+  shim drops the drive letter, so `C:\data` and `D:\data` are both `/data`.
+  It has no `--mount` or `--tmpfs`.
+- `nerdctl run -u UID` without a group fails: containerd reads the image's
+  `/etc/passwd` through a mount on the host, which Windows cannot make of
+  a Linux layer. `-u NAME` and `-u UID:GID` work.
+- `nerdctl run -it`, `exec -it` and `attach` need a console, and have not
+  been tried in one; `-d -t` has. nerdctl keeps no log of a foreground run
+  on Windows, and refuses `-d -i` without `-t`.
+- nerdctl's `commit` needs a differ that compares snapshots, which LCOW's
+  lacks; its `cp` and `export` are not built for Windows; `stats` gets no
+  numbers from the shim, which runwhp's `stats` would give, and nerdctl on
+  Windows shows none anyway; `top` lists the shim's pid; `compose` and
+  `--restart` are untried.
+- A layer pulled by nerdctl is kept by containerd, as containerd's LCOW
+  differ converts it, and not by runwhp: `runwhp images` does not list it,
+  `runwhp pull` does not share it, and `save` could not rebuild its tar.
+  Its ext4 image is at most 128 GiB.
+- runwhp's snapshotter gives views no mounts, so no other client of it can
+  read an image's files through one.
+- `runwhp containerd` runs in the foreground, and nothing starts it at
+  logon. Containers outlive it; ended, they wait for it to start again to
+  be removed.
+- The shim boots runwhp's kernel, or `RUNWHP_KERNEL`'s, never with
+  `--module`, so not WSL's.
+- The shim's containers are records in a runwhp store of their own, which
+  `runwhp list` shows with `RUNWHP_ROOT` set to it; runwhp's commands there
+  are untried.

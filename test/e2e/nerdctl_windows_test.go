@@ -5,6 +5,7 @@ package e2e
 import (
 	"archive/tar"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -82,6 +83,20 @@ func newNerdctl(t *testing.T) *nerdctlEnv {
 			e.cli("", "rm", "-f", id)
 		}
 		e.stop()
+		// A shim nerdctl could not reach, its containerd gone, is ended
+		// through its container's record, which holds its pid.
+		states, _ := filepath.Glob(filepath.Join(e.dir, "store", "containers", "*", "state.json"))
+		for _, path := range states {
+			var st struct {
+				Pid int `json:"pid"`
+			}
+			if data, err := os.ReadFile(path); err == nil && json.Unmarshal(data, &st) == nil && st.Pid > 0 {
+				if p, err := os.FindProcess(st.Pid); err == nil {
+					t.Errorf("a shim (pid %d) was still running a container; ending it", st.Pid)
+					p.Kill()
+				}
+			}
+		}
 		if t.Failed() {
 			t.Logf("runwhp containerd:\n%s", e.log.String())
 			if data, err := os.ReadFile(filepath.Join(e.dir, "containerd.log")); err == nil {

@@ -1,5 +1,19 @@
 # Status
 
+- **Iteration 16** (2026-11-25): stock nerdctl runs Linux containers on
+  runwhp. `runwhp containerd` runs a containerd of the user's own,
+  unelevated, set up for runwhp, and nerdctl 2.4 drives it as it drives
+  any: run, create, start, stop, kill, rm, ps, logs, exec, wait, pause and
+  unpause, with published ports, bind mounts and volumes. containerd runs
+  runwhp's shim for each task, which boots the container's VM in its own
+  process, and outlives containerd; images go through runwhp's
+  snapshotter, containerd's LCOW one with views that have no mounts, so
+  that nerdctl's mount of each image on the host passes, and a container's
+  snapshot keeps runwhp's writable layer. Every container gets runwhp's
+  network. The VMM and the supervisor moved out of the command line into a
+  package of their own, which the shim shares; runwhp.exe stays as it was.
+  See [nerdctl and containerd](../README.md#nerdctl-and-containerd) and
+  [Iteration 16 results](#iteration-16-results).
 - **Iteration 15** (2026-11-25): a container's files, from Windows.
   `cp` copies into and out of a container, its volumes and bind mounts
   included, as `docker cp` does, `export` writes its root file system to a
@@ -137,8 +151,9 @@
   kernel on WHP. See [Boot spike](../README.md#boot-spike).
 - **Proposed, not yet agreed**: the rest of the architecture in
   [Proposed design](../README.md#proposed-design).
-- **Not started**: OCI bundles, for containerd or nerdctl to drive runwhp
-  with; see [Open questions](../README.md#open-questions).
+- **Not started**: OCI bundles on runwhp's own command line, as runc takes
+  them; containerd and nerdctl drive runwhp through its shim since
+  iteration 16. See [Open questions](../README.md#open-questions).
 
 ## Iteration 1 results
 
@@ -1331,3 +1346,59 @@ The new tests cover:
 
 The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
 the WSL kernel with its vsock modules passed with `--module`.
+
+## Iteration 16 results
+
+Measured on the test machine with runwhp's kernel, from Git Bash, with
+the stores on NTFS (`C:`), over three to seven runs, with containerd 2.4.2
+and nerdctl 2.4.2 as installed. "Iteration 15" is that iteration's build,
+run in turn with this one.
+
+runwhp's own runs cost the same; the VMM's move into a package of its own
+changed nothing they do, and runwhp.exe is 20.6 MB, as it was:
+
+| Measurement | Iteration 15 | Iteration 16 |
+| --- | --- | --- |
+| `run --rm alpine:3.20 true`, `-m 512m` | 181-202 ms, and 310 ms once | 185-205 ms |
+| the same, default memory | 246-273 ms | 245-265 ms |
+
+Through nerdctl, a run costs about a quarter of a second more, nerdctl's
+and containerd's; the shim boots the VM as runwhp does:
+
+| Measurement | nerdctl | runwhp |
+| --- | --- | --- |
+| `run --rm alpine:3.20 true`, default memory | 503-539 ms | 245-262 ms |
+| `exec` of `true` in a running container | 95-103 ms | 65-70 ms |
+| `pull` of python:3.12-slim from a registry on the test machine, into an empty store | 1.18 s | 0.74-0.81 s |
+| working set of the process running an alpine `sleep`, `-m 512m` | 103 MB, the shim | 100 MB, runwhp in the background |
+
+The shim is 29.9 MB: containerd's API, ttrpc, gRPC for the snapshotter
+and the LCOW snapshotter. Linked into runwhp.exe, they would have cost it
+10.6 MB, and no measurable time; see [Findings](findings.md).
+
+The new tests cover:
+
+- **nerdctl, end to end,** each test with a `runwhp containerd` of its
+  own: `run` with output, exit codes, input, `-e`, `-w`, `-u`,
+  `--hostname`, `--cpus` and `--memory`, and the default hostname; a
+  detached container's `logs`, `ps`, `exec` with input and exit codes,
+  `pause` and `unpause` with exec refused, `stop` within its timeout,
+  `start` keeping the writable layer, `kill`, `wait` and `rm`, leaving the
+  shim's store empty; a published port, the host reached through
+  host-gateway, and `io.runwhp.network=none`; bind mounts read-write and
+  read-only, a named volume, an image's VOLUME and a named volume over it
+  filled from the image; and a container outliving containerd, found
+  again when `runwhp containerd` starts.
+- **The spec** as nerdctl 2.4.2 wrote it for four runs, kept in testdata:
+  the process, user, hostname, resources, published ports, mounts and
+  their destinations, an image's VOLUME, a user mount over one, extra
+  hosts and host-gateway, a Linux spec, and exec's process.
+- **The shim:** logging binary URIs, file streams, closing input with a
+  read under way, and the snapshotter's views and containers' snapshots.
+- **runwhp containerd's configuration**, and runwhp's exec sessions over
+  a fake exec server: streams, signals, a refused command, a detached one
+  and the guest going away.
+
+The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
+the WSL kernel with its vsock modules passed with `--module`; the shim
+boots runwhp's kernel in each.

@@ -494,3 +494,46 @@
   ran, and showed the commit in its history; the save fetched the tar
   metadata of alpine's layer, pulled before iteration 14, through alpine's
   record.
+- **containerd 2.4.2 run unelevated locks itself out of a root it makes.**
+  It makes `root` and `state` for Administrators and SYSTEM alone, which an
+  unelevated user's token cannot open, and every plugin then fails with
+  "Access is denied"; directories made beforehand keep the ACL they
+  inherit, and work. The CimFS snapshotter fails to start unelevated,
+  formatting its scratch disk needing a privilege, and its failure fails
+  the metadata store and everything on it; with it disabled, containerd
+  starts in 0.02 s.
+- **containerd's LCOW pieces need no privilege.** Its windows-lcow differ
+  converts a layer with hcsshim's tar2ext4, as runwhp does, into an ext4
+  image with a VHD footer, `layer.vhd`, and grants the Virtual Machines
+  group read access, which the file's owner may. Its snapshotter makes a
+  container's `sandbox.vhdx` by copying `scratch.vhdx` from its root, and
+  only when that is missing runs runhcs, which needs an administrator; an
+  empty one serves. runwhp boots the layer images as they are: alpine and
+  two layers converted so, one with a whiteout and one with an opaque
+  directory, read as runwhp's own conversions do.
+- **nerdctl 2.4.2 mounts every image it runs on the host**, a view of its
+  snapshot, with `mount.All`, which on Windows takes Windows layers alone:
+  windows-lcow's mount fails there, and an empty list of mounts passes.
+  containerd 2.4.2, deleting a task's bundle, unmounts its `rootfs`
+  directory with bindfilter, which an unelevated process may not call,
+  unless the directory is missing; and renaming the bundle fails while a
+  process has it as its working directory.
+- **nerdctl's spec for a Linux image on Windows** has the process as for
+  Linux, a numeric user, the image's PATH and an empty `HOSTNAME` without
+  `--hostname`, but memory and CPUs in `windows.resources`, no `linux`
+  section, `-v` destinations as `C:\data` and an image's VOLUME as `\data`,
+  and the hostname, the network and the mounts' kinds in annotations.
+  `-p` with `--network none` lands in `network-config.json` in the
+  container's state directory, with `0.0.0.0` when no address is given.
+  nerdctl dedupes a `-v` on an image's VOLUME by destination, which on
+  Windows it writes two ways, and so asks for both. `run -d` logs through
+  `binary:///…/nerdctl.exe?_NERDCTL_INTERNAL_LOGGING=…`; foreground runs and
+  exec give named pipes nerdctl serves. containerd asks a shim `-info` for
+  the deprecated `runtime-allow-mounts` annotation, and logs an error if
+  it gets no RuntimeInfo.
+- **Linking containerd's API costs runwhp.exe 10.6 MB and no time.** With
+  ttrpc and the task and event APIs it grows 8.6 MB, to 29.2 MB, from
+  their generated gRPC code; with the LCOW snapshotter and gRPC's server,
+  10.6 MB. `list -q` started in 35-39 ms either way, and `run --rm alpine
+  true` took 175-225 ms. The shim is a binary of its own, so runwhp.exe
+  stays as it was.
