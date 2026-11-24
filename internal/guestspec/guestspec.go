@@ -211,6 +211,19 @@ type Control struct {
 	// it, in nanoseconds since the Unix epoch. Init brings the guest's
 	// clock to it: gradually when it is close, at once when not.
 	Time int64 `json:"time,omitempty"`
+	// Freeze, when set, freezes the container's processes, or with Frozen
+	// false thaws them, as docker pause and unpause do. Init answers with
+	// an Event whose Freeze has the same Seq, once they are, or with Error.
+	Freeze *Freeze `json:"freeze,omitempty"`
+}
+
+// Freeze asks init to freeze or thaw the container's processes, and is
+// init's answer. Init itself, and so the clock, statistics and the file
+// server, are not frozen.
+type Freeze struct {
+	Seq    uint64 `json:"seq"`
+	Frozen bool   `json:"frozen"`
+	Error  string `json:"error,omitempty"`
 }
 
 // Event is a message from init to the host.
@@ -229,6 +242,8 @@ type Event struct {
 	Error  string `json:"error,omitempty"`
 	// Stats answers Control.Stats.
 	Stats *GuestStats `json:"stats,omitempty"`
+	// Freeze answers Control.Freeze.
+	Freeze *Freeze `json:"freeze,omitempty"`
 }
 
 // GuestStats is what init reports of the guest when the host asks.

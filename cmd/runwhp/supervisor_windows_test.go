@@ -202,3 +202,78 @@ func TestRestartBackoffEnv(t *testing.T) {
 		}
 	}
 }
+
+// testFreezer answers each freeze or thaw at once, or with fail.
+func testFreezer(fail string) *guestFreezer {
+	g := &guestFreezer{listening: func() bool { return true }, replies: make(chan *guestspec.Freeze, 1)}
+	g.send = func(c guestspec.Control) bool {
+		go g.deliver(&guestspec.Freeze{Seq: c.Freeze.Seq, Frozen: c.Freeze.Frozen, Error: fail})
+		return true
+	}
+	return g
+}
+
+func TestPause(t *testing.T) {
+	s := testSupervisor(t, "")
+	id := s.rec.ID
+	if r := s.pause(); r.OK || r.Error != "container "+id+" is not running" {
+		t.Errorf("pause before a boot: %+v", r)
+	}
+	b := s.beginBoot(testProxy(t))
+	s.mu.Lock()
+	b.vm = &vmHandles{freezer: testFreezer("")}
+	s.mu.Unlock()
+	s.started(b, 1)
+	if r := s.unpause(); r.OK || r.Error != "Container "+id+" is not paused" {
+		t.Errorf("unpause of a running container: %+v", r)
+	}
+	if r := s.pause(); !r.OK {
+		t.Fatalf("pause: %+v", r)
+	}
+	if !s.state.Paused {
+		t.Error("not recorded as paused")
+	}
+	if got := statusText(s.state, time.Now()); got != "Up Less than a second (Paused)" {
+		t.Errorf("statusText = %q", got)
+	}
+	s.pending.Wait()
+	s.persist()
+	c, err := s.store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := stateOf(c); st.Status != container.Paused {
+		t.Errorf("state's status = %q", st.Status)
+	}
+	if r := s.pause(); r.OK || r.Error != "container "+id+" is already paused" {
+		t.Errorf("second pause: %+v", r)
+	}
+	if r := s.unpause(); !r.OK || s.state.Paused {
+		t.Errorf("unpause: %+v, paused %v", r, s.state.Paused)
+	}
+
+	// A signal thaws it.
+	s.pause()
+	s.thawAfterSignal(b)
+	if s.state.Paused {
+		t.Error("still paused after a signal")
+	}
+
+	// A failed freeze leaves it as it was.
+	s.mu.Lock()
+	b.vm = &vmHandles{freezer: testFreezer("no cgroup")}
+	s.mu.Unlock()
+	if r := s.pause(); r.OK || r.Error != "pausing container "+id+": no cgroup" || s.state.Paused {
+		t.Errorf("failed pause: %+v, paused %v", r, s.state.Paused)
+	}
+
+	// The boot's end clears it.
+	s.mu.Lock()
+	b.vm = &vmHandles{freezer: testFreezer("")}
+	s.mu.Unlock()
+	s.pause()
+	s.endBoot(b, 0, nil)
+	if s.state.Paused {
+		t.Error("paused after the boot ended")
+	}
+}

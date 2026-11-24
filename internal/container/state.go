@@ -21,6 +21,10 @@ const (
 	// running the container waits to start it again, as its restart policy
 	// says. Not one of the OCI spec's, which lets runtimes add their own.
 	Restarting Status = "restarting"
+	// Paused is not a status a container's state holds: a paused container
+	// is Running, with Paused set, as Docker's is. runwhp state shows it,
+	// as docker inspect's State.Status does.
+	Paused Status = "paused"
 )
 
 // Output is where a container's output goes when no terminal is attached.
@@ -50,6 +54,9 @@ type State struct {
 	// RestartCount counts the times the runwhp running the container has
 	// started it again, as its restart policy says.
 	RestartCount int `json:"restartCount,omitempty"`
+	// Paused says the running container's processes are frozen, by runwhp
+	// pause, until runwhp unpause.
+	Paused bool `json:"paused,omitempty"`
 }
 
 // Active reports whether the state says a runwhp runs the container: it

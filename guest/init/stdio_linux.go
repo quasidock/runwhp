@@ -319,6 +319,18 @@ func (c *controller) listen(port *os.File) {
 			// Walking /proc takes a while; signals behind it should not wait.
 			go c.sendStats(m.Stats)
 		}
+		if f := m.Freeze; f != nil {
+			// The kernel takes a while to freeze the processes. Signals sent
+			// after a thaw, as kill sends them, wait for nothing either way:
+			// a frozen process takes them once it thaws.
+			go func() {
+				reply := &guestspec.Freeze{Seq: f.Seq, Frozen: f.Frozen}
+				if err := cgroup.setFrozen(f.Frozen); err != nil {
+					reply.Error = err.Error()
+				}
+				c.send(guestspec.Event{Freeze: reply})
+			}()
+		}
 	}
 	debugf("control port closed: %v", sc.Err())
 }

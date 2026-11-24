@@ -73,11 +73,12 @@ type bootHooks struct {
 // vmHandles are what the runwhp running a container reaches its VM
 // through while it runs.
 type vmHandles struct {
-	vsock *virtio.Vsock
-	nic   *virtio.Net // nil without a network
-	blks  []*virtio.Blk
-	probe *vm.Probe
-	guest *guestStats
+	vsock   *virtio.Vsock
+	nic     *virtio.Net // nil without a network
+	blks    []*virtio.Blk
+	probe   *vm.Probe
+	guest   *guestStats
+	freezer *guestFreezer
 }
 
 // Page cache reclaim: once the guest has been idle for reclaimIdle, init
@@ -216,7 +217,8 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 		}
 	}
 	guest := newGuestStats(proxy)
-	status := &eventWriter{onReady: hooks.ready, onStarted: hooks.started, onStats: guest.deliver}
+	freezer := newGuestFreezer(proxy)
+	status := &eventWriter{onReady: hooks.ready, onStarted: hooks.started, onStats: guest.deliver, onFreeze: freezer.deliver}
 	console := &virtio.Console{
 		Ports: []virtio.Port{
 			{Name: guestspec.PortStdout, Out: bio.stdout},
@@ -230,7 +232,7 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 	// The vsock device carries runwhp exec's connections to init.
 	vsock := &virtio.Vsock{CID: guestspec.GuestCID, Logf: logf}
 	defer func() { logf("%s", vsock.Stats()) }()
-	handles := &vmHandles{vsock: vsock, probe: &vm.Probe{}, guest: guest}
+	handles := &vmHandles{vsock: vsock, probe: &vm.Probe{}, guest: guest, freezer: freezer}
 	// The balloon gives back to Windows the memory the guest reports free.
 	devices := []virtio.Device{console, vsock, &virtio.Balloon{}}
 	if cfg.Network {

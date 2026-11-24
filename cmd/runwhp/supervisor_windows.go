@@ -65,6 +65,8 @@ type supervisor struct {
 	// if set, is its input, open to them.
 	hub   *outputHub
 	stdin *attachStdin
+	// pauseMu orders pauses, unpauses and the thaws after kills.
+	pauseMu sync.Mutex
 }
 
 // vmBoot is one VM of the container's, from booting it until the process
@@ -163,6 +165,7 @@ func (s *supervisor) beginBoot(proxy *signalProxy) *vmBoot {
 	}
 	restarting := s.state.Status == container.Restarting
 	s.cur = b
+	s.state.Paused = false
 	s.mu.Unlock()
 	if restarting {
 		// Booting again: creating, as each boot is, with how the last run
@@ -307,6 +310,7 @@ func (s *supervisor) endBoot(b *vmBoot, code int, err error) (restart bool, dela
 	now := time.Now()
 	s.change(func(st *container.State) {
 		st.GuestPid = 0
+		st.Paused = false
 		st.FinishedAt, st.ExitCode, st.Error = now.UTC(), code, ""
 		switch {
 		case b.hardStopped != "":
@@ -497,6 +501,7 @@ func (s *supervisor) kill(sig int, all bool) error {
 		return nil
 	}
 	b.proxy.queue.send(guestspec.Control{Signal: sig, All: all})
+	s.thawAfterSignal(b)
 	if sig == guestspec.SIGKILL {
 		time.AfterFunc(killGrace, func() {
 			select {
@@ -631,6 +636,10 @@ func (s *supervisor) handle(c net.Conn) {
 		case container.OpAttach:
 			s.attach(c, r, req)
 			return
+		case container.OpPause:
+			rep = s.pause()
+		case container.OpUnpause:
+			rep = s.unpause()
 		default:
 			rep = container.Reply{Error: fmt.Sprintf("this runwhp does not know the request %q", req.Op)}
 		}
@@ -696,6 +705,14 @@ func (s *supervisor) connect(c net.Conn, r *bufio.Reader, req container.Request)
 	h := s.running()
 	if h == nil {
 		reply(container.Reply{Error: errNotRunning.Error()})
+		return
+	}
+	s.mu.Lock()
+	paused := s.state.Paused
+	s.mu.Unlock()
+	if paused {
+		// An exec's process would start frozen.
+		reply(container.Reply{Error: fmt.Sprintf("Container %s is paused, unpause the container before exec", s.rec.ID)})
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

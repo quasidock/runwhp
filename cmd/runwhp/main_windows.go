@@ -21,6 +21,8 @@ const usage = `Usage:
   runwhp kill [-a] CONTAINER [SIGNAL]           send a signal to a container
   runwhp stop [-t SECONDS] CONTAINER...         stop containers
   runwhp restart [-t SECONDS] CONTAINER...      stop containers and start them again
+  runwhp pause CONTAINER...                     freeze every process in containers
+  runwhp unpause CONTAINER...                   thaw what runwhp pause froze
   runwhp logs [-f] CONTAINER                    print the output of a container in the background
   runwhp list [-q] [--format table|json]        list containers
   runwhp state CONTAINER                        describe a container's state as JSON
@@ -112,6 +114,10 @@ func realMain(args []string) int {
 		return cmdLogs(args[1:], os.Stdout, os.Stderr)
 	case "exec":
 		return cmdExec(args[1:])
+	case "pause":
+		return cmdPause(args[1:], os.Stdout)
+	case "unpause":
+		return cmdUnpause(args[1:], os.Stdout)
 	case "__supervise":
 		return cmdSupervise(args[1:])
 	case "help", "-h", "-help", "--help":

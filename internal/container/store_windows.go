@@ -361,7 +361,7 @@ func (s *Store) refresh(c *Container) {
 			st.ExitCode = 255
 			st.Error = "runwhp's process ended without recording how the container ended"
 		}
-		st.Status, st.Pid, st.GuestPid = Stopped, 0, 0
+		st.Status, st.Pid, st.GuestPid, st.Paused = Stopped, 0, 0, false
 		if st.FinishedAt.IsZero() {
 			st.FinishedAt = time.Now().UTC()
 		}

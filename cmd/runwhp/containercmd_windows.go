@@ -153,6 +153,8 @@ const containerUsage = `Usage:
   runwhp container ls [-q] [--format table|json]   list containers (also: runwhp list)
   runwhp container rm [-f] CONTAINER...             remove containers (also: runwhp delete)
   runwhp container prune [-f]                       remove stopped and created containers
+  runwhp container pause CONTAINER...               freeze containers (also: runwhp pause)
+  runwhp container unpause CONTAINER...             thaw them (also: runwhp unpause)
 `
 
 // cmdContainer runs runwhp container, Docker's names for runwhp's
@@ -170,6 +172,10 @@ func cmdContainer(args []string, stdin io.Reader, stdout io.Writer) int {
 		return cmdDelete(args, stdout)
 	case "prune":
 		return cmdContainerPrune(args, stdin, stdout)
+	case "pause":
+		return cmdPause(args, stdout)
+	case "unpause":
+		return cmdUnpause(args, stdout)
 	case "help", "-h", "-help", "--help":
 		fmt.Fprint(stdout, containerUsage)
 		return 0
@@ -244,6 +250,9 @@ func deleteContainer(store *container.Store, ref string, force bool) error {
 	if c.State.Active() {
 		// A created container's process never started, so it is deleted
 		// as runc deletes one, without being forced.
+		if !force && c.State.Paused {
+			return fmt.Errorf("cannot remove container %q: container is paused and must be unpaused first", ref)
+		}
 		if !force && c.State.Status != container.Created {
 			return fmt.Errorf("container %s is %s: stop it first, or delete it with -f", c.Short(), c.State.Status)
 		}
@@ -327,6 +336,9 @@ func stateOf(c *container.Container) containerState {
 		Error: c.State.Error, GuestPid: c.State.GuestPid, AutoRemove: c.Config.AutoRemove, Output: c.State.Output,
 		Memory: c.Config.Memory, RestartCount: c.State.RestartCount,
 	}
+	if c.State.Status == container.Running && c.State.Paused {
+		s.Status = container.Paused
+	}
 	if c.Config.Restart.IsSet() {
 		s.RestartPolicy = c.Config.Restart.String()
 	}
@@ -387,10 +399,14 @@ func statusText(st container.State, now time.Time) string {
 	case container.Created:
 		return "Created"
 	case container.Running:
-		if st.StartedAt.IsZero() {
-			return "Up"
+		up := "Up"
+		if !st.StartedAt.IsZero() {
+			up += " " + humanDuration(now.Sub(st.StartedAt))
 		}
-		return "Up " + humanDuration(now.Sub(st.StartedAt))
+		if st.Paused {
+			up += " (Paused)"
+		}
+		return up
 	case container.Stopped:
 		if st.FinishedAt.IsZero() {
 			return "Created" // made, but never started

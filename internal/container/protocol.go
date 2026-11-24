@@ -36,6 +36,10 @@ const (
 	// OpAttach attaches to the container's standard streams; after the
 	// reply, frames go both ways, as Attach* describes.
 	OpAttach = "attach"
+	// OpPause freezes the running container's processes, and OpUnpause
+	// thaws them; each replies once that is done.
+	OpPause   = "pause"
+	OpUnpause = "unpause"
 )
 
 // After the reply to OpAttach, both ends send frames in the log's framing

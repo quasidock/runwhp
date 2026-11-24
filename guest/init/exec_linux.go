@@ -88,6 +88,7 @@ func runProcess(spec *guestspec.Spec, user passwd.User, ports map[string]*os.Fil
 			Ctty:       0,
 		},
 	}
+	cgroup.procAttr(attr.Sys)
 	debugf("exec %q as %d:%d in %s (stdin %v, tty %v)", spec.Args, user.UID, user.GID, cwd, spec.Stdin, spec.TTY)
 	pid, done, err := children.start(func() (int, error) { return syscall.ForkExec(exe, spec.Args, attr) })
 	streams.started()

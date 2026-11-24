@@ -63,6 +63,7 @@ func openMemFiles() *memFiles {
 		logf("mounting cgroup2: %v", err)
 		return m
 	}
+	makeContainerCgroup()
 	fd, err := syscall.Open(cgroupDir+"/memory.reclaim", syscall.O_WRONLY|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		logf("opening memory.reclaim: %v", err)

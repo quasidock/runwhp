@@ -80,6 +80,10 @@ func cmdAttach(args []string) int {
 		errorf("%v", err)
 		return 1
 	}
+	if c.State.Paused {
+		errorf("cannot attach to a paused container, unpause it first")
+		return 1
+	}
 	code, err := attachContainer(store, c, o, nil)
 	if err != nil {
 		errorf("%v", err)

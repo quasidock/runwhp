@@ -114,6 +114,10 @@ func cmdExec(args []string) int {
 		errorf("container %s is not running", c.Short())
 		return fail
 	}
+	if c.State.Paused {
+		errorf("Container %s is paused, unpause the container before exec", fs.Arg(0))
+		return fail
+	}
 	root, _ := storeRoot()
 	code, err := runExec(root, c, ex)
 	if err != nil {
