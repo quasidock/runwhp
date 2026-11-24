@@ -22,6 +22,7 @@ import (
 
 	"github.com/quasidock/runwhp/internal/container"
 	"github.com/quasidock/runwhp/internal/guestspec"
+	"github.com/quasidock/runwhp/internal/vmm"
 )
 
 const execUsage = `Usage: runwhp exec [flags] CONTAINER COMMAND [ARG...]
@@ -74,7 +75,7 @@ func cmdExec(args []string) int {
 		fs.Usage()
 		return fail
 	}
-	if interactive && tty && !detach && !isTerminal(os.Stdin) {
+	if interactive && tty && !detach && !vmm.IsTerminal(os.Stdin) {
 		errorf("the input device is not a TTY; if you are using mintty, try prefixing the command with 'winpty'")
 		return fail
 	}
@@ -90,10 +91,10 @@ func cmdExec(args []string) int {
 		ex.Env = append(ex.Env, e)
 	}
 	if tty {
-		if rows, cols, ok := terminalSize(os.Stdout); ok && rows > 0 {
+		if rows, cols, ok := vmm.TerminalSize(os.Stdout); ok && rows > 0 {
 			ex.Rows, ex.Cols = rows, cols
 		} else {
-			ex.Rows, ex.Cols = detachedRows, detachedCols
+			ex.Rows, ex.Cols = vmm.DetachedRows, vmm.DetachedCols
 		}
 	}
 
@@ -200,8 +201,8 @@ func runExec(root string, c *container.Container, ex *guestspec.Exec) (int, erro
 			}()
 		case guestspec.PortStdin:
 			var in io.Reader = os.Stdin
-			if isTerminal(os.Stdin) {
-				in = &consoleReader{h: windows.Handle(os.Stdin.Fd()), lines: !ex.TTY}
+			if vmm.IsTerminal(os.Stdin) {
+				in = vmm.NewConsoleReader(windows.Handle(os.Stdin.Fd()), !ex.TTY)
 			}
 			go func() {
 				io.Copy(sc, in)
@@ -219,14 +220,14 @@ func runExec(root string, c *container.Container, ex *guestspec.Exec) (int, erro
 		ctlMu.Unlock()
 	}
 	if ex.TTY && !ex.Detach {
-		term, err := setupConsole(ex.Stdin, isTerminal(os.Stdout))
+		term, err := vmm.SetupConsole(ex.Stdin, vmm.IsTerminal(os.Stdout))
 		if err != nil {
 			return fail, fmt.Errorf("setting up the console: %w", err)
 		}
-		defer term.restore()
+		defer term.Restore()
 		done := make(chan struct{})
 		defer close(done)
-		go followSize(done, ex.Rows, ex.Cols, send)
+		go vmm.FollowSize(done, ex.Rows, ex.Cols, send)
 	}
 	sigs := make(chan os.Signal, 2)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)

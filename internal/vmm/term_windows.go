@@ -1,6 +1,6 @@
 //go:build windows
 
-package main
+package vmm
 
 import (
 	"bytes"
@@ -21,11 +21,11 @@ import (
 	"github.com/quasidock/runwhp/internal/virtio"
 )
 
-// isTerminal reports whether f is a Windows console.
-func isTerminal(f *os.File) bool { return term.IsTerminal(int(f.Fd())) }
+// IsTerminal reports whether f is a Windows console.
+func IsTerminal(f *os.File) bool { return term.IsTerminal(int(f.Fd())) }
 
-// terminalSize returns the size of the console window behind f.
-func terminalSize(f *os.File) (rows, cols uint16, ok bool) {
+// TerminalSize returns the size of the console window behind f.
+func TerminalSize(f *os.File) (rows, cols uint16, ok bool) {
 	w, h, err := term.GetSize(int(f.Fd()))
 	if err != nil || w <= 0 || h <= 0 || w > 0xffff || h > 0xffff {
 		return 0, 0, false
@@ -33,19 +33,19 @@ func terminalSize(f *os.File) (rows, cols uint16, ok bool) {
 	return uint16(h), uint16(w), true
 }
 
-// consoleState is console configuration to put back when runwhp is done.
-type consoleState struct {
+// ConsoleState is console configuration to put back when runwhp is done.
+type ConsoleState struct {
 	in      *term.State
 	out     windows.Handle
 	outMode uint32
 	outSet  bool
 }
 
-// setupConsole prepares the console for a Linux program on a pty. Raw input
+// SetupConsole prepares the console for a Linux program on a pty. Raw input
 // makes the keyboard send VT sequences and Ctrl+C a byte; VT processing on
 // output interprets the program's escape sequences.
-func setupConsole(rawInput, vtOutput bool) (*consoleState, error) {
-	s := &consoleState{}
+func SetupConsole(rawInput, vtOutput bool) (*ConsoleState, error) {
+	s := &ConsoleState{}
 	if rawInput {
 		st, err := term.MakeRaw(int(os.Stdin.Fd()))
 		if err != nil {
@@ -67,8 +67,8 @@ func setupConsole(rawInput, vtOutput bool) (*consoleState, error) {
 	return s, nil
 }
 
-// restore puts the console back as it was. It is safe to call more than once.
-func (s *consoleState) restore() {
+// Restore puts the console back as it was. It is safe to call more than once.
+func (s *ConsoleState) Restore() {
 	if s == nil {
 		return
 	}
@@ -85,13 +85,13 @@ func (s *consoleState) restore() {
 // watchSize sends the console's size to the guest whenever it changes, until
 // done is closed.
 func watchSize(done <-chan struct{}, rows, cols uint16, q *controlQueue) {
-	followSize(done, rows, cols, func(m guestspec.Control) { q.send(m) })
+	FollowSize(done, rows, cols, func(m guestspec.Control) { q.send(m) })
 }
 
-// followSize sends the console's size whenever it changes from rows by
+// FollowSize sends the console's size whenever it changes from rows by
 // cols, until done is closed. Windows reports no resize to a program
 // reading VT input, so this polls, as the Docker CLI does.
-func followSize(done <-chan struct{}, rows, cols uint16, send func(guestspec.Control)) {
+func FollowSize(done <-chan struct{}, rows, cols uint16, send func(guestspec.Control)) {
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
 	for {
@@ -99,7 +99,7 @@ func followSize(done <-chan struct{}, rows, cols uint16, send func(guestspec.Con
 		case <-done:
 			return
 		case <-tick.C:
-			r, c, ok := terminalSize(os.Stdout)
+			r, c, ok := TerminalSize(os.Stdout)
 			if ok && r > 0 && (r != rows || c != cols) {
 				rows, cols = r, c
 				send(guestspec.Control{Rows: r, Cols: c})
@@ -108,12 +108,12 @@ func followSize(done <-chan struct{}, rows, cols uint16, send func(guestspec.Con
 	}
 }
 
-// consoleReader reads keyboard input from a console as UTF-8. os.Stdin also
+// ConsoleReader reads keyboard input from a console as UTF-8. os.Stdin also
 // reads through ReadConsoleW, but it reports end of file both for Ctrl+Z,
 // which on a pty is the key that suspends a job, and for a read that Ctrl+C
 // interrupted, which would close the container's input instead of passing
 // it the interrupt.
-type consoleReader struct {
+type ConsoleReader struct {
 	h windows.Handle
 	// lines is set when the console edits lines itself (no -t). Lines end
 	// in \r\n there, which become \n, and Ctrl+Z ends the input, as is the
@@ -127,7 +127,7 @@ type consoleReader struct {
 	eof     bool
 }
 
-func (r *consoleReader) Read(p []byte) (int, error) {
+func (r *ConsoleReader) Read(p []byte) (int, error) {
 	for len(r.pending) == 0 {
 		if r.eof {
 			return 0, io.EOF
@@ -151,7 +151,7 @@ func (r *consoleReader) Read(p []byte) (int, error) {
 }
 
 // cook applies the line-mode conventions to what one read returned.
-func (r *consoleReader) cook(b []byte) []byte {
+func (r *ConsoleReader) cook(b []byte) []byte {
 	if i := bytes.IndexByte(b, 0x1a); i >= 0 {
 		b, r.eof = b[:i], true
 	}
@@ -169,7 +169,7 @@ func (r *consoleReader) cook(b []byte) []byte {
 
 // decode converts UTF-16 to UTF-8, keeping a surrogate pair split across
 // reads together.
-func (r *consoleReader) decode(s []uint16) []byte {
+func (r *ConsoleReader) decode(s []uint16) []byte {
 	var out []byte
 	for _, c := range s {
 		switch {
@@ -246,14 +246,14 @@ func (q *controlQueue) put(item queuedControl) bool {
 	}
 }
 
-// signalProxy decides what a signal to runwhp does. Once init listens on the
+// SignalProxy decides what a signal to runwhp does. Once init listens on the
 // control port, the first interrupt (Ctrl+C or Ctrl+Break) goes to the
 // container's process group as SIGINT, as a terminal's Ctrl+C would, and a
 // second one stops the VM. SIGTERM, which is what Go reports when the console
 // closes or Windows logs off or shuts down, goes to the main process, as
 // docker stop sends it, and the VM stops 10 s later if it is still running.
 // Before init listens, any signal stops the VM at once.
-type signalProxy struct {
+type SignalProxy struct {
 	stop    context.CancelFunc
 	queue   *controlQueue
 	console atomic.Pointer[virtio.Console]
@@ -267,18 +267,18 @@ type signalProxy struct {
 
 // listening reports whether init has opened the control port, and so can
 // take Control messages.
-func (p *signalProxy) listening() bool {
+func (p *SignalProxy) listening() bool {
 	con := p.console.Load()
 	return con != nil && con.Connected(guestspec.PortControl)
 }
 
-func (p *signalProxy) run(sigs <-chan os.Signal) {
+func (p *SignalProxy) Run(sigs <-chan os.Signal) {
 	for sig := range sigs {
 		p.handle(sig)
 	}
 }
 
-func (p *signalProxy) handle(sig os.Signal) {
+func (p *SignalProxy) handle(sig os.Signal) {
 	p.signaled.Store(true)
 	con := p.console.Load()
 	if con == nil || !con.Connected(guestspec.PortControl) {

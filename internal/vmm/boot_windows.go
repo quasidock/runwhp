@@ -1,6 +1,6 @@
 //go:build windows
 
-package main
+package vmm
 
 import (
 	"context"
@@ -27,27 +27,27 @@ import (
 	"github.com/quasidock/runwhp/internal/volume"
 )
 
-// bootIO is where a container's streams go.
-type bootIO struct {
-	// stdin is the container's standard input, when its config asks for
+// BootIO is where a container's streams go.
+type BootIO struct {
+	// Stdin is the container's standard input, when its config asks for
 	// one; nil gives it end of file at once.
-	stdin          io.Reader
-	stdout, stderr io.Writer
-	// terminal says this process's console is the container's: with -t it
+	Stdin          io.Reader
+	Stdout, Stderr io.Writer
+	// Terminal says this process's console is the container's: with -t it
 	// is put in raw mode and its size followed.
-	terminal bool
-	// diag takes runwhp's own diagnostics: the kernel console with
+	Terminal bool
+	// Diag takes runwhp's own diagnostics: the kernel console with
 	// --debug, and its last lines when something fails.
-	diag io.Writer
+	Diag io.Writer
 }
 
-// foregroundIO is a foreground run's: this process's standard streams.
-func foregroundIO(cfg *container.Config) bootIO {
-	bio := bootIO{stdout: os.Stdout, stderr: os.Stderr, terminal: true, diag: os.Stderr}
+// ForegroundIO is a foreground run's: this process's standard streams.
+func ForegroundIO(cfg *container.Config) BootIO {
+	bio := BootIO{Stdout: os.Stdout, Stderr: os.Stderr, Terminal: true, Diag: os.Stderr}
 	if cfg.Stdin {
-		bio.stdin = os.Stdin
-		if isTerminal(os.Stdin) {
-			bio.stdin = &consoleReader{h: windows.Handle(os.Stdin.Fd()), lines: !cfg.TTY}
+		bio.Stdin = os.Stdin
+		if IsTerminal(os.Stdin) {
+			bio.Stdin = &ConsoleReader{h: windows.Handle(os.Stdin.Fd()), lines: !cfg.TTY}
 		}
 	}
 	return bio
@@ -125,22 +125,22 @@ func clockPeriod(logf func(string, ...any)) time.Duration {
 	return time.Duration(n) * time.Second
 }
 
-// detachedRows and detachedCols size the terminal of a container run with
+// DetachedRows and DetachedCols size the terminal of a container run with
 // -t but no console of runwhp's own.
-const detachedRows, detachedCols = 24, 80
+const DetachedRows, DetachedCols = 24, 80
 
 // bootContainer runs a container's VM until it stops, and returns the
 // container's exit code. The caller holds the container's lock.
 //
 // layer is the writable layer, being opened; if nil, bootContainer opens
 // the container's own, while it reads the kernel.
-func bootContainer(ctx context.Context, root string, rec *container.Container, layer *pendingLayer, policy image.Policy, proxy *signalProxy, bio bootIO, hooks bootHooks, logf func(string, ...any), start time.Time) (int, error) {
+func bootContainer(ctx context.Context, root string, rec *container.Container, layer *PendingLayer, policy image.Policy, proxy *SignalProxy, bio BootIO, hooks bootHooks, logf func(string, ...any), start time.Time) (int, error) {
 	const fail = guestspec.ExitRuntime
 	cfg := rec.Config
 
 	if layer == nil {
-		layer = startLayer(rec.RW(), cfg.StorageSize, cfg.AutoRemove)
-		defer layer.close()
+		layer = StartLayer(rec.RW(), cfg.StorageSize, cfg.AutoRemove)
+		defer layer.Close()
 	}
 
 	storage, err := openStorage(root, cfg, logf)
@@ -166,15 +166,15 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 	spec := guestspec.Spec{
 		Args: cfg.Args, Env: cfg.Env, Cwd: cfg.Cwd, User: cfg.User,
 		Hostname: cfg.Hostname, Hosts: cfg.Hosts, Layers: len(storage.layers), Scratch: lr.file != nil, KeepLayer: keep,
-		Volumes: len(storage.volumes), Debug: cfg.Debug, Stdin: cfg.Stdin, TTY: cfg.TTY, Network: guestNetwork(cfg.Network),
+		Volumes: len(storage.volumes), Debug: cfg.Debug, Stdin: cfg.Stdin, TTY: cfg.TTY, Network: GuestNetwork(cfg.Network),
 		Mounts: cfg.Mounts, WaitStart: hooks.waitStart, Reclaim: reclaimPolicy(logf),
 		ClockSync: clockPeriod(logf) > 0,
 	}
 	if cfg.TTY {
-		if bio.terminal {
-			spec.Rows, spec.Cols, _ = terminalSize(os.Stdout)
+		if bio.Terminal {
+			spec.Rows, spec.Cols, _ = TerminalSize(os.Stdout)
 		} else {
-			spec.Rows, spec.Cols = detachedRows, detachedCols
+			spec.Rows, spec.Cols = DetachedRows, DetachedCols
 		}
 	}
 	initrd, err := guestFiles.initramfs(&spec)
@@ -188,7 +188,7 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 	// writable layer, then the volumes.
 	var stdin io.Reader
 	if cfg.Stdin {
-		stdin = bio.stdin
+		stdin = bio.Stdin
 		if stdin == nil {
 			stdin = strings.NewReader("")
 		}
@@ -198,8 +198,8 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 	status := &eventWriter{onReady: hooks.ready, onStarted: hooks.started, onStats: guest.deliver, onFreeze: freezer.deliver}
 	console := &virtio.Console{
 		Ports: []virtio.Port{
-			{Name: guestspec.PortStdout, Out: bio.stdout},
-			{Name: guestspec.PortStderr, Out: bio.stderr},
+			{Name: guestspec.PortStdout, Out: bio.Stdout},
+			{Name: guestspec.PortStderr, Out: bio.Stderr},
 			{Name: guestspec.PortControl, Out: status, In: proxy.queue},
 			{Name: guestspec.PortStdin, In: stdin},
 		},
@@ -252,16 +252,16 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 	tail := &ring{max: consoleTail}
 	consoleLine := tail.add
 	if cfg.Debug {
-		consoleLine = func(line string) { fmt.Fprintln(bio.diag, line) }
+		consoleLine = func(line string) { fmt.Fprintln(bio.Diag, line) }
 	}
 
-	var term *consoleState
-	if cfg.TTY && bio.terminal {
-		term, err = setupConsole(cfg.Stdin, isTerminal(os.Stdout))
+	var term *ConsoleState
+	if cfg.TTY && bio.Terminal {
+		term, err = SetupConsole(cfg.Stdin, IsTerminal(os.Stdout))
 		if err != nil {
 			return fail, fmt.Errorf("setting up the console: %w", err)
 		}
-		defer term.restore()
+		defer term.Restore()
 		done := make(chan struct{})
 		defer close(done)
 		go watchSize(done, spec.Rows, spec.Cols, proxy.queue)
@@ -277,12 +277,12 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 		ConsoleLine: consoleLine,
 		Logf:        logf,
 	})
-	term.restore() // before anything else is printed
+	term.Restore() // before anything else is printed
 	for _, s := range res.Stats {
 		logf("%s", s)
 	}
 	failed := func() {
-		tail.print(bio.diag)
+		tail.print(bio.Diag)
 		if hooks.failed != nil {
 			hooks.failed(tail.lines)
 		}

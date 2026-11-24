@@ -20,6 +20,7 @@ import (
 	"github.com/quasidock/runwhp/internal/gc"
 	"github.com/quasidock/runwhp/internal/guestspec"
 	"github.com/quasidock/runwhp/internal/image"
+	"github.com/quasidock/runwhp/internal/vmm"
 )
 
 // interruptible returns a context that ends on Ctrl+C, and its stop.
@@ -166,7 +167,7 @@ func printConsole(lines []string) {
 	if len(lines) == 0 {
 		return
 	}
-	(&ring{lines: lines}).print(os.Stderr)
+	vmm.PrintConsole(os.Stderr, lines)
 }
 
 const startUsage = `Usage: runwhp start [-a [-i]] CONTAINER...
@@ -253,7 +254,7 @@ func startContainer(ctx context.Context, store *container.Store, ref string) err
 		}
 		// Fetch runwhp's kernel here, should it be missing, where its
 		// progress shows; the background runwhp never uses the network.
-		if _, err := resolveKernel(ctx, root, c.Config.Kernel, image.PullMissing); err != nil {
+		if _, err := vmm.ResolveKernel(ctx, root, c.Config.Kernel, image.PullMissing); err != nil {
 			return err
 		}
 		if rep, err = spawnSupervisor(ctx, root, c, false, true); err != nil {
@@ -308,7 +309,7 @@ func startAttached(ctx context.Context, done func(), store *container.Store, ref
 		if c.Config.AutoRemove {
 			return fail, fmt.Errorf("container %s was run with --rm, and cannot be started again", c.Short())
 		}
-		if _, err := resolveKernel(ctx, root, c.Config.Kernel, image.PullMissing); err != nil {
+		if _, err := vmm.ResolveKernel(ctx, root, c.Config.Kernel, image.PullMissing); err != nil {
 			return fail, err
 		}
 		// Its input comes through the attach, not from this process.
@@ -511,7 +512,7 @@ func stopContainer(store *container.Store, ref string, timeout time.Duration) er
 	if !c.State.Active() {
 		return nil
 	}
-	err = ask(c, container.Request{Op: container.OpStop, Timeout: timeout.Seconds()}, timeout+killGrace+30*time.Second)
+	err = ask(c, container.Request{Op: container.OpStop, Timeout: timeout.Seconds()}, timeout+vmm.KillGrace+30*time.Second)
 	if err != nil && !strings.Contains(err.Error(), "not running") {
 		return err
 	}
@@ -683,7 +684,7 @@ func killAndWait(store *container.Store, c *container.Container) error {
 	if err != nil && !strings.Contains(err.Error(), "not running") {
 		return err
 	}
-	if waitUnlocked(c, killGrace+5*time.Second) == nil {
+	if waitUnlocked(c, vmm.KillGrace+5*time.Second) == nil {
 		return nil
 	}
 	if c.State.Pid > 0 {

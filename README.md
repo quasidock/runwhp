@@ -980,6 +980,7 @@ bzImage.
 | Path | Contents |
 | --- | --- |
 | [`cmd/runwhp`](cmd/runwhp) | Command line |
+| [`internal/vmm`](internal/vmm) | Running a container's VM: its devices and storage, the guest's boot, the supervisor that holds the container and serves its pipe, attached clients and pause, and the helper guests that read image layers and stopped containers' files |
 | [`internal/whp`](internal/whp) | Bindings for `WinHvPlatform.dll` and `WinHvEmulation.dll` |
 | [`internal/vm`](internal/vm) | Partition setup, guest memory committed as it is touched, vCPU loops, decoding of device register accesses, processor topology, serial port, RTC stub, I/O APIC |
 | [`internal/boot`](internal/boot) | Kernel loader, page tables, ACPI tables, initramfs builder. Builds on any OS |

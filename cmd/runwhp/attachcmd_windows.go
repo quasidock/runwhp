@@ -20,6 +20,7 @@ import (
 
 	"github.com/quasidock/runwhp/internal/container"
 	"github.com/quasidock/runwhp/internal/guestspec"
+	"github.com/quasidock/runwhp/internal/vmm"
 )
 
 const attachUsage = `Usage: runwhp attach [flags] CONTAINER
@@ -131,19 +132,19 @@ func attachContainer(store *container.Store, c *container.Container, o attachOpt
 	}
 
 	input := rep.Stdin && !o.noStdin
-	console := isTerminal(os.Stdin)
+	console := vmm.IsTerminal(os.Stdin)
 	tty := c.Config.TTY
 	done := make(chan struct{})
 	defer close(done)
 	if tty {
-		term, err := setupConsole(input && console, isTerminal(os.Stdout))
+		term, err := vmm.SetupConsole(input && console, vmm.IsTerminal(os.Stdout))
 		if err != nil {
 			return fail, fmt.Errorf("setting up the console: %w", err)
 		}
-		defer term.restore()
-		if rows, cols, ok := terminalSize(os.Stdout); ok && rows > 0 {
+		defer term.Restore()
+		if rows, cols, ok := vmm.TerminalSize(os.Stdout); ok && rows > 0 {
 			sendControl(guestspec.Control{Rows: rows, Cols: cols})
-			go followSize(done, rows, cols, sendControl)
+			go vmm.FollowSize(done, rows, cols, sendControl)
 		}
 	}
 
@@ -174,7 +175,7 @@ func attachContainer(store *container.Store, c *container.Container, o attachOpt
 	if input {
 		var in io.Reader = os.Stdin
 		if console {
-			in = &detachFilter{r: &consoleReader{h: windows.Handle(os.Stdin.Fd()), lines: !tty}, keys: o.detachKeys}
+			in = &detachFilter{r: vmm.NewConsoleReader(windows.Handle(os.Stdin.Fd()), !tty), keys: o.detachKeys}
 		}
 		go func() {
 			buf := make([]byte, 32<<10)

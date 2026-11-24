@@ -1,6 +1,6 @@
 //go:build windows
 
-package main
+package vmm
 
 import (
 	"bufio"
@@ -54,7 +54,7 @@ func bootLayerServer(ctx context.Context, root string, paths []string, debug boo
 	if len(paths) > serverLayers {
 		return nil, fmt.Errorf("%d layers are more than one guest can serve", len(paths))
 	}
-	g, err := loadGuest(ctx, root, explicitKernel(""), nil, "", image.PullMissing)
+	g, err := loadGuest(ctx, root, ExplicitKernel(""), nil, "", image.PullMissing)
 	if err != nil {
 		return nil, err
 	}
@@ -208,10 +208,10 @@ func (f *serverFiles) Get(name string) (io.ReadCloser, error) {
 
 func (f *serverFiles) Close() error { return f.conn.Close() }
 
-// layerServers serves the layers save rebuilds, in the order it rebuilds
+// LayerServers serves the layers save rebuilds, in the order it rebuilds
 // them, booting a server for each run of up to serverLayers of them as it
 // comes to it.
-type layerServers struct {
+type LayerServers struct {
 	ctx    context.Context
 	root   string
 	layers *layer.Store
@@ -223,7 +223,7 @@ type layerServers struct {
 	curLen   int
 }
 
-func (ls *layerServers) Open(diffID string, names []string, sizes []int64) (image.LayerFiles, error) {
+func (ls *LayerServers) Open(diffID string, names []string, sizes []int64) (image.LayerFiles, error) {
 	i := slices.Index(ls.order, diffID)
 	if i < 0 {
 		return nil, fmt.Errorf("layer %s was not planned", diffID)
@@ -249,7 +249,7 @@ func (ls *layerServers) Open(diffID string, names []string, sizes []int64) (imag
 }
 
 // Close stops the server running, if any.
-func (ls *layerServers) Close() {
+func (ls *LayerServers) Close() {
 	if ls.cur != nil {
 		ls.cur.close()
 		ls.cur = nil
@@ -262,7 +262,7 @@ func (ls *layerServers) Close() {
 // container, serving its files on guestspec.RootPort. It runs no process,
 // and has no network or balloon. The caller holds the container's lock
 // throughout, so the container cannot start meanwhile.
-type rootGuest struct {
+type RootGuest struct {
 	vsock   *virtio.Vsock
 	queue   *controlQueue
 	storage *containerStorage
@@ -276,15 +276,15 @@ type rootGuest struct {
 // systems and stop once asked.
 const rootShutdownWait = 10 * time.Second
 
-// bootRootServer boots a root server for the stopped container c, and
+// BootRootServer boots a root server for the stopped container c, and
 // returns once init is ready to serve.
-func bootRootServer(ctx context.Context, root string, c *container.Container) (_ *rootGuest, err error) {
+func BootRootServer(ctx context.Context, root string, c *container.Container) (_ *RootGuest, err error) {
 	cfg := c.Config
 	logf := func(string, ...any) {}
 	if cfg.Debug {
 		logf = func(format string, a ...any) { fmt.Fprintf(os.Stderr, format+"\n", a...) }
 	}
-	g := &rootGuest{vsock: &virtio.Vsock{CID: guestspec.GuestCID, Logf: logf}, queue: newControlQueue(), done: make(chan error, 1), logf: logf}
+	g := &RootGuest{vsock: &virtio.Vsock{CID: guestspec.GuestCID, Logf: logf}, queue: newControlQueue(), done: make(chan error, 1), logf: logf}
 	defer func() {
 		if err != nil {
 			g.closeFiles()
@@ -314,7 +314,7 @@ func bootRootServer(ctx context.Context, root string, c *container.Container) (_
 		return nil, err
 	}
 	spec := guestspec.Spec{
-		User: cfg.User, Hostname: cfg.Hostname, Hosts: cfg.Hosts, Network: guestNetwork(cfg.Network),
+		User: cfg.User, Hostname: cfg.Hostname, Hosts: cfg.Hosts, Network: GuestNetwork(cfg.Network),
 		Layers: len(g.storage.layers), Scratch: g.rw != nil, KeepLayer: g.rw != nil, Volumes: len(g.storage.volumes),
 		Mounts: cfg.Mounts, Debug: cfg.Debug, Serve: guestspec.ServeRoot,
 	}
@@ -353,7 +353,7 @@ func bootRootServer(ctx context.Context, root string, c *container.Container) (_
 		})
 		g.done <- err
 	}()
-	fail := func(err error) (*rootGuest, error) {
+	fail := func(err error) (*RootGuest, error) {
 		tailMu.Lock()
 		tail.print(os.Stderr)
 		tailMu.Unlock()
@@ -381,14 +381,14 @@ func bootRootServer(ctx context.Context, root string, c *container.Container) (_
 	}
 }
 
-// dial connects to the guest's root server.
-func (g *rootGuest) dial(ctx context.Context) (io.ReadWriteCloser, error) {
+// Dial connects to the guest's root server.
+func (g *RootGuest) Dial(ctx context.Context) (io.ReadWriteCloser, error) {
 	return g.vsock.Dial(ctx, guestspec.RootPort)
 }
 
-// close asks init to freeze the writable layer and volumes and stop the
+// Close asks init to freeze the writable layer and volumes and stop the
 // machine, waits for it, and lets go of the disks.
-func (g *rootGuest) close() {
+func (g *RootGuest) Close() {
 	g.queue.send(guestspec.Control{Shutdown: true})
 	select {
 	case err := <-g.done:
@@ -400,7 +400,7 @@ func (g *rootGuest) close() {
 }
 
 // stop stops the machine at once, and lets go of the disks.
-func (g *rootGuest) stop() {
+func (g *RootGuest) stop() {
 	if g.cancel != nil {
 		g.cancel()
 		err := <-g.done
@@ -409,7 +409,7 @@ func (g *rootGuest) stop() {
 	g.closeFiles()
 }
 
-func (g *rootGuest) closeFiles() {
+func (g *RootGuest) closeFiles() {
 	if g.storage != nil {
 		g.storage.close()
 	}

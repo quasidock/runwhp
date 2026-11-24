@@ -17,6 +17,7 @@ import (
 
 	"github.com/quasidock/runwhp/internal/image"
 	"github.com/quasidock/runwhp/internal/storefile"
+	"github.com/quasidock/runwhp/internal/vmm"
 )
 
 const saveUsage = `Usage: runwhp save [-o FILE] IMAGE...
@@ -46,7 +47,7 @@ func cmdSave(args []string, stdout io.Writer) int {
 		fs.Usage()
 		return 2
 	}
-	if f, ok := stdout.(*os.File); ok && output == "" && isTerminal(f) {
+	if f, ok := stdout.(*os.File); ok && output == "" && vmm.IsTerminal(f) {
 		errorf("save: cowardly refusing to save to a terminal. Use the -o flag or redirect")
 		return 1
 	}
@@ -89,7 +90,7 @@ func cmdSave(args []string, stdout io.Writer) int {
 		imgs = append(imgs, si)
 	}
 
-	src := &layerServers{ctx: ctx, root: root, layers: is.Layers, order: image.SaveLayers(imgs), debug: debug}
+	src := vmm.NewLayerServers(ctx, root, is.Layers, image.SaveLayers(imgs), debug)
 	defer src.Close()
 	write := func(w io.Writer) error {
 		bw := bufio.NewWriterSize(w, 1<<20)

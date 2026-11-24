@@ -20,6 +20,7 @@ import (
 	"github.com/moby/go-archive"
 
 	"github.com/quasidock/runwhp/internal/container"
+	"github.com/quasidock/runwhp/internal/vmm"
 )
 
 const cpUsage = `Usage: runwhp cp [-a] [-L] [-q] CONTAINER:SRC_PATH DEST_PATH|-
@@ -70,7 +71,7 @@ func cmdCp(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if !quietSet {
 		// As docker cp: nothing to say unless a console reads it.
 		f, ok := stdout.(*os.File)
-		o.quiet = !ok || !isTerminal(f)
+		o.quiet = !ok || !vmm.IsTerminal(f)
 	}
 	store, ok := openContainers()
 	if !ok {

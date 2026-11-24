@@ -4,45 +4,27 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
-	"github.com/quasidock/runwhp/internal/boot"
 	"github.com/quasidock/runwhp/internal/container"
 	"github.com/quasidock/runwhp/internal/gc"
 	"github.com/quasidock/runwhp/internal/guestspec"
 	"github.com/quasidock/runwhp/internal/image"
-	"github.com/quasidock/runwhp/internal/kernel"
 	"github.com/quasidock/runwhp/internal/vm"
+	"github.com/quasidock/runwhp/internal/vmm"
 	"github.com/quasidock/runwhp/internal/volume"
-)
-
-const (
-	// pci=off: ACPI needs PCI support built in, but there is no PCI bus to
-	// probe. no5lvl: on CPUs with 5-level paging, the bzImage decompressor
-	// would otherwise switch paging modes through a trampoline in low
-	// memory, which runwhp's boot layout has not been tried with.
-	// swiotlb=noforce: with RAM above 4 GiB, the kernel would otherwise
-	// set aside and zero 64 MiB of bounce buffers for devices that cannot
-	// reach it, and no runwhp device needs them.
-	// page_reporting_order=9: report free RAM to the balloon in blocks of
-	// 2 MiB, the unit runwhp gives back, rather than the default 4 MiB.
-	baseCmdline = "console=ttyS0 nokaslr no5lvl pci=off swiotlb=noforce page_reporting.page_reporting_order=9 panic=-1 reboot=acpi"
-	consoleTail = 200 // kernel console lines kept for error reports
 )
 
 type listFlag []string
@@ -191,14 +173,15 @@ func cmdRun(args []string) int {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	proxy := &signalProxy{stop: cancel, queue: newControlQueue(), logf: func(string, ...any) {}}
+	proxyLogf := func(string, ...any) {}
 	if o.debug {
-		proxy.logf = func(format string, a ...any) { fmt.Fprintf(os.Stderr, "[vmm] "+format+"\n", a...) }
+		proxyLogf = func(format string, a ...any) { fmt.Fprintf(os.Stderr, "[vmm] "+format+"\n", a...) }
 	}
+	proxy := vmm.NewSignalProxy(cancel, proxyLogf)
 	sigs := make(chan os.Signal, 4)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sigs)
-	go proxy.run(sigs)
+	go proxy.Run(sigs)
 	code, err := run(ctx, &o, entrypointSet, fs.Args(), proxy)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -210,9 +193,9 @@ func cmdRun(args []string) int {
 	return code
 }
 
-func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, proxy *signalProxy) (int, error) {
+func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, proxy *vmm.SignalProxy) (int, error) {
 	const fail = guestspec.ExitRuntime
-	if o.interactive && o.tty && !isTerminal(os.Stdin) {
+	if o.interactive && o.tty && !vmm.IsTerminal(os.Stdin) {
 		return fail, errors.New("the input device is not a TTY; if you are using mintty, try prefixing the command with 'winpty'")
 	}
 	root, err := storeRoot()
@@ -232,14 +215,14 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 	// A --rm container's writable layer is a scratch disk, made while the
 	// image is resolved; a kept one is made in the container's directory
 	// once there is one.
-	var layer *pendingLayer
+	var layer *vmm.PendingLayer
 	if o.rm {
 		size, err := parseStorageOpts(o.storageOpts)
 		if err != nil {
 			return fail, err
 		}
-		layer = startLayer(scratchPath(root), size, true)
-		defer layer.close()
+		layer = vmm.StartLayer(vmm.ScratchPath(root), size, true)
+		defer layer.Close()
 	}
 	// A prune waits until the container is recorded, and keeps its layers.
 	release, err := gc.Hold(root)
@@ -259,17 +242,17 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 		return fail, err
 	}
 	if layer == nil {
-		layer = startLayer(rec.RW(), cfg.StorageSize, false)
-		defer layer.close()
+		layer = vmm.StartLayer(rec.RW(), cfg.StorageSize, false)
+		defer layer.Close()
 	}
-	sup, err := supervise(root, store, rec, container.OutputTerminal)
+	sup, err := vmm.Supervise(root, store, rec, container.OutputTerminal)
 	if err != nil {
-		layer.close()
+		layer.Close()
 		store.Remove(rec)
 		return fail, err
 	}
 	logf("%4d ms  container %s recorded: %d layers", time.Since(start).Milliseconds(), rec.Short(), max(len(cfg.Layers), len(cfg.LayerFiles)))
-	bio := foregroundIO(cfg)
+	bio := vmm.ForegroundIO(cfg)
 	var lw *container.LogWriter
 	if !cfg.AutoRemove && cfg.KeepsLog() {
 		// A kept container's output also goes to its log, as Docker keeps
@@ -278,31 +261,20 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 			errorf("opening container %s's log: %v", rec.Short(), err)
 		} else {
 			defer lw.Close()
-			bio.stdout = teeWriter{bio.stdout, lw.Stream(container.Stdout)}
-			bio.stderr = teeWriter{bio.stderr, lw.Stream(container.Stderr)}
+			bio.Stdout = teeWriter{bio.Stdout, lw.Stream(container.Stdout)}
+			bio.Stderr = teeWriter{bio.Stderr, lw.Stream(container.Stderr)}
 		}
 	}
-	sup.streams(&bio, false, false) // its input stays this console's
-	sup.policy = cfg.Restart
-	sup.backoff = restartBackoff(errorf)
-	b := sup.beginBoot(proxy)
-	code, err := bootContainer(ctx, root, rec, layer, policy, proxy, bio, sup.hooks(b, false), logf, start)
-	layer.close()
-	if restart, delay := sup.endBoot(b, code, err); restart {
-		// As Docker's daemon would, a runwhp in the background starts it
-		// again, and this one exits with how it ended.
-		if lw != nil {
-			lw.Close()
-		}
-		herr := sup.handOff(ctx, delay)
-		if herr == nil {
-			return code, err
-		}
-		errorf("could not hand container %s over to start it again: %v", rec.Short(), herr)
-		sup.stoppedRestarting()
-	}
-	sup.finish()
-	return code, err
+	return sup.RunForeground(ctx, vmm.Foreground{
+		Layer: layer, Policy: policy, Proxy: proxy, IO: bio,
+		Backoff: restartBackoff(errorf), Logf: logf, Start: start,
+		BeforeHandOff: func() {
+			if lw != nil {
+				lw.Close()
+			}
+		},
+		HandOff: spawnHandOff,
+	})
 }
 
 // resolveConfig turns run's flags and arguments into a container's
@@ -395,7 +367,7 @@ func resolveConfig(ctx context.Context, root string, o *runOptions, entrypointSe
 	cfg.Args, cfg.Env, cfg.Cwd, cfg.User = process.Args, process.Env, process.Cwd, process.User
 	cfg.Entrypoint, cfg.Cmd = process.Entrypoint, process.Cmd
 
-	if err := checkDevices(cfg, len(plan.volumes)); err != nil {
+	if err := vmm.CheckDevices(cfg, len(plan.volumes)); err != nil {
 		return nil, err
 	}
 
@@ -420,11 +392,11 @@ func resolveConfig(ctx context.Context, root string, o *runOptions, entrypointSe
 
 	// The kernel is fetched now, if it has to be, so that booting later
 	// needs no network. Only a kernel named explicitly is recorded.
-	if cfg.Kernel = explicitKernel(o.kernel); cfg.Kernel != "" {
+	if cfg.Kernel = vmm.ExplicitKernel(o.kernel); cfg.Kernel != "" {
 		if cfg.Kernel, err = filepath.Abs(cfg.Kernel); err != nil {
 			return nil, err
 		}
-	} else if _, err := resolveKernel(ctx, root, "", policy); err != nil {
+	} else if _, err := vmm.ResolveKernel(ctx, root, "", policy); err != nil {
 		return nil, err
 	}
 	if o.init != "" {
@@ -452,93 +424,6 @@ func appendAbs(list []string, p string) ([]string, error) {
 	return append(list, abs), nil
 }
 
-// checkDevices checks that the container's devices fit the I/O APIC: each
-// takes an interrupt line.
-func checkDevices(cfg *container.Config, volumes int) error {
-	// The console, the vsock device, the balloon and the writable layer,
-	// and the others named here.
-	others, users := 4, []string{}
-	if cfg.Network {
-		others++
-		users = append(users, "the network")
-	}
-	consistent, delegated := false, false
-	for _, s := range cfg.Shares {
-		consistent, delegated = consistent || !s.Delegated, delegated || s.Delegated
-	}
-	if consistent {
-		others++
-		users = append(users, "bind mounts")
-	}
-	if delegated {
-		// Delegated bind mounts have a file system of their own.
-		others++
-		users = append(users, "delegated bind mounts")
-	}
-	if volumes > 0 {
-		others += volumes
-		users = append(users, fmt.Sprintf("%d volumes", volumes))
-	}
-	layers := max(len(cfg.Layers), len(cfg.LayerFiles))
-	if n := others + layers; n > vm.MaxDevices {
-		what := fmt.Sprintf("the image's %d layers", layers)
-		if len(users) > 0 {
-			what += ", " + strings.Join(users, ", ")
-		}
-		return fmt.Errorf("too many devices: %s, the console, the vsock device, the balloon and the writable layer make %d, and runwhp has room for %d", what, n, vm.MaxDevices)
-	}
-	return nil
-}
-
-// explicitKernel is the bzImage --kernel names, else the one RUNWHP_KERNEL
-// names, else empty, which means runwhp's own kernel.
-func explicitKernel(flag string) string {
-	if flag != "" {
-		return flag
-	}
-	return os.Getenv("RUNWHP_KERNEL")
-}
-
-// resolveKernel returns the bzImage to boot: path if it is not empty, else
-// runwhp's own kernel from the store, fetched first if it is missing and the
-// pull policy allows.
-func resolveKernel(ctx context.Context, root, path string, policy image.Policy) (string, error) {
-	if path != "" {
-		return path, nil
-	}
-	store := kernel.Open(root)
-	store.Progress = os.Stderr
-	path, err := store.Ensure(ctx, kernel.Default, policy != image.PullNever)
-	if errors.Is(err, kernel.ErrNotPresent) {
-		return "", fmt.Errorf("%w, and --pull=never was given; run 'runwhp pull IMAGE' once to fetch it, or pass --kernel PATH", err)
-	}
-	return path, err
-}
-
-// readModules reads the kernel modules given with --module, for booting a
-// kernel that builds drivers runwhp needs as modules. WSL's kernel, for one,
-// needs its virtio_blk.ko.
-func readModules(paths []string) ([]boot.File, error) {
-	if len(paths) == 0 {
-		return nil, nil
-	}
-	files := []boot.File{{Name: "modules", Mode: boot.ModeDir | 0o755}}
-	for _, p := range paths {
-		data, err := os.ReadFile(p)
-		if err != nil {
-			return nil, err
-		}
-		files = append(files, boot.File{Name: "modules/" + filepath.Base(p), Mode: boot.ModeFile | 0o644, Data: data})
-	}
-	return files, nil
-}
-
-// defaultMemory is half this machine's memory, in whole 2 MiB pages, and
-// at least 512 MiB, as WSL sizes its VM.
-func defaultMemory() uint64 {
-	return max(vm.MaxMemory()/2&^(2<<20-1), 512<<20)
-}
-
 // parseMemory reads a size the way docker run -m does (b, k, m or g suffix,
 // bytes without one) and rounds it up to 2 MiB. "" means defaultMemory.
 //
@@ -548,7 +433,7 @@ func defaultMemory() uint64 {
 // start-up per GiB, which it spends describing them.
 func parseMemory(s string) (uint64, error) {
 	if s == "" {
-		return defaultMemory(), nil
+		return vmm.DefaultMemory(), nil
 	}
 	n, err := parseSize(s)
 	if err != nil {
@@ -561,10 +446,6 @@ func parseMemory(s string) (uint64, error) {
 	return size, nil
 }
 
-// defaultCPUs caps the default vCPU count. Build tools size their work by
-// nproc, and four jobs still fit in the default 512m.
-const defaultCPUs = 4
-
 // parseCPUs reads --cpus: a whole number of vCPUs, from 1 to the host's
 // logical processors. Docker's --cpus is a CPU-time quota and takes
 // fractions; runwhp's counts processors, so a fraction is refused rather
@@ -574,7 +455,7 @@ func parseCPUs(s string, host int) (int, error) {
 	most := min(host, vm.MaxCPUs)
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return min(most, defaultCPUs), nil
+		return min(most, vmm.DefaultCPUs), nil
 	}
 	n, err := strconv.Atoi(s)
 	if err != nil {
@@ -590,82 +471,4 @@ func parseCPUs(s string, host int) (int, error) {
 		return 0, fmt.Errorf("--cpus must be between 1 and %d, the logical processors on this machine", most)
 	}
 	return n, nil
-}
-
-// eventWriter reads the Events init sends on the control port, as JSON
-// lines, and keeps how the container ended.
-type eventWriter struct {
-	mu     sync.Mutex
-	buf    []byte
-	status guestspec.Status
-	ok     bool
-	// onReady, if set, is called when a container booted to wait for its
-	// start is ready; onStarted, when the container process starts, with
-	// its pid in the guest; onStats, with statistics init was asked for;
-	// onFreeze, with init's answer to a freeze or thaw.
-	// They are called with mu held, on the console's output goroutine, so
-	// they must not block.
-	onReady   func()
-	onStarted func(pid int)
-	onStats   func(*guestspec.GuestStats)
-	onFreeze  func(*guestspec.Freeze)
-}
-
-func (w *eventWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.buf = append(w.buf, p...)
-	for {
-		i := strings.IndexByte(string(w.buf), '\n')
-		if i < 0 {
-			break
-		}
-		var ev guestspec.Event
-		if err := json.Unmarshal(w.buf[:i], &ev); err == nil {
-			switch {
-			case ev.Exited:
-				w.status, w.ok = guestspec.Status{Exit: ev.Exit, Error: ev.Error}, true
-			case ev.Ready && w.onReady != nil:
-				w.onReady()
-			case ev.Started && w.onStarted != nil:
-				w.onStarted(ev.Pid)
-			case ev.Stats != nil && w.onStats != nil:
-				w.onStats(ev.Stats)
-			case ev.Freeze != nil && w.onFreeze != nil:
-				w.onFreeze(ev.Freeze)
-			}
-		}
-		w.buf = w.buf[i+1:]
-	}
-	return len(p), nil
-}
-
-// get returns how the container ended, once init has said.
-func (w *eventWriter) get() (guestspec.Status, bool) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.status, w.ok
-}
-
-// ring keeps the last lines of the kernel console.
-type ring struct {
-	max   int
-	lines []string
-}
-
-func (r *ring) add(line string) {
-	if len(r.lines) == r.max {
-		r.lines = r.lines[1:]
-	}
-	r.lines = append(r.lines, line)
-}
-
-func (r *ring) print(w io.Writer) {
-	if len(r.lines) == 0 {
-		return
-	}
-	fmt.Fprintln(w, "runwhp: last kernel console lines:")
-	for _, l := range r.lines {
-		fmt.Fprintln(w, "  "+l)
-	}
 }

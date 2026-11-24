@@ -6,9 +6,10 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/quasidock/runwhp/internal/vmm"
 )
 
 const usage = `Usage:
@@ -152,10 +153,9 @@ func storeRoot() (string, error) {
 	return filepath.Join(cache, "runwhp"), nil
 }
 
-// diagOut takes runwhp's own messages: stderr, except in a runwhp running
-// a container in the background, whose stderr may be the container's.
-var diagOut io.Writer = os.Stderr
-
+// errorf prints one of runwhp's own messages where vmm.Diag says: stderr,
+// except in a runwhp running a container in the background, whose stderr
+// may be the container's.
 func errorf(format string, a ...any) {
-	fmt.Fprintf(diagOut, "runwhp: "+format+"\n", a...)
+	fmt.Fprintf(vmm.Diag, "runwhp: "+format+"\n", a...)
 }

@@ -1,6 +1,6 @@
 //go:build windows
 
-package main
+package vmm
 
 import (
 	"context"
@@ -25,7 +25,7 @@ type guestBoot struct {
 // loadGuest reads the kernel a guest boots, runwhp's own unless kernelPath
 // names another, init, and the modules in modulePaths.
 func loadGuest(ctx context.Context, root, kernelPath string, modulePaths []string, initPath string, policy image.Policy) (*guestBoot, error) {
-	kernelPath, err := resolveKernel(ctx, root, kernelPath, policy)
+	kernelPath, err := ResolveKernel(ctx, root, kernelPath, policy)
 	if err != nil {
 		return nil, err
 	}

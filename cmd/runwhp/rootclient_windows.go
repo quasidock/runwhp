@@ -15,6 +15,7 @@ import (
 
 	"github.com/quasidock/runwhp/internal/container"
 	"github.com/quasidock/runwhp/internal/guestspec"
+	"github.com/quasidock/runwhp/internal/vmm"
 )
 
 // rootClient reaches a container's files for cp, export, diff and commit:
@@ -50,21 +51,21 @@ func openRoot(ctx context.Context, store *container.Store, root, ref string) (*r
 				if cur, err := store.Get(c.ID); err == nil {
 					c = cur
 				}
-				g, err := bootRootServer(ctx, root, c)
+				g, err := vmm.BootRootServer(ctx, root, c)
 				if err != nil {
 					lock.Close()
 					return nil, err
 				}
 				return &rootClient{c: c, ref: ref, booted: true,
 					dial: func(ctx context.Context) (io.ReadWriteCloser, *bufio.Reader, error) {
-						conn, err := g.dial(ctx)
+						conn, err := g.Dial(ctx)
 						if err != nil {
 							return nil, nil, fmt.Errorf("connecting to the guest serving container %s's files: %w", c.Short(), err)
 						}
 						return conn, bufio.NewReader(conn), nil
 					},
 					release: func() {
-						g.close()
+						g.Close()
 						lock.Close()
 					},
 				}, nil

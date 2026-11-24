@@ -11,6 +11,7 @@ import (
 	"github.com/quasidock/runwhp/internal/container"
 	"github.com/quasidock/runwhp/internal/guestspec"
 	"github.com/quasidock/runwhp/internal/vm"
+	"github.com/quasidock/runwhp/internal/vmm"
 )
 
 const (
@@ -241,11 +242,11 @@ func TestParseMountsDelegated(t *testing.T) {
 
 	// The two file systems take an interrupt line each.
 	cfg := &container.Config{Shares: plan.shares, LayerFiles: make([]string, vm.MaxDevices-6)}
-	if err := checkDevices(cfg, 0); err != nil {
+	if err := vmm.CheckDevices(cfg, 0); err != nil {
 		t.Errorf("layers that fit refused: %v", err)
 	}
 	cfg.LayerFiles = append(cfg.LayerFiles, "one more")
-	if err := checkDevices(cfg, 0); err == nil || !strings.Contains(err.Error(), "delegated bind mounts") {
+	if err := vmm.CheckDevices(cfg, 0); err == nil || !strings.Contains(err.Error(), "delegated bind mounts") {
 		t.Errorf("one layer too many: %v", err)
 	}
 }

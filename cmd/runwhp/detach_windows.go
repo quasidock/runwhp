@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,7 +22,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/quasidock/runwhp/internal/container"
-	"github.com/quasidock/runwhp/internal/image"
+	"github.com/quasidock/runwhp/internal/vmm"
 )
 
 // A container that outlives the command that started it is run by a
@@ -226,18 +225,18 @@ func cmdSupervise(args []string) int {
 	var files []io.Closer
 	if f, err := openDiagLog(rec.DiagLogPath()); err == nil {
 		files = append(files, f)
-		diagOut = f
+		vmm.Diag = f
 		fmt.Fprintf(f, "%s runwhp %d starting container %s\n", time.Now().Format(time.RFC3339), os.Getpid(), rec.Short())
 	} else {
-		diagOut = io.Discard
+		vmm.Diag = io.Discard
 	}
 	cfg := rec.Config
 	logf := func(string, ...any) {}
 	if cfg.Debug {
-		logf = func(format string, a ...any) { fmt.Fprintf(diagOut, "[vmm] "+format+"\n", a...) }
+		logf = func(format string, a ...any) { fmt.Fprintf(vmm.Diag, "[vmm] "+format+"\n", a...) }
 	}
 
-	bio := bootIO{diag: diagOut}
+	bio := vmm.BootIO{Diag: vmm.Diag}
 	output := container.OutputFile
 	var log *container.LogWriter
 	openLog := func() (*container.LogWriter, error) {
@@ -255,7 +254,7 @@ func cmdSupervise(args []string) int {
 		f      *os.File
 		stream byte
 		w      *io.Writer
-	}{{os.Stdout, container.Stdout, &bio.stdout}, {os.Stderr, container.Stderr, &bio.stderr}} {
+	}{{os.Stdout, container.Stdout, &bio.Stdout}, {os.Stderr, container.Stderr, &bio.Stderr}} {
 		if classify(s.f) == handleFile {
 			*s.w = s.f
 			continue
@@ -272,109 +271,35 @@ func cmdSupervise(args []string) int {
 		*s.w, output = l.Stream(s.stream), container.OutputLog
 	}
 	if k := classify(os.Stdin); cfg.Stdin && (k == handleFile || k == handlePipe) {
-		bio.stdin = os.Stdin
+		bio.Stdin = os.Stdin
 	}
 
-	var sup *supervisor
+	var sup *vmm.Supervisor
 	if handedLock != 0 {
 		var lock *container.Lock
 		if lock, err = store.AdoptLock(rec, windows.Handle(handedLock)); err == nil {
-			sup, err = adopt(root, store, rec, lock, restarts)
+			sup, err = vmm.Adopt(root, store, rec, lock, restarts)
 		}
 	} else {
-		sup, err = supervise(root, store, rec, output)
+		sup, err = vmm.Supervise(root, store, rec, output)
 	}
 	if err != nil {
 		report.fail(err, nil)
 		return 1
 	}
-	sup.files = files
 	// With -i and no file or pipe for input, the input is attached runwhps'.
-	sup.streams(&bio, cfg.Stdin && bio.stdin == nil, cfg.StdinOnce)
-
-	sup.policy = cfg.Restart
-	sup.backoff = restartBackoff(errorf)
-	if handedLock != 0 {
-		// The runwhp that handed the container over exits once this one
-		// has it, and the restart's delay goes on here.
-		fmt.Fprintf(diagOut, "%s taking the container over to start it again in %v, as --restart %s says (restart %d)\n",
-			time.Now().Format(time.RFC3339), restartAfter, cfg.Restart, restarts)
-		sup.backoff.Continue(restartAfter)
-		report.ok(container.Restarting)
-		if !sup.waitRestart(restartAfter) {
-			sup.finish()
-			return 0
-		}
-	}
-
-	// The container runs, and runs again as its restart policy says, each
-	// time in a VM of its own on its writable layer.
-	for n := 0; ; n++ {
-		ctx, cancel := context.WithCancel(context.Background())
-		proxy := &signalProxy{stop: cancel, queue: newControlQueue(), logf: logf}
-		b := sup.beginBoot(proxy)
-		if b == nil {
-			cancel()
-			sup.stoppedRestarting()
-			break
-		}
-		bb := bio
-		switch {
-		case sup.stdin != nil:
-			bb.stdin = sup.stdin.view(b.exited)
-		case n > 0:
-			bb.stdin = nil // a file or pipe of input goes to the first run only
-		}
-		hooks := sup.hooks(b, waitStart && n == 0)
-		if n == 0 {
-			// The runwhp that started this one waits to hear how the first
-			// boot went.
-			if waitStart {
-				hooks.ready = func() {
-					sup.isReady(b)
-					report.ok(container.Created)
-				}
-			} else {
-				hooks.started = func(pid int) {
-					sup.started(b, pid)
-					sup.persist()
-					report.ok(container.Running)
-				}
-			}
-		}
-		code, err := bootContainer(ctx, root, rec, nil, image.PullNever, proxy, bb, hooks, logf, time.Now())
-		cancel()
-		if err != nil {
-			errorf("%v", err)
-		}
-		if !report.done() {
-			e := err
-			if e == nil {
-				e = fmt.Errorf("the container exited with %d before it was ready", code)
-			}
-			sup.mu.Lock()
-			console := b.console
-			sup.mu.Unlock()
-			report.failCode(e, code, console)
-		}
-		restart, delay := sup.endBoot(b, code, err)
-		if !restart {
-			break
-		}
-		st := sup.reply()
-		sup.mu.Lock()
-		count := sup.restarts
-		sup.mu.Unlock()
-		fmt.Fprintf(diagOut, "%s container exited with %d; starting it again in %v, as --restart %s says (restart %d)\n",
-			time.Now().Format(time.RFC3339), st.ExitCode, delay, cfg.Restart, count)
-		if cfg.Debug {
-			fmt.Fprintf(diagOut, "[vmm] %d goroutines\n", runtime.NumGoroutine())
-		}
-		if !sup.waitRestart(delay) {
-			break
-		}
-	}
-	sup.finish()
+	sup.RunBackground(vmm.Background{
+		IO:           bio,
+		OpenStdin:    cfg.Stdin && bio.Stdin == nil,
+		StdinOnce:    cfg.StdinOnce,
+		Files:        files,
+		WaitStart:    waitStart,
+		HandedOver:   handedLock != 0,
+		RestartAfter: restartAfter,
+		Backoff:      restartBackoff(errorf),
+		Report:       readinessReport{report},
+		Logf:         logf,
+	})
 	return 0
 }
 
@@ -444,3 +369,15 @@ func (r *readiness) close() {
 		r.sent = true
 	}
 }
+
+// readinessReport reports a background run's first boot on its readiness
+// pipe.
+type readinessReport struct{ r *readiness }
+
+func (r readinessReport) OK(status container.Status) { r.r.ok(status) }
+
+func (r readinessReport) Fail(err error, code int, console []string) {
+	r.r.failCode(err, code, console)
+}
+
+func (r readinessReport) Done() bool { return r.r.done() }

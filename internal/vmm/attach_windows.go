@@ -1,6 +1,6 @@
 //go:build windows
 
-package main
+package vmm
 
 import (
 	"bufio"
@@ -268,7 +268,7 @@ func (a *attachStdin) close() { a.end.Do(func() { close(a.ended) }) }
 
 // attach serves an attached runwhp on c until it detaches or the container
 // stops. What it sent beyond its request waits in r.
-func (s *supervisor) attach(c net.Conn, r *bufio.Reader, req container.Request) {
+func (s *Supervisor) attach(c net.Conn, r *bufio.Reader, req container.Request) {
 	reply := func(rep container.Reply) {
 		data, _ := json.Marshal(rep)
 		c.Write(append(data, '\n'))
@@ -335,7 +335,7 @@ func (s *supervisor) attach(c net.Conn, r *bufio.Reader, req container.Request) 
 
 // control passes on what an attached runwhp may send the container: its
 // terminal's size, and signals.
-func (s *supervisor) control(m guestspec.Control) {
+func (s *Supervisor) control(m guestspec.Control) {
 	var out guestspec.Control
 	if m.Rows > 0 && m.Cols > 0 {
 		out.Rows, out.Cols = m.Rows, m.Cols

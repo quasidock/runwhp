@@ -18,6 +18,7 @@ import (
 	"github.com/quasidock/runwhp/internal/container"
 	"github.com/quasidock/runwhp/internal/guestspec"
 	"github.com/quasidock/runwhp/internal/image"
+	"github.com/quasidock/runwhp/internal/vmm"
 )
 
 const exportUsage = `Usage: runwhp export [-o FILE] CONTAINER
@@ -39,7 +40,7 @@ func cmdExport(args []string, stdout io.Writer) int {
 		fs.Usage()
 		return 2
 	}
-	if f, ok := stdout.(*os.File); ok && output == "" && isTerminal(f) {
+	if f, ok := stdout.(*os.File); ok && output == "" && vmm.IsTerminal(f) {
 		errorf("export: cowardly refusing to save to a terminal. Use the -o flag or redirect")
 		return 1
 	}

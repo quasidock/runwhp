@@ -1,4 +1,4 @@
-package main
+package vmm
 
 import (
 	"testing"
@@ -10,7 +10,7 @@ import (
 
 // testSupervisor runs no VM: boots are begun and ended by the test, which
 // stands in for bootContainer.
-func testSupervisor(t *testing.T, policy string) *supervisor {
+func testSupervisor(t *testing.T, policy string) *Supervisor {
 	t.Helper()
 	root := t.TempDir()
 	store := container.Open(root)
@@ -24,7 +24,7 @@ func testSupervisor(t *testing.T, policy string) *supervisor {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := supervise(root, store, rec, container.OutputLog)
+	s, err := Supervise(root, store, rec, container.OutputLog)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,13 +40,13 @@ func testSupervisor(t *testing.T, policy string) *supervisor {
 	return s
 }
 
-func testProxy(t *testing.T) *signalProxy {
-	return &signalProxy{stop: func() {}, queue: newControlQueue(), logf: t.Logf}
+func testProxy(t *testing.T) *SignalProxy {
+	return &SignalProxy{stop: func() {}, queue: newControlQueue(), logf: t.Logf}
 }
 
 // runBoot begins a boot, starts its process unless notStarted, and ends it
 // with code.
-func runBoot(t *testing.T, s *supervisor, code int, notStarted bool) (*vmBoot, bool, time.Duration) {
+func runBoot(t *testing.T, s *Supervisor, code int, notStarted bool) (*vmBoot, bool, time.Duration) {
 	t.Helper()
 	b := s.beginBoot(testProxy(t))
 	if b == nil {
@@ -180,29 +180,6 @@ func TestRestartWait(t *testing.T) {
 	}
 }
 
-func TestStatusTextRestarting(t *testing.T) {
-	now := time.Now()
-	st := container.State{Status: container.Restarting, ExitCode: 1, FinishedAt: now.Add(-3 * time.Second)}
-	if got := statusText(st, now); got != "Restarting (1) 3 seconds ago" {
-		t.Errorf("statusText = %q", got)
-	}
-}
-
-func TestRestartBackoffEnv(t *testing.T) {
-	for v, want := range map[string]container.Backoff{
-		"10ms":       {Initial: 10 * time.Millisecond},
-		"10ms,1s":    {Initial: 10 * time.Millisecond, Max: time.Second},
-		"soon":       {},
-		"0s":         {},
-		"10ms,later": {},
-	} {
-		t.Setenv("RUNWHP_RESTART_BACKOFF", v)
-		if got := restartBackoff(t.Logf); got != want {
-			t.Errorf("%q: %+v", v, got)
-		}
-	}
-}
-
 // testFreezer answers each freeze or thaw at once, or with fail.
 func testFreezer(fail string) *guestFreezer {
 	g := &guestFreezer{listening: func() bool { return true }, replies: make(chan *guestspec.Freeze, 1)}
@@ -233,17 +210,14 @@ func TestPause(t *testing.T) {
 	if !s.state.Paused {
 		t.Error("not recorded as paused")
 	}
-	if got := statusText(s.state, time.Now()); got != "Up Less than a second (Paused)" {
-		t.Errorf("statusText = %q", got)
-	}
 	s.pending.Wait()
 	s.persist()
 	c, err := s.store.Get(id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st := stateOf(c); st.Status != container.Paused {
-		t.Errorf("state's status = %q", st.Status)
+	if !c.State.Paused || c.State.Status != container.Running {
+		t.Errorf("recorded state: %+v", c.State)
 	}
 	if r := s.pause(); r.OK || r.Error != "container "+id+" is already paused" {
 		t.Errorf("second pause: %+v", r)

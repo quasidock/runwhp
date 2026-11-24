@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/quasidock/runwhp/internal/image"
+	"github.com/quasidock/runwhp/internal/vmm"
 )
 
 const loadUsage = `Usage: runwhp load [-i FILE] [-q]
@@ -53,7 +54,7 @@ func cmdLoad(args []string, stdin io.Reader, stdout io.Writer) int {
 	} else {
 		// The archive is read out of order, so stdin is kept in the store's
 		// tmp directory first, as Docker keeps it.
-		if sf, ok := stdin.(*os.File); ok && isTerminal(sf) {
+		if sf, ok := stdin.(*os.File); ok && vmm.IsTerminal(sf) {
 			errorf("load: requested load from stdin, but stdin is a console: use -i or redirect")
 			return 1
 		}
@@ -157,7 +158,7 @@ func cmdImport(args []string, stdin io.Reader, stdout io.Writer) int {
 		errorf("import: importing from a URL is not supported: download the file, then import it")
 		return 1
 	case src == "-":
-		if sf, ok := stdin.(*os.File); ok && isTerminal(sf) {
+		if sf, ok := stdin.(*os.File); ok && vmm.IsTerminal(sf) {
 			errorf("import: stdin is a console: redirect a file to it, or name the file")
 			return 1
 		}
