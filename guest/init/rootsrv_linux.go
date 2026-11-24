@@ -263,5 +263,7 @@ func (s *rootServer) export(conn io.Writer) error {
 	if err := s.reply(conn, guestspec.RootReply{}); err != nil {
 		return err
 	}
-	return writeTar(conn, root, tarOptions{})
+	// An anonymous volume's files are in the writable layer, not, as
+	// Docker's are, in a volume of their own.
+	return writeTar(conn, root, tarOptions{excludeBelow: s.anon})
 }

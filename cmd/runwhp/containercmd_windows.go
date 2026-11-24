@@ -156,6 +156,8 @@ const containerUsage = `Usage:
   runwhp container pause CONTAINER...               freeze containers (also: runwhp pause)
   runwhp container unpause CONTAINER...             thaw them (also: runwhp unpause)
   runwhp container cp SRC DEST                      copy files out of or into a container (also: runwhp cp)
+  runwhp container export [-o FILE] CONTAINER       write its files to a tar (also: runwhp export)
+  runwhp container diff CONTAINER                   list what it changed (also: runwhp diff)
 `
 
 // cmdContainer runs runwhp container, Docker's names for runwhp's
@@ -175,6 +177,10 @@ func cmdContainer(args []string, stdin io.Reader, stdout io.Writer) int {
 		return cmdContainerPrune(args, stdin, stdout)
 	case "cp":
 		return cmdCp(args, stdin, stdout, os.Stderr)
+	case "export":
+		return cmdExport(args, stdout)
+	case "diff":
+		return cmdDiff(args, stdout)
 	case "pause":
 		return cmdPause(args, stdout)
 	case "unpause":
