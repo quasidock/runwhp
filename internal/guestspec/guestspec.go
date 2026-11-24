@@ -135,8 +135,9 @@ type Spec struct {
 	// Serve, when not empty, boots the guest for runwhp itself rather than
 	// for a container: with ServeLayers, init mounts the Layers disks
 	// read-only, each on its own, serves their files on ArchivePort, sends
-	// an Event with Ready, and waits for the host to stop the machine. It
-	// runs no process.
+	// an Event with Ready, and waits for the host to stop the machine; with
+	// ServeRoot, init prepares a stopped container's root and mounts as
+	// for a run and serves them on RootPort. Either way it runs no process.
 	Serve string `json:"serve,omitempty"`
 }
 
@@ -211,6 +212,10 @@ type Control struct {
 	// it, in nanoseconds since the Unix epoch. Init brings the guest's
 	// clock to it: gradually when it is close, at once when not.
 	Time int64 `json:"time,omitempty"`
+	// Shutdown ends a guest booted with Spec.Serve set to ServeRoot: init
+	// freezes its file systems and resets the machine, as after a
+	// container's process.
+	Shutdown bool `json:"shutdown,omitempty"`
 	// Freeze, when set, freezes the container's processes, or with Frozen
 	// false thaws them, as docker pause and unpause do. Init answers with
 	// an Event whose Freeze has the same Seq, once they are, or with Error.

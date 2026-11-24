@@ -133,3 +133,36 @@ func openBeneath(dirfd int, name string) (*os.File, int64, error) {
 	}
 	return f, st.Size, nil
 }
+
+// serveRoot is init's work in a guest booted with Spec.Serve set to
+// ServeRoot, for runwhp cp, export, diff and commit on a stopped
+// container: it prepares the container's root, its mounts and its /etc
+// files as for a run, serves them on guestspec.RootPort, and waits for the
+// host to send Control.Shutdown. It runs no process, and has no network.
+func serveRoot(spec *guestspec.Spec, ctl *controller) error {
+	if err := mountRoot(spec); err != nil {
+		return err
+	}
+	if err := prepareRoot(spec); err != nil {
+		return err
+	}
+	user, err := resolveUser(spec)
+	if err != nil {
+		return err
+	}
+	if err := mountAll(spec, user); err != nil {
+		return err
+	}
+	if err := bindEtc(spec); err != nil {
+		return err
+	}
+	if err := enterRoot(); err != nil {
+		return err
+	}
+	startRootServer(spec, user)
+	debugf("serving the container's root")
+	ctl.send(guestspec.Event{Ready: true})
+	ctl.waitShutdown()
+	debugf("shutting down")
+	return nil
+}

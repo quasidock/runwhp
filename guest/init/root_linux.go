@@ -253,8 +253,12 @@ func prepareRoot(spec *guestspec.Spec) error {
 		logf("bringing up lo: %v", err)
 	}
 	if n := spec.Network; n != nil {
-		if err := configureNetwork(n); err != nil {
-			return err
+		// A guest serving a stopped container's files has no network
+		// device, but shows the container its /etc/resolv.conf.
+		if spec.Serve == "" {
+			if err := configureNetwork(n); err != nil {
+				return err
+			}
 		}
 		var resolv strings.Builder
 		for _, server := range n.DNS {

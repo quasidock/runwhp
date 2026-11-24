@@ -121,6 +121,8 @@ func start(begin time.Time, ctl *controller) (guestspec.Status, error) {
 	case "":
 	case guestspec.ServeLayers:
 		return none, serveLayers(&spec, ctl)
+	case guestspec.ServeRoot:
+		return none, serveRoot(&spec, ctl)
 	default:
 		return none, fmt.Errorf("init cannot serve %q", spec.Serve)
 	}
@@ -151,6 +153,9 @@ func start(begin time.Time, ctl *controller) (guestspec.Status, error) {
 	if err := enterRoot(); err != nil {
 		return none, err
 	}
+	// Before the process starts, so that a created container can be copied
+	// into.
+	startRootServer(&spec, user)
 	return runProcess(&spec, user, ports, ctl, mem)
 }
 

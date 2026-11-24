@@ -7,6 +7,7 @@ require (
 	github.com/Microsoft/hcsshim v0.15.0
 	github.com/google/go-containerregistry v0.22.1
 	github.com/klauspost/compress v1.19.2
+	github.com/moby/go-archive v0.3.3
 	github.com/vbatts/tar-split v0.12.3
 	golang.org/x/net v0.59.0
 	golang.org/x/sys v0.49.0
@@ -17,9 +18,14 @@ require (
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/containerd/cgroups/v3 v3.1.3 // indirect
+	github.com/containerd/log v0.1.0 // indirect
 	github.com/docker/cli v29.7.2+incompatible // indirect
 	github.com/docker/docker-credential-helpers v0.9.3 // indirect
 	github.com/google/btree v1.1.2 // indirect
+	github.com/moby/patternmatcher v0.6.1 // indirect
+	github.com/moby/sys/sequential v0.7.0 // indirect
+	github.com/moby/sys/user v0.4.1 // indirect
+	github.com/moby/sys/userns v0.1.0 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
@@ -30,5 +36,4 @@ require (
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
-	gotest.tools/v3 v3.5.2 // indirect
 )

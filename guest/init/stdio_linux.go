@@ -223,10 +223,21 @@ type controller struct {
 	// the first time.
 	clockSet  chan struct{}
 	clockOnce sync.Once
+
+	// shutdown is closed once the host has asked a guest serving files to
+	// end.
+	shutdown     chan struct{}
+	shutdownOnce sync.Once
 }
 
 func newController(waitMode bool) *controller {
-	return &controller{waitMode: waitMode, wake: make(chan struct{}, 1), clockSet: make(chan struct{})}
+	return &controller{waitMode: waitMode, wake: make(chan struct{}, 1), clockSet: make(chan struct{}), shutdown: make(chan struct{})}
+}
+
+// waitShutdown waits for the host to ask a guest serving files to end, or
+// for the control port to close.
+func (c *controller) waitShutdown() {
+	<-c.shutdown
 }
 
 // waitClock waits up to limit for the host's first time to be applied,
@@ -319,6 +330,9 @@ func (c *controller) listen(port *os.File) {
 			// Walking /proc takes a while; signals behind it should not wait.
 			go c.sendStats(m.Stats)
 		}
+		if m.Shutdown {
+			c.shutdownOnce.Do(func() { close(c.shutdown) })
+		}
 		if f := m.Freeze; f != nil {
 			// The kernel takes a while to freeze the processes. Signals sent
 			// after a thaw, as kill sends them, wait for nothing either way:
@@ -333,6 +347,8 @@ func (c *controller) listen(port *os.File) {
 		}
 	}
 	debugf("control port closed: %v", sc.Err())
+	// No host is left to ask a guest serving files to end.
+	c.shutdownOnce.Do(func() { close(c.shutdown) })
 }
 
 // sendStats answers a request for statistics, with as much as init can

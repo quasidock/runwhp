@@ -659,6 +659,17 @@ func (s *supervisor) running() *vmHandles {
 	return s.cur.vm
 }
 
+// withRoot returns the VM of the boot under way, if init has the
+// container's root ready: it is created, or its process runs.
+func (s *supervisor) withRoot() *vmHandles {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if (s.state.Status != container.Running && s.state.Status != container.Created) || s.cur == nil {
+		return nil
+	}
+	return s.cur.vm
+}
+
 // stats reports what the running container uses: its VM's processor time
 // and memory, this process's memory, which holds the guest's, the bytes
 // its devices moved, and what init says of the guest.
@@ -698,11 +709,17 @@ func (s *supervisor) connect(c net.Conn, r *bufio.Reader, req container.Request)
 		data, _ := json.Marshal(rep)
 		c.Write(append(data, '\n'))
 	}
-	if req.Port != guestspec.ExecPort {
-		reply(container.Reply{Error: fmt.Sprintf("vsock port %d is not runwhp exec's", req.Port)})
+	var h *vmHandles
+	switch req.Port {
+	case guestspec.ExecPort:
+		h = s.running()
+	case guestspec.RootPort:
+		// The container's files, from the moment its root is ready.
+		h = s.withRoot()
+	default:
+		reply(container.Reply{Error: fmt.Sprintf("vsock port %d is not runwhp's", req.Port)})
 		return
 	}
-	h := s.running()
 	if h == nil {
 		reply(container.Reply{Error: errNotRunning.Error()})
 		return
@@ -710,7 +727,7 @@ func (s *supervisor) connect(c net.Conn, r *bufio.Reader, req container.Request)
 	s.mu.Lock()
 	paused := s.state.Paused
 	s.mu.Unlock()
-	if paused {
+	if paused && req.Port == guestspec.ExecPort {
 		// An exec's process would start frozen.
 		reply(container.Reply{Error: fmt.Sprintf("Container %s is paused, unpause the container before exec", s.rec.ID)})
 		return
