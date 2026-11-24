@@ -228,7 +228,11 @@ func (s *Supervisor) DialGuest(ctx context.Context, port uint32) (GuestConn, err
 	s.mu.Unlock()
 	if paused && port == guestspec.ExecPort {
 		// An exec's process would start frozen.
-		return nil, fmt.Errorf("Container %s is paused, unpause the container before exec", s.rec.ID)
+		id := s.rec.ID
+		if t := s.rec.Config.Containerd; t != nil {
+			id = t.ID // as containerd's client knows it
+		}
+		return nil, fmt.Errorf("Container %s is paused, unpause the container before exec", id)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
