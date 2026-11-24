@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,7 +15,6 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"github.com/quasidock/runwhp/internal/boot"
 	"github.com/quasidock/runwhp/internal/container"
 	"github.com/quasidock/runwhp/internal/disk"
 	"github.com/quasidock/runwhp/internal/fuse"
@@ -173,23 +171,7 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 			Serial: guestspec.VolumeSerial(i)})
 	}
 
-	kernelPath, err := resolveKernel(ctx, root, cfg.Kernel, policy)
-	if err != nil {
-		return fail, err
-	}
-	kernelImage, err := os.ReadFile(kernelPath)
-	if err != nil {
-		return fail, fmt.Errorf("reading the kernel: %w", err)
-	}
-	bzImage, err := boot.ParseKernel(kernelImage)
-	if err != nil {
-		return fail, fmt.Errorf("%s: %w", kernelPath, err)
-	}
-	modules, err := readModules(cfg.Modules)
-	if err != nil {
-		return fail, err
-	}
-	initBinary, err := readInit(cfg.Init)
+	guestFiles, err := loadGuest(ctx, root, cfg.Kernel, cfg.Modules, cfg.Init, policy)
 	if err != nil {
 		return fail, err
 	}
@@ -217,19 +199,10 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 			spec.Rows, spec.Cols = detachedRows, detachedCols
 		}
 	}
-	specJSON, err := json.Marshal(spec)
+	initrd, err := guestFiles.initramfs(&spec)
 	if err != nil {
 		return fail, err
 	}
-	files := []boot.File{
-		{Name: "dev", Mode: boot.ModeDir | 0o755},
-		{Name: "proc", Mode: boot.ModeDir | 0o755},
-		{Name: "sys", Mode: boot.ModeDir | 0o755},
-		{Name: "init", Mode: boot.ModeFile | 0o755, Data: initBinary},
-		{Name: "runwhp", Mode: boot.ModeDir | 0o755},
-		{Name: guestspec.SpecPath, Mode: boot.ModeFile | 0o644, Data: specJSON},
-	}
-	files = append(files, modules...)
 
 	// Devices: the console, the vsock device and the balloon first, then
 	// the network device and the shares' file systems if any, the delegated
@@ -341,10 +314,6 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 		hooks.attached(handles)
 	}
 
-	cmdline := baseCmdline + " quiet loglevel=3"
-	if cfg.Debug {
-		cmdline = baseCmdline + " loglevel=7"
-	}
 	tail := &ring{max: consoleTail}
 	consoleLine := tail.add
 	if cfg.Debug {
@@ -363,9 +332,9 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 		go watchSize(done, spec.Rows, spec.Cols, proxy.queue)
 	}
 	res, err := vm.Run(ctx, vm.Config{
-		Kernel:      bzImage,
-		Initrd:      boot.CPIO(files),
-		Cmdline:     cmdline,
+		Kernel:      guestFiles.kernel,
+		Initrd:      initrd,
+		Cmdline:     guestCmdline(cfg.Debug),
 		Memory:      cfg.Memory,
 		CPUs:        cfg.CPUs,
 		Devices:     devices,
