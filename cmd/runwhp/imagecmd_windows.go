@@ -27,6 +27,7 @@ const imageUsage = `Usage:
   runwhp image load [-i FILE] [-q]                                           load images from an archive (also: runwhp load)
   runwhp image import [-c CHANGE]... [-m MESSAGE] FILE|- [REPOSITORY[:TAG]]   make an image from a root file system tar (also: runwhp import)
   runwhp image save [-o FILE] IMAGE...                                       write images to an archive docker load takes (also: runwhp save)
+  runwhp image build [flags] PATH|-                                         build an image from a Dockerfile (also: runwhp build)
 
 An image is named by its reference, as pulled, or by its ID or a unique
 prefix of it. Its layers are shared with other images and with containers
@@ -59,6 +60,8 @@ func cmdImage(args []string, stdin io.Reader, stdout io.Writer) int {
 		return cmdImport(args, stdin, stdout)
 	case "save":
 		return cmdSave(args, stdout)
+	case "build":
+		return cmdBuild(args, stdin, stdout, os.Stderr)
 	case "prune":
 		return cmdImagePrune(args, stdin, stdout)
 	case "help", "-h", "-help", "--help":

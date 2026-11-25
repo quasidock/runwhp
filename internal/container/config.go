@@ -84,6 +84,10 @@ type Config struct {
 	Modules []string `json:"modules,omitempty"`
 	Debug   bool     `json:"debug,omitempty"`
 
+	// HideMountPoints keeps the mount points of Mounts out of the writable
+	// layer, as a build step's are.
+	HideMountPoints bool `json:"hideMountPoints,omitempty"`
+
 	// AutoRemove removes the container when it stops, as --rm asks.
 	AutoRemove bool `json:"autoRemove,omitempty"`
 	// Restart is when the runwhp running the container starts it again.
@@ -143,4 +147,7 @@ type Volume struct {
 	Name string `json:"name"`
 	// Size is the size to make it with, should it be missing.
 	Size int64 `json:"size"`
+	// Root, if set, is the store the volume is in, instead of the
+	// container's: a build cache mount's are in the build cache's.
+	Root string `json:"root,omitempty"`
 }

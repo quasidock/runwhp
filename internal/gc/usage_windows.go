@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/quasidock/runwhp/internal/buildcache"
 	"github.com/quasidock/runwhp/internal/container"
 	"github.com/quasidock/runwhp/internal/disk"
 	"github.com/quasidock/runwhp/internal/image"
@@ -37,6 +38,10 @@ type Usage struct {
 	Containers []*Container      // newest first
 	Volumes    []*Volume
 	Kernels    []*Kernel
+	// Cache is the build cache's entries, and CacheVolumes its RUN
+	// --mount=type=cache volumes.
+	Cache        []*CacheEntry
+	CacheVolumes []*Volume
 
 	images  *image.Store
 	kernels *kernel.Store
@@ -57,10 +62,24 @@ type Layer struct {
 	Size       int64
 	Images     []*Image
 	Containers []*container.Container
+	Cache      []*CacheEntry
 }
 
 // Rooted reports whether anything lists the layer.
-func (l *Layer) Rooted() bool { return len(l.Images) > 0 || len(l.Containers) > 0 }
+func (l *Layer) Rooted() bool { return l.Used() || len(l.Cache) > 0 }
+
+// Used reports whether an image or a container lists the layer.
+func (l *Layer) Used() bool { return len(l.Images) > 0 || len(l.Containers) > 0 }
+
+// CacheEntry is a build cache entry, and the layer it keeps.
+type CacheEntry struct {
+	buildcache.Entry
+	Layer *Layer // nil for a step that changed nothing
+}
+
+// Dangling reports whether no image or container uses the entry's layer:
+// a docker builder prune without -a removes those.
+func (e *CacheEntry) Dangling() bool { return e.Layer == nil || !e.Layer.Used() }
 
 // Container is a container and the space it takes: its writable layer and
 // its logs.
@@ -195,6 +214,27 @@ func Load(root string) (*Usage, error) {
 			}
 		}
 		u.Volumes = append(u.Volumes, vol)
+	}
+
+	cache := buildcache.Open(root)
+	entries, err := cache.List()
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range entries {
+		ce := &CacheEntry{Entry: e, Layer: u.Layers[e.DiffID]}
+		if ce.Layer != nil {
+			ce.Layer.Cache = append(ce.Layer.Cache, ce)
+		}
+		u.Cache = append(u.Cache, ce)
+	}
+	cvs, err := volume.Open(cache.VolumeRoot()).List()
+	if err != nil {
+		return nil, err
+	}
+	for _, v := range cvs {
+		size, _ := v.OnDisk()
+		u.CacheVolumes = append(u.CacheVolumes, &Volume{Volume: v, Size: size})
 	}
 
 	digests, err := u.kernels.List()

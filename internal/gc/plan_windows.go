@@ -3,9 +3,11 @@ package gc
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
+	"github.com/quasidock/runwhp/internal/buildcache"
 	"github.com/quasidock/runwhp/internal/container"
 	"github.com/quasidock/runwhp/internal/image"
 	"github.com/quasidock/runwhp/internal/layer"
@@ -14,10 +16,12 @@ import (
 
 // Plan is what a removal will remove.
 type Plan struct {
-	Records []*image.Record
-	Layers  []*Layer
-	Kernels []*Kernel
-	Volumes []*Volume
+	Records      []*image.Record
+	Layers       []*Layer
+	Kernels      []*Kernel
+	Volumes      []*Volume
+	Cache        []*CacheEntry
+	CacheVolumes []*Volume
 }
 
 // Report is what a removal removed.
@@ -26,6 +30,7 @@ type Report struct {
 	Deleted  []string // the diffIDs of the layers removed
 	Kernels  []string // the digests of the kernels removed
 	Volumes  []string // the names of the volumes removed
+	Cache    []string // the keys of the build cache entries removed
 	Freed    int64    // bytes
 	// InUse are layers and volumes a guest had open, which were left.
 	InUse  []string
@@ -142,17 +147,53 @@ func (u *Usage) UnusedVolumes() *Plan {
 	return p
 }
 
+// BuildCache plans the removal of the build cache: with all, every entry
+// and cache mount, as docker builder prune -a; without, the entries whose
+// layer no image or container uses. Their layers that nothing else lists
+// go with them.
+func (u *Usage) BuildCache(all bool) *Plan {
+	p := &Plan{}
+	for _, e := range u.Cache {
+		if all || e.Dangling() {
+			p.Cache = append(p.Cache, e)
+		}
+	}
+	if all {
+		p.CacheVolumes = u.CacheVolumes
+	}
+	only := map[string]bool{}
+	for _, e := range p.Cache {
+		if e.Layer != nil {
+			only[e.DiffID] = true
+		}
+	}
+	p.Layers = u.unrootedWith(nil, p.Cache, only)
+	return p
+}
+
 // unrooted returns the layers that nothing lists once the given records are
 // gone, only among those named in only if it is not nil.
 func (u *Usage) unrooted(removed []*image.Record, only map[string]bool) []*Layer {
+	return u.unrootedWith(removed, nil, only)
+}
+
+// unrootedWith is unrooted, the given cache entries gone too.
+func (u *Usage) unrootedWith(removed []*image.Record, cache []*CacheEntry, only map[string]bool) []*Layer {
 	gone := map[string]bool{}
 	for _, r := range removed {
 		gone[strings.ToLower(r.Path)] = true
+	}
+	goneCache := map[string]bool{}
+	for _, e := range cache {
+		goneCache[e.Key] = true
 	}
 	var out []*Layer
 	for d, l := range u.Layers {
 		if only != nil && !only[d] || len(l.Containers) > 0 {
 			continue
+		}
+		if slices.ContainsFunc(l.Cache, func(e *CacheEntry) bool { return !goneCache[e.Key] }) {
+			continue // a build cache entry keeps it
 		}
 		kept := false
 		for _, img := range l.Images {
@@ -191,6 +232,14 @@ func (u *Usage) Apply(p *Plan) *Report {
 			r.Untagged = append(r.Untagged, image.Familiar(rec.Ref))
 		}
 	}
+	cache := buildcache.Open(u.Root)
+	for _, e := range p.Cache {
+		if err := cache.Remove(e.Key); err != nil {
+			r.Errors = append(r.Errors, err)
+			continue
+		}
+		r.Cache = append(r.Cache, e.Key)
+	}
 	for _, l := range p.Layers {
 		err := u.images.Layers.Remove(l.DiffID)
 		switch {
@@ -222,6 +271,18 @@ func (u *Usage) Apply(p *Plan) *Report {
 			r.Errors = append(r.Errors, err)
 		default:
 			r.Volumes = append(r.Volumes, v.Name)
+			r.Freed += v.Size
+		}
+	}
+	cacheVolumes := volume.Open(cache.VolumeRoot())
+	for _, v := range p.CacheVolumes {
+		err := cacheVolumes.Remove(v.Name)
+		switch {
+		case errors.Is(err, volume.ErrInUse):
+			r.InUse = append(r.InUse, v.Name)
+		case err != nil:
+			r.Errors = append(r.Errors, err)
+		default:
 			r.Freed += v.Size
 		}
 	}
@@ -280,4 +341,14 @@ func describe(cs []*container.Container) string {
 		}
 	}
 	return strings.Join(names, ", ")
+}
+
+// AndCache adds to p what BuildCache(all) would remove, and plans the
+// removal of every layer nothing lists once both are gone, as system
+// prune removes the build cache with the rest.
+func (u *Usage) AndCache(p *Plan, all bool) *Plan {
+	c := u.BuildCache(all)
+	p.Cache, p.CacheVolumes = c.Cache, c.CacheVolumes
+	p.Layers = u.unrootedWith(p.Records, p.Cache, nil)
+	return p
 }

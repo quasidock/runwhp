@@ -343,3 +343,13 @@ func (s *Store) writeRecordAt(path string, img *Image) error {
 	// own, and others may be reading the one they replace.
 	return storefile.Replace(path, data)
 }
+
+// Normalize is ref's full name, as records are named: docker.io/library
+// and :latest made explicit.
+func Normalize(ref string) (string, error) {
+	r, err := normalize(ref)
+	if err != nil {
+		return "", err
+	}
+	return r.Name(), nil
+}

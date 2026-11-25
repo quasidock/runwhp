@@ -27,6 +27,8 @@ const volumeMountOpts = "discard"
 // directory of each anonymous volume. It runs before any mount is made in
 // the container's root, so what it copies is the image's.
 func prepareVolumes(spec *guestspec.Spec) error {
+	// made says which volumes' _data init made now: new volumes.
+	made := map[int]bool{}
 	if spec.Volumes > 0 {
 		serials := make([]string, spec.Volumes)
 		for i := range serials {
@@ -54,9 +56,11 @@ func prepareVolumes(spec *guestspec.Spec) error {
 				return err
 			}
 			storage.volumes = append(storage.volumes, fd)
-			if err := os.Mkdir(filepath.Join(dir, guestspec.VolumeData), 0o755); err != nil && !os.IsExist(err) {
+			err = os.Mkdir(filepath.Join(dir, guestspec.VolumeData), 0o755)
+			if err != nil && !os.IsExist(err) {
 				return err
 			}
+			made[i] = err == nil
 		}
 	}
 	for i, m := range spec.Mounts {
@@ -83,10 +87,18 @@ func prepareVolumes(spec *guestspec.Spec) error {
 			}
 			debugf("filled the volume on %s from the image's", m.Target)
 		case guestspec.MountVolume:
+			data := filepath.Join(volumeDir(m.Volume), guestspec.VolumeData)
+			if in := m.Init; in != nil && made[m.Volume] {
+				if err := os.Lchown(data, in.UID, in.GID); err != nil {
+					return err
+				}
+				if err := os.Chmod(data, os.FileMode(in.Mode&0o777)|unixMode(in.Mode)); err != nil {
+					return err
+				}
+			}
 			if m.NoCopy {
 				continue
 			}
-			data := filepath.Join(volumeDir(m.Volume), guestspec.VolumeData)
 			if empty, err := emptyDir(data); err != nil || !empty {
 				continue
 			}
@@ -166,4 +178,20 @@ func needsRecovery(dev string) bool {
 		return false
 	}
 	return binary.LittleEndian.Uint32(b[:])&0x4 != 0 // INCOMPAT_RECOVER
+}
+
+// unixMode is the setuid, setgid and sticky bits of a Unix mode, as Go's
+// os.FileMode has them.
+func unixMode(m uint32) os.FileMode {
+	var out os.FileMode
+	if m&0o4000 != 0 {
+		out |= os.ModeSetuid
+	}
+	if m&0o2000 != 0 {
+		out |= os.ModeSetgid
+	}
+	if m&0o1000 != 0 {
+		out |= os.ModeSticky
+	}
+	return out
 }

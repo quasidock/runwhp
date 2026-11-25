@@ -20,7 +20,8 @@ const systemUsage = `Usage:
 
 system prune removes stopped and created containers, dangling images (with
 -a, every image no container uses), kernels this runwhp does not boot, and
-temporary files. With --volumes it also removes every volume no container
+temporary files, and build cache no image uses (with -a, all of it).
+With --volumes it also removes every volume no container
 uses, and the data in it: runwhp's anonymous volumes go with their
 containers, so it removes named ones, unlike docker system prune --volumes.
 `
@@ -65,7 +66,9 @@ func summarize(u *gc.Usage) []dfRow {
 		}
 	}
 	for _, l := range u.Layers {
-		images.Size += l.Size
+		if l.Used() || len(l.Cache) == 0 {
+			images.Size += l.Size
+		}
 	}
 	for _, l := range u.Unused().Layers {
 		images.Reclaimable += l.Size
@@ -97,7 +100,28 @@ func summarize(u *gc.Usage) []dfRow {
 			kernels.Reclaimable += k.Size
 		}
 	}
-	return []dfRow{images, containers, volumes, kernels}
+	cache := dfRow{Type: "Build Cache", Total: len(u.Cache)}
+	for _, e := range u.Cache {
+		if !e.Dangling() {
+			cache.Active++
+		}
+	}
+	for _, l := range u.Layers {
+		if !l.Used() && len(l.Cache) > 0 {
+			cache.Size += l.Size
+		}
+	}
+	for _, v := range u.CacheVolumes {
+		cache.Size += v.Size
+	}
+	all := u.BuildCache(true)
+	for _, l := range all.Layers {
+		cache.Reclaimable += l.Size
+	}
+	for _, v := range all.CacheVolumes {
+		cache.Reclaimable += v.Size
+	}
+	return []dfRow{images, containers, volumes, kernels, cache}
 }
 
 // reclaimable writes a reclaimable size with its share of the whole, as
@@ -270,6 +294,11 @@ func cmdSystemPrune(args []string, stdin io.Reader, stdout io.Writer) int {
 	} else {
 		warning = append(warning, "  - all dangling images")
 	}
+	if all {
+		warning = append(warning, "  - all build cache")
+	} else {
+		warning = append(warning, "  - unused build cache")
+	}
 	warning = append(warning, "  - all kernels other than the one this runwhp boots")
 	if volumes {
 		warning = append(warning, "  - all volumes not used by at least one container, and the data in them")
@@ -304,6 +333,7 @@ func cmdSystemPrune(args []string, stdin io.Reader, stdout io.Writer) int {
 	if volumes {
 		p.Volumes = u.UnusedVolumes().Volumes
 	}
+	p = u.AndCache(p, all)
 	r := u.Apply(p)
 	sweepStore(root, func(string, ...any) {})
 
@@ -311,6 +341,7 @@ func cmdSystemPrune(args []string, stdin io.Reader, stdout io.Writer) int {
 	printSection(stdout, "Deleted Images:", imageLines(r))
 	printSection(stdout, "Deleted Kernels:", r.Kernels)
 	printSection(stdout, "Deleted Volumes:", r.Volumes)
+	printSection(stdout, "Deleted build cache objects:", shortKeys(r.Cache))
 	fmt.Fprintf(stdout, "Total reclaimed space: %s\n", humanSize(freed+r.Freed))
 	for _, err := range errs {
 		errorf("%v", err)

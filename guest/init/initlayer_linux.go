@@ -55,6 +55,14 @@ func planInitLayer(spec *guestspec.Spec) ([]initEntry, error) {
 			dir bool
 		}{"/etc/" + name, false})
 	}
+	if spec.HideMountPoints {
+		for _, m := range spec.Mounts {
+			targets = append(targets, struct {
+				p   string
+				dir bool
+			}{path.Clean("/" + m.Target), !m.File})
+		}
+	}
 	var plan []initEntry
 	for _, t := range targets {
 		p, err := resolveIn(t.p)

@@ -180,7 +180,7 @@ func bootContainer(ctx context.Context, root string, cfg *container.Config, laye
 		Args: cfg.Args, Env: cfg.Env, Cwd: cfg.Cwd, User: cfg.User,
 		Hostname: cfg.Hostname, Hosts: cfg.Hosts, Layers: len(storage.layers), Scratch: lr.file != nil, KeepLayer: keep,
 		Volumes: len(storage.volumes), Debug: cfg.Debug, Stdin: cfg.Stdin, TTY: cfg.TTY, Network: GuestNetwork(cfg.Network),
-		Mounts: cfg.Mounts, WaitStart: hooks.waitStart, Serve: opts.serve,
+		Mounts: cfg.Mounts, WaitStart: hooks.waitStart, Serve: opts.serve, HideMountPoints: cfg.HideMountPoints,
 	}
 	if opts.serve == "" {
 		spec.Reclaim = reclaimPolicy(logf)
@@ -360,9 +360,8 @@ func openStorage(root string, cfg *container.Config, logf func(string, ...any)) 
 	if err != nil {
 		return nil, err
 	}
-	volumes := volume.Open(root)
 	for i, u := range cfg.Volumes {
-		v, _, err := volumes.Ensure(u.Name, u.Size)
+		v, _, err := volume.Open(cmp.Or(u.Root, root)).Ensure(u.Name, u.Size)
 		if err != nil {
 			return nil, err
 		}

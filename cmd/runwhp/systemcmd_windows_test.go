@@ -55,7 +55,7 @@ func TestSystemDf(t *testing.T) {
 	systemStore(t)
 	out, code := systemCmd("", "df")
 	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if code != 0 || len(lines) != 5 {
+	if code != 0 || len(lines) != 6 {
 		t.Fatalf("exit %d:\n%s", code, out)
 	}
 	fields := func(i int) string { return strings.Join(strings.Fields(lines[i]), " ") }
@@ -72,6 +72,9 @@ func TestSystemDf(t *testing.T) {
 	}
 	if got := fields(4); got != "Kernels 2 1 128KiB 64KiB (50%)" {
 		t.Errorf("kernels: %q", got)
+	}
+	if got := fields(5); got != "Build Cache 0 0 0B 0B (0%)" {
+		t.Errorf("build cache: %q", got)
 	}
 
 	out, _ = systemCmd("", "df", "-v")
@@ -91,7 +94,7 @@ func TestSystemDf(t *testing.T) {
 		}
 	}
 	out, _ = systemCmd("", "df", "--format", "json")
-	if err := json.Unmarshal([]byte(out), &js); err != nil || len(js.Summary) != 4 || js.Summary[0].Reclaimable != 128<<10 || len(js.Images) != 3 || len(js.Volumes) != 2 {
+	if err := json.Unmarshal([]byte(out), &js); err != nil || len(js.Summary) != 5 || js.Summary[0].Reclaimable != 128<<10 || len(js.Images) != 3 || len(js.Volumes) != 2 {
 		t.Errorf("json: %v\n%s", err, out)
 	}
 

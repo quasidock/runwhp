@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/quasidock/runwhp/internal/buildcache"
 	"github.com/quasidock/runwhp/internal/container"
 	"github.com/quasidock/runwhp/internal/disk"
 	"github.com/quasidock/runwhp/internal/image"
@@ -598,5 +599,56 @@ func TestContainerKeepsBlob(t *testing.T) {
 	blobs, _ := is.Blobs()
 	if !slices.Contains(blobs, digestOf("removed")) {
 		t.Errorf("the container's image's configuration was removed: %v", blobs)
+	}
+}
+
+// TestBuildCache keeps the layers build cache entries name, until a
+// builder prune removes the entries: without -a, those whose layer no
+// image uses; with it, all, and the cache mounts' volumes.
+func TestBuildCache(t *testing.T) {
+	f := &fixture{t, testRoot(t)}
+	shared, only, gone := f.layer("shared", 64<<10), f.layer("cache only", 64<<10), f.layer("nothing", 64<<10)
+	f.image("built:1", "built", shared)
+	cache := buildcache.Open(f.root)
+	key := func(s string) string { return strings.TrimPrefix(digestOf(s), "sha256:") }
+	for _, e := range []buildcache.Entry{
+		{Key: key("a"), DiffID: shared}, {Key: key("b"), DiffID: only}, {Key: key("c")},
+	} {
+		if err := cache.Put(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := volume.Open(cache.VolumeRoot()).Create("cache-x", 64<<20); err != nil {
+		t.Fatal(err)
+	}
+	u := load(t, f.root)
+	if len(u.Cache) != 3 || len(u.CacheVolumes) != 1 || !u.Layers[only].Rooted() || u.Layers[only].Used() {
+		t.Fatalf("cache %d, volumes %d", len(u.Cache), len(u.CacheVolumes))
+	}
+	// An image prune leaves the cache's layers.
+	if got := diffIDs(u.Unused().Layers); !slices.Equal(got, []string{gone}) {
+		t.Errorf("image prune -a removes %q", got)
+	}
+	p := u.BuildCache(false)
+	var keys []string
+	for _, e := range p.Cache {
+		keys = append(keys, e.Key)
+	}
+	if !slices.Equal(sorted(keys...), sorted(key("b"), key("c"))) || !slices.Equal(diffIDs(p.Layers), []string{only}) || len(p.CacheVolumes) != 0 {
+		t.Errorf("builder prune: entries %q, layers %q", keys, diffIDs(p.Layers))
+	}
+	// system prune -a: the image and every entry go, and with them every
+	// layer.
+	all := u.AndCache(u.Unused(), true)
+	if got := diffIDs(all.Layers); !slices.Equal(got, sorted(shared, only, gone)) || len(all.CacheVolumes) != 1 {
+		t.Errorf("system prune -a removes %q, %d volumes", got, len(all.CacheVolumes))
+	}
+	r := u.Apply(u.BuildCache(true))
+	if len(r.Cache) != 3 || len(r.Errors) > 0 {
+		t.Errorf("report %+v", r)
+	}
+	u = load(t, f.root)
+	if len(u.Cache) != 0 || len(u.CacheVolumes) != 0 || u.Layers[only] != nil || u.Layers[shared] == nil {
+		t.Errorf("after builder prune -a: %d entries, %d volumes, layers %v", len(u.Cache), len(u.CacheVolumes), u.Layers)
 	}
 }

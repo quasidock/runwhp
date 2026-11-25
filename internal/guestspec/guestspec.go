@@ -107,6 +107,11 @@ type Spec struct {
 	// signal that arrives first ends the container without starting it, as
 	// if the process had been killed by it.
 	WaitStart bool `json:"waitStart,omitempty"`
+	// HideMountPoints puts the mount points of Mounts in the init layer
+	// too, not only init's own, so they are no part of the writable
+	// layer's changes: a build step's, as BuildKit leaves a RUN step's
+	// mounts out of its layer.
+	HideMountPoints bool `json:"hideMountPoints,omitempty"`
 	// ClockSync says the host sends its time as init opens the control
 	// port: init sets the clock from it before it starts the process, which
 	// would otherwise see the CMOS stub's whole seconds.
@@ -195,6 +200,16 @@ type Mount struct {
 	// Options are a tmpfs's mount options: noexec, nosuid, nodev, ro, and
 	// size, mode, uid, gid and nr_inodes as tmpfs takes them.
 	Options string `json:"options,omitempty"`
+	// Init, if set, gives a volume's _data directory this owner and mode
+	// when init makes it, as a new RUN --mount=type=cache volume's.
+	Init *MountInit `json:"init,omitempty"`
+}
+
+// MountInit is the owner and mode of a new volume's _data directory.
+type MountInit struct {
+	UID  int    `json:"uid"`
+	GID  int    `json:"gid"`
+	Mode uint32 `json:"mode"`
 }
 
 // Control is a message from the host to init.
