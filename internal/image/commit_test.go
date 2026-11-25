@@ -96,3 +96,46 @@ func TestCommit(t *testing.T) {
 		t.Error("RUN taken as a change")
 	}
 }
+
+// TestImportDiffAndRecord stores layers and configurations apart from
+// records, as a build does for the states between its steps.
+func TestImportDiffAndRecord(t *testing.T) {
+	s := Open(t.TempDir())
+	if d, empty, err := s.ImportDiff(strings.NewReader("")); err != nil || !empty || d != "" {
+		t.Errorf("an empty diff: %q, %v, %v", d, empty, err)
+	}
+	if d, empty, err := s.ImportDiff(bytes.NewReader(make([]byte, 1024))); err != nil || !empty || d != "" {
+		t.Errorf("a tar of no entries: %q, %v, %v", d, empty, err)
+	}
+	diff, _ := tarLayer(t, entry{name: "f", body: "x"}).Uncompressed()
+	d, empty, err := s.ImportDiff(diff)
+	if err != nil || empty || !s.Layers.Has(d) || !s.Layers.HasSplit(d) {
+		t.Fatalf("a diff: %q, %v, %v", d, empty, err)
+	}
+	if recs, _ := s.List(); len(recs) != 0 {
+		t.Errorf("importing a diff recorded %d images", len(recs))
+	}
+
+	raw := []byte(`{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":["` + d + `"]}}`)
+	id, err := s.PutConfig(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Blob(id); err != nil || !bytes.Equal(got, raw) {
+		t.Errorf("blob %s: %q, %v", id, got, err)
+	}
+	if recs, _ := s.List(); len(recs) != 0 {
+		t.Errorf("storing a configuration recorded %d images", len(recs))
+	}
+	img, err := s.Record("", raw)
+	if err != nil || img.Ref != id || img.ID() != id {
+		t.Fatalf("untagged record: %+v, %v", img, err)
+	}
+	n, _ := normalize("built:1")
+	if img, err = s.Record(n.Name(), raw); err != nil || img.ID() != id {
+		t.Fatalf("tagged record: %+v, %v", img, err)
+	}
+	if recs, err := s.Find("built:1"); err != nil || len(recs) != 1 || recs[0].ID() != id {
+		t.Errorf("find built:1: %v, %v", recs, err)
+	}
+}

@@ -314,3 +314,28 @@ func tagOf(t *testing.T, ref string) *name.Tag {
 	}
 	return &tag
 }
+
+// TestRebuildLayer rebuilds one layer's tar, as push does, and refuses one
+// whose files are not the layer's.
+func TestRebuildLayer(t *testing.T) {
+	s := Open(t.TempDir())
+	l := tarLayer(t, entry{name: "dir/", dir: true}, entry{name: "dir/a", body: "alpha"}, entry{name: "b", body: "bravo"})
+	rc, _ := l.Uncompressed()
+	want, _ := io.ReadAll(rc)
+	d, _, err := s.ImportDiff(bytes.NewReader(want))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := &mapSource{files: map[string]map[string][]byte{d: {"dir/a": []byte("alpha"), "b": []byte("bravo")}}}
+	if size, err := LayerSize(s.Layers, d); err != nil || size != int64(len(want)) {
+		t.Errorf("size %d, %v; want %d", size, err, len(want))
+	}
+	var got bytes.Buffer
+	if n, err := RebuildLayer(&got, s.Layers, d, src); err != nil || n != int64(len(want)) || !bytes.Equal(got.Bytes(), want) {
+		t.Errorf("rebuilt %d bytes, %v; equal %v", n, err, bytes.Equal(got.Bytes(), want))
+	}
+	src.lie = "b"
+	if _, err := RebuildLayer(io.Discard, s.Layers, d, src); err == nil {
+		t.Error("a layer rebuilt from the wrong contents passed")
+	}
+}

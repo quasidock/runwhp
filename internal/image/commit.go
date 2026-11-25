@@ -66,16 +66,12 @@ func (s *Store) Commit(c Commit, diff io.Reader, ref string) (*Image, error) {
 		return nil, err
 	}
 
-	empty, br, err := emptyTar(diff)
+	diffID, empty, err := s.ImportDiff(diff)
 	if err != nil {
 		return nil, err
 	}
 	h := v1.History{Created: cf.Created, CreatedBy: c.CreatedBy, Author: c.Author, Comment: c.Message, EmptyLayer: empty}
 	if !empty {
-		diffID, _, err := s.Layers.Import(br)
-		if err != nil {
-			return nil, err
-		}
 		d, err := v1.NewHash(diffID)
 		if err != nil {
 			return nil, err
@@ -88,10 +84,37 @@ func (s *Store) Commit(c Commit, diff io.Reader, ref string) (*Image, error) {
 	if err != nil {
 		return nil, err
 	}
-	img := &Image{Ref: target, ConfigDigest: digestOf(raw), Config: raw}
-	if err := s.PutBlob(img.ConfigDigest, raw); err != nil {
+	return s.Record(target, raw)
+}
+
+// ImportDiff stores the layer whose tar diff is, and returns its diff ID;
+// a tar with nothing in it, as a step that changed no file leaves, stores
+// nothing, and reports empty.
+func (s *Store) ImportDiff(diff io.Reader) (diffID string, empty bool, err error) {
+	empty, br, err := emptyTar(diff)
+	if err != nil || empty {
+		return "", empty, err
+	}
+	diffID, _, err = s.Layers.Import(br)
+	return diffID, false, err
+}
+
+// PutConfig stores an image's configuration blob, raw, and returns its
+// digest, the image's ID.
+func (s *Store) PutConfig(raw []byte) (string, error) {
+	d := digestOf(raw)
+	return d, s.PutBlob(d, raw)
+}
+
+// Record records the image whose configuration blob raw is under ref,
+// already normalized, or untagged if ref is empty. The caller holds the
+// store's lock shared.
+func (s *Store) Record(ref string, raw []byte) (*Image, error) {
+	d, err := s.PutConfig(raw)
+	if err != nil {
 		return nil, err
 	}
+	img := &Image{Ref: ref, ConfigDigest: d, Config: raw}
 	if img.Ref == "" {
 		img.Ref = img.ConfigDigest
 	}

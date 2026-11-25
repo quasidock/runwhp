@@ -265,12 +265,39 @@ func planLayer(layers *layer.Store, diffID string) (*layerPlan, error) {
 	}
 }
 
+// LayerSize is the size of a layer's tar, as its metadata gives it.
+func LayerSize(layers *layer.Store, diffID string) (int64, error) {
+	plan, err := planLayer(layers, diffID)
+	if err != nil {
+		return 0, err
+	}
+	return plan.size, nil
+}
+
+// RebuildLayer writes a layer's tar to w, rebuilt from its metadata and
+// files from src, and returns its size. It fails if the tar it rebuilt is
+// not the layer, by size or digest; w may have been written to by then.
+func RebuildLayer(w io.Writer, layers *layer.Store, diffID string, src FileSource) (int64, error) {
+	plan, err := planLayer(layers, diffID)
+	if err != nil {
+		return 0, err
+	}
+	return rebuildLayer(w, layers, diffID, plan, src)
+}
+
 // writeLayer rebuilds a layer's tar into the archive, and returns its size.
 func writeLayer(tw *tar.Writer, diffID string, layers *layer.Store, src FileSource) (int64, error) {
 	plan, err := planLayer(layers, diffID)
 	if err != nil {
 		return 0, err
 	}
+	if err := tw.WriteHeader(&tar.Header{Name: blobPath(diffID), Mode: 0o644, Size: plan.size, ModTime: time.Unix(0, 0)}); err != nil {
+		return 0, err
+	}
+	return rebuildLayer(tw, layers, diffID, plan, src)
+}
+
+func rebuildLayer(w io.Writer, layers *layer.Store, diffID string, plan *layerPlan, src FileSource) (int64, error) {
 	files, err := src.Open(diffID, plan.names, plan.sizes)
 	if err != nil {
 		return 0, fmt.Errorf("layer %s: %w", diffID, err)
@@ -281,13 +308,10 @@ func writeLayer(tw *tar.Writer, diffID string, layers *layer.Store, src FileSour
 		return 0, err
 	}
 	defer split.Close()
-	if err := tw.WriteHeader(&tar.Header{Name: blobPath(diffID), Mode: 0o644, Size: plan.size, ModTime: time.Unix(0, 0)}); err != nil {
-		return 0, err
-	}
 	out := asm.NewOutputTarStream(files, storage.NewJSONUnpacker(split))
 	defer out.Close()
 	digest := sha256.New()
-	n, err := io.Copy(io.MultiWriter(tw, digest), out)
+	n, err := io.Copy(io.MultiWriter(w, digest), out)
 	if err != nil {
 		return 0, fmt.Errorf("rebuilding layer %s: %w", diffID, err)
 	}
