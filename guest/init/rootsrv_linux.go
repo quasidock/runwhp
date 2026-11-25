@@ -11,6 +11,9 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -101,6 +104,13 @@ func (s *rootServer) serve(conn io.ReadWriter) error {
 		return s.get(conn, req.Path)
 	case guestspec.RootPut:
 		return s.put(conn, r, req)
+	case guestspec.RootGlob:
+		matches, err := filepath.Glob(path.Clean("/" + req.Path))
+		if err != nil {
+			return s.reply(conn, guestspec.RootReply{Error: err.Error()})
+		}
+		slices.Sort(matches)
+		return s.reply(conn, guestspec.RootReply{Matches: matches})
 	case guestspec.RootExport:
 		return s.export(conn)
 	case guestspec.RootChanges:
@@ -207,9 +217,38 @@ func (s *rootServer) get(conn io.Writer, p string) error {
 // put extracts the tar that follows into the directory p, as Docker's
 // ContainerExtractToDir does.
 func (s *rootServer) put(conn io.Writer, r io.Reader, req guestspec.RootRequest) error {
+	opts := untarOptions{noOverwriteDirNonDir: req.NoOverwriteDirNonDir, merge: req.Merge}
+	switch {
+	case req.Chown != "":
+		owner, err := resolveChown(req.Chown)
+		if err != nil {
+			return s.reply(conn, guestspec.RootReply{Error: err.Error()})
+		}
+		opts.chown = &owner
+	case req.CopyUIDGID && s.spec.User != "":
+		// docker cp -a: the container's user owns what is copied in.
+		opts.chown = &[2]int{int(s.user.UID), int(s.user.GID)}
+	}
+	if req.ChownParents {
+		opts.parentOwner = opts.chown
+	}
+	if req.MakeDir {
+		made, err := makeDirAll(req.Path, opts.parentOwner)
+		if err != nil {
+			return s.reply(conn, guestspec.RootReply{Error: err.Error()})
+		}
+		opts.madeRoot = made
+	}
 	resolved, _, err := resolvePath(req.Path)
 	if err != nil {
 		return s.reply(conn, guestspec.RootReply{Error: err.Error()})
+	}
+	if req.MakeDir {
+		// The directory itself, its symlinks followed, as MakeDir made it
+		// or found it.
+		if resolved, err = resolveIn(resolved); err != nil {
+			return s.reply(conn, guestspec.RootReply{Error: err.Error()})
+		}
 	}
 	fi, err := os.Lstat(resolved)
 	switch {
@@ -231,11 +270,6 @@ func (s *rootServer) put(conn io.Writer, r io.Reader, req guestspec.RootRequest)
 	defer root.Close()
 	if err := s.reply(conn, guestspec.RootReply{}); err != nil {
 		return err
-	}
-	opts := untarOptions{noOverwriteDirNonDir: req.NoOverwriteDirNonDir}
-	if req.CopyUIDGID && s.spec.User != "" {
-		// docker cp -a: the container's user owns what is copied in.
-		opts.chown = &[2]int{int(s.user.UID), int(s.user.GID)}
 	}
 	// The tar's end marks the end of the request: the host cannot end its
 	// side of the connection alone through its pipe.
@@ -266,4 +300,93 @@ func (s *rootServer) export(conn io.Writer) error {
 	// An anonymous volume's files are in the writable layer, not, as
 	// Docker's are, in a volume of their own.
 	return writeTar(conn, root, tarOptions{excludeBelow: s.anon})
+}
+
+// resolveChown resolves a COPY --chown user spec in the root's passwd and
+// group files, as BuildKit does: a uid alone takes the same gid, a name
+// alone the user's group.
+func resolveChown(spec string) ([2]int, error) {
+	pw, _ := os.ReadFile("/etc/passwd")
+	gr, _ := os.ReadFile("/etc/group")
+	userPart, groupPart, hasGroup := strings.Cut(spec, ":")
+	var owner [2]int
+	if id, err := strconv.ParseUint(userPart, 10, 32); err == nil {
+		owner = [2]int{int(id), int(id)}
+	} else {
+		u, err := passwd.Resolve(userPart, pw, gr)
+		if err != nil {
+			return owner, err
+		}
+		owner = [2]int{int(u.UID), int(u.GID)}
+	}
+	if hasGroup {
+		g, err := passwd.Resolve("0:"+groupPart, pw, gr)
+		if err != nil {
+			return owner, err
+		}
+		owner[1] = int(g.GID)
+	}
+	return owner, nil
+}
+
+// makeDirAll makes the directory p and those missing above it, 0755, owned
+// by owner if set, else root, following the symlinks of the directories
+// that exist, and reports whether p itself was made.
+func makeDirAll(p string, owner *[2]int) (bool, error) {
+	abs := path.Clean("/" + p)
+	var missing []string
+	for cur := abs; ; cur = path.Dir(cur) {
+		resolved, _, err := resolvePath(cur)
+		if err != nil {
+			return false, err
+		}
+		fi, err := os.Stat(resolved)
+		if err == nil {
+			if !fi.IsDir() {
+				return false, fmt.Errorf("%s is not a directory", cur)
+			}
+			if len(missing) == 0 {
+				return false, nil
+			}
+			base, err := resolveIn(resolved)
+			if err != nil {
+				return false, err
+			}
+			root, err := os.OpenRoot(base)
+			if err != nil {
+				return false, err
+			}
+			defer root.Close()
+			var rel string
+			for i := len(missing) - 1; i >= 0; i-- {
+				rel = path.Join(rel, missing[i])
+				if err := mkdirOwned(root, rel, owner); err != nil {
+					return false, err
+				}
+			}
+			return true, nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) || cur == "/" {
+			return false, err
+		}
+		missing = append(missing, path.Base(cur))
+	}
+}
+
+// mkdirOwned makes the directory name in root, 0755, owned by owner if
+// set; one that exists already is left as it is.
+func mkdirOwned(root *os.Root, name string, owner *[2]int) error {
+	if err := root.Mkdir(name, 0o755); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return nil
+		}
+		return err
+	}
+	if err := root.Chmod(name, 0o755); err != nil {
+		return err
+	}
+	if owner != nil {
+		return root.Lchown(name, owner[0], owner[1])
+	}
+	return nil
 }

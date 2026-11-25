@@ -90,7 +90,9 @@ type PendingLayer struct {
 	ch <-chan layerResult
 	// scratch says the layer is thrown away after this boot: the guest
 	// mounts it volatile, and is offered no FLUSH.
-	scratch   bool
+	scratch bool
+	// borrowed says the file is another's, which Close leaves open.
+	borrowed  bool
 	once      sync.Once
 	res       layerResult
 	closeOnce sync.Once
@@ -130,8 +132,44 @@ func (p *PendingLayer) get() layerResult {
 // one.
 func (p *PendingLayer) Close() {
 	p.closeOnce.Do(func() {
-		if r := p.get(); r.file != nil {
+		if r := p.get(); r.file != nil && !p.borrowed {
 			r.file.Close()
 		}
 	})
 }
+
+// A StepLayer is the writable layer of one step of a build. Each guest of
+// the step mounts it as a container's kept layer, so a second guest can
+// read what the first left, but the build holds it open throughout, so
+// nothing sweeps it away between them, and it is deleted when closed.
+type StepLayer struct {
+	f *disk.File
+}
+
+// NewStepLayer makes a step's writable layer of size bytes in the store's
+// scratch directory.
+func NewStepLayer(root string, size int64) (*StepLayer, error) {
+	path := ScratchPath(root)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	f, err := disk.Create(path, size, disk.Scratch)
+	if err != nil {
+		return nil, err
+	}
+	if err := ext4.Format(f, size, ext4.Options{Journal: true, Label: "rw"}); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("formatting a build step's writable layer: %w", err)
+	}
+	return &StepLayer{f: f}, nil
+}
+
+// pending is the layer for one guest, which leaves it open when it stops.
+func (l *StepLayer) pending() *PendingLayer {
+	p := ReadyLayer(l.f, false)
+	p.borrowed = true
+	return p
+}
+
+// Close deletes the layer.
+func (l *StepLayer) Close() { l.f.Close() }

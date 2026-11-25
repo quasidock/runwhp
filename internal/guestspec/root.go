@@ -37,6 +37,7 @@ const (
 	RootExport  = "export"  // a tar of the container's root file system, without its mounts
 	RootChanges = "changes" // what the writable layer changed, in Changes
 	RootDiff    = "diff"    // a tar of the writable layer, as an image layer
+	RootGlob    = "glob"    // the paths matching the pattern Path, in Matches
 )
 
 // RootRequest is the host's request.
@@ -49,6 +50,26 @@ type RootRequest struct {
 	// CopyUIDGID gives what a RootPut extracts the container's user's
 	// owner, as docker cp -a does, rather than the tar's.
 	CopyUIDGID bool `json:"copyUIDGID,omitempty"`
+
+	// The rest are build's, which copies files into a step's root as
+	// BuildKit's COPY does.
+
+	// MakeDir makes Path, and the directories missing above it, 0755,
+	// before a RootPut extracts into it.
+	MakeDir bool `json:"makeDir,omitempty"`
+	// Chown gives what a RootPut extracts to a user, rather than the
+	// tar's owners: a name or uid, and optionally a group name or gid
+	// after a colon, resolved in the root's /etc/passwd and /etc/group. A
+	// name alone takes the user's group; a uid alone, the same gid.
+	Chown string `json:"chown,omitempty"`
+	// ChownParents gives the directories a RootPut makes on the way, by
+	// MakeDir or for its entries, to Chown's user too.
+	ChownParents bool `json:"chownParents,omitempty"`
+	// Merge extracts as BuildKit's copy does: a directory that exists
+	// keeps its mode and owner, and takes only the tar's times, and an
+	// entry named "." describes Path itself, which takes the entry's mode
+	// and owner only if MakeDir made it.
+	Merge bool `json:"merge,omitempty"`
 }
 
 // RootReply is init's answer.
@@ -58,6 +79,8 @@ type RootReply struct {
 	NotFound bool      `json:"notFound,omitempty"`
 	Stat     *PathStat `json:"stat,omitempty"`
 	Changes  []Change  `json:"changes,omitempty"`
+	// Matches are RootGlob's paths, sorted.
+	Matches []string `json:"matches,omitempty"`
 }
 
 // PathStat describes a file, as Docker's container path stat does.

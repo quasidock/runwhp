@@ -42,6 +42,12 @@ type PutOptions struct {
 	NoOverwriteDirNonDir bool
 	// CopyUIDGID gives what is extracted to the container's user.
 	CopyUIDGID bool
+	// MakeDir, Chown, ChownParents and Merge are build's, as
+	// guestspec.RootRequest describes them.
+	MakeDir      bool
+	Chown        string
+	ChownParents bool
+	Merge        bool
 }
 
 // request sends req, and returns the connection and init's reply.
@@ -104,6 +110,18 @@ func (c *Client) Stat(ctx context.Context, p string) (*guestspec.PathStat, error
 	return rep.Stat, nil
 }
 
+// Glob lists the paths matching pattern, as filepath.Glob matches it in
+// the root, sorted; none is no error.
+func (c *Client) Glob(ctx context.Context, pattern string) ([]string, error) {
+	var rep guestspec.RootReply
+	conn, _, err := c.request(ctx, guestspec.RootRequest{Op: guestspec.RootGlob, Path: Slash(pattern)}, &rep)
+	if err != nil {
+		return nil, err
+	}
+	conn.Close()
+	return rep.Matches, nil
+}
+
 // stream is what follows init's reply: a tar, until init closes the
 // connection, checked for its end marker, as init ends a tar it cannot
 // finish.
@@ -130,6 +148,7 @@ func (c *Client) Put(ctx context.Context, dir string, content io.Reader, o PutOp
 	conn, r, err := c.request(ctx, guestspec.RootRequest{
 		Op: guestspec.RootPut, Path: dir,
 		NoOverwriteDirNonDir: o.NoOverwriteDirNonDir, CopyUIDGID: o.CopyUIDGID,
+		MakeDir: o.MakeDir, Chown: o.Chown, ChownParents: o.ChownParents, Merge: o.Merge,
 	}, nil)
 	if err != nil {
 		return err

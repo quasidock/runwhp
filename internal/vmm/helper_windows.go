@@ -256,18 +256,30 @@ func (ls *LayerServers) Close() {
 	}
 }
 
-// A served guest is one runwhp boots from a container's config to reach
-// its files rather than to run its process: init mounts its root as it
-// would for the container, serves it on guestspec.RootPort, and waits for
-// the host to send Shutdown. It has no network device or balloon, and a
-// root server's memory and processors.
-type RootGuest struct {
-	vsock  *virtio.Vsock
-	queue  *controlQueue
-	layer  *PendingLayer
-	cancel context.CancelFunc
-	done   chan error
-	logf   func(string, ...any)
+// A Guest is one runwhp boots from a container's config in the background,
+// for something other than a container's run: to reach its files, for cp,
+// export, diff and commit of a stopped container, or for a step of a
+// build. Init mounts its root as it would for the container, and serves it
+// on guestspec.RootPort.
+//
+// A served guest runs no process: it waits for the host to send Shutdown,
+// and has no network device or balloon, and a root server's memory and
+// processors. A process guest waits for Run to start its process, and
+// stops when the process ends, as a container's does.
+type Guest struct {
+	vsock   *virtio.Vsock
+	queue   *controlQueue
+	layer   *PendingLayer
+	process bool
+	cancel  context.CancelFunc
+	done    chan guestResult
+	logf    func(string, ...any)
+}
+
+// guestResult is how a guest's boot ended.
+type guestResult struct {
+	code int
+	err  error
 }
 
 // rootShutdownWait bounds how long a served guest takes to freeze its file
@@ -278,7 +290,7 @@ const rootShutdownWait = 10 * time.Second
 // c: its layers, its writable layer, its volumes and its shares. The caller
 // holds the container's lock throughout, so the container cannot start
 // meanwhile.
-func BootRootServer(ctx context.Context, root string, c *container.Container) (*RootGuest, error) {
+func BootRootServer(ctx context.Context, root string, c *container.Container) (*Guest, error) {
 	// The writable layer, if the container has one: a container whose
 	// writable layer is in memory, or that never booted, has none, and
 	// init gives it an empty one.
@@ -290,22 +302,23 @@ func BootRootServer(ctx context.Context, root string, c *container.Container) (*
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
-	return bootServed(ctx, root, c.Config, ReadyLayer(rw, false), "container "+c.Short()+"'s files")
+	return bootGuest(ctx, root, c.Config, ReadyLayer(rw, false), false, BootIO{}, "the guest serving container "+c.Short()+"'s files")
 }
 
-// bootServed boots a guest serving the root cfg describes, with layer as
-// its writable layer, which the guest closes when it stops, and returns
-// once init is ready to serve. what names what it serves, in errors.
-func bootServed(ctx context.Context, root string, cfg *container.Config, layer *PendingLayer, what string) (*RootGuest, error) {
+// bootGuest boots a guest of the root cfg describes, with layer as its
+// writable layer, which the guest closes when it stops, and returns once
+// init is ready: to serve, or, for a process guest, to start the process,
+// whose streams bio holds. what names the guest in errors.
+func bootGuest(ctx context.Context, root string, cfg *container.Config, layer *PendingLayer, process bool, bio BootIO, what string) (*Guest, error) {
 	logf := func(string, ...any) {}
 	if cfg.Debug {
 		logf = func(format string, a ...any) { fmt.Fprintf(os.Stderr, format+"\n", a...) }
 	}
-	// The guest outlives ctx, which bounds only its boot; Close or stop
-	// ends it.
+	// The guest outlives ctx, which bounds only its boot; Run, Close or
+	// stop ends it.
 	vmCtx, cancel := context.WithCancel(context.Background())
 	proxy := NewSignalProxy(cancel, logf)
-	g := &RootGuest{queue: proxy.queue, layer: layer, cancel: cancel, done: make(chan error, 1), logf: logf}
+	g := &Guest{queue: proxy.queue, layer: layer, process: process, cancel: cancel, done: make(chan guestResult, 1), logf: logf}
 	ready := make(chan struct{})
 	var once sync.Once
 	hooks := bootHooks{
@@ -313,23 +326,30 @@ func bootServed(ctx context.Context, root string, cfg *container.Config, layer *
 		attached: func(h *vmHandles) { g.vsock = h.vsock },
 	}
 	opts := guestOpts{serve: guestspec.ServeRoot, noNIC: true, noBalloon: true, memory: serverMemory, cpus: min(serverCPUs, runtime.NumCPU())}
+	if process {
+		opts, hooks.waitStart = guestOpts{}, true
+	}
+	if bio.Diag == nil {
+		bio.Diag = os.Stderr
+	}
 	go func() {
-		_, err := bootContainer(vmCtx, root, cfg, layer, opts, image.PullMissing, proxy, BootIO{Diag: os.Stderr}, hooks, logf, time.Now())
-		g.done <- err
+		code, err := bootContainer(vmCtx, root, cfg, layer, opts, image.PullMissing, proxy, bio, hooks, logf, time.Now())
+		g.done <- guestResult{code, err}
 	}()
 	select {
 	case <-ready:
 		return g, nil
-	case err := <-g.done:
-		g.done <- err
+	case res := <-g.done:
+		g.done <- res
 		g.stop()
+		err := res.err
 		if err == nil {
 			err = errors.New("it stopped")
 		}
-		return nil, fmt.Errorf("the guest serving %s failed: %w", what, err)
+		return nil, fmt.Errorf("%s failed: %w", what, err)
 	case <-time.After(serverTimeout):
 		g.stop()
-		return nil, fmt.Errorf("the guest serving %s was not ready after %v", what, serverTimeout)
+		return nil, fmt.Errorf("%s was not ready after %v", what, serverTimeout)
 	case <-ctx.Done():
 		g.stop()
 		return nil, ctx.Err()
@@ -337,27 +357,48 @@ func bootServed(ctx context.Context, root string, cfg *container.Config, layer *
 }
 
 // Dial connects to the guest's root server.
-func (g *RootGuest) Dial(ctx context.Context) (io.ReadWriteCloser, error) {
+func (g *Guest) Dial(ctx context.Context) (io.ReadWriteCloser, error) {
 	return g.vsock.Dial(ctx, guestspec.RootPort)
 }
 
-// Close asks init to freeze the writable layer and volumes and stop the
-// machine, waits for it, and lets go of the disks.
-func (g *RootGuest) Close() {
-	g.queue.send(guestspec.Control{Shutdown: true})
+// Run starts a process guest's process, and returns its exit code once it
+// ends, and the guest with it. If ctx ends first, Run stops the guest, and
+// returns 130.
+func (g *Guest) Run(ctx context.Context) (int, error) {
+	if !g.process {
+		return guestspec.ExitRuntime, errors.New("the guest runs no process")
+	}
+	g.queue.send(guestspec.Control{Start: true})
 	select {
-	case err := <-g.done:
-		g.done <- err
-	case <-time.After(rootShutdownWait):
-		g.logf("the guest serving files had not stopped %v after it was asked to; stopping it", rootShutdownWait)
+	case res := <-g.done:
+		g.done <- res
+		return res.code, res.err
+	case <-ctx.Done():
+		g.stop()
+		return 130, ctx.Err()
+	}
+}
+
+// Close stops the guest and lets go of its disks: a served guest is asked
+// to freeze its writable layer and volumes and stop, and waited for; a
+// process guest whose process has not ended is stopped at once.
+func (g *Guest) Close() {
+	if !g.process {
+		g.queue.send(guestspec.Control{Shutdown: true})
+		select {
+		case res := <-g.done:
+			g.done <- res
+		case <-time.After(rootShutdownWait):
+			g.logf("the guest serving files had not stopped %v after it was asked to; stopping it", rootShutdownWait)
+		}
 	}
 	g.stop()
 }
 
 // stop stops the machine at once, and lets go of the disks.
-func (g *RootGuest) stop() {
+func (g *Guest) stop() {
 	g.cancel()
-	err := <-g.done
-	g.done <- err
+	res := <-g.done
+	g.done <- res
 	g.layer.Close()
 }

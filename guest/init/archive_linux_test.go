@@ -314,7 +314,9 @@ func TestUntarAsGoArchive(t *testing.T) {
 	if err := untar(bytes.NewReader(data), openRoot(t, got), untarOptions{noOverwriteDirNonDir: true}); err != nil {
 		t.Fatal(err)
 	}
-	if w, g := treeOf(t, want), treeOf(t, got); !reflect.DeepEqual(w, g) {
+	// The root itself changed when its files were made again: compare
+	// what is below it.
+	if w, g := treeOf(t, want)[1:], treeOf(t, got)[1:]; !reflect.DeepEqual(w, g) {
 		t.Errorf("trees differ after a second extraction:\n got %q\nwant %q", g, w)
 	}
 
@@ -371,6 +373,63 @@ func TestPreserveTrailing(t *testing.T) {
 	} {
 		if got := preserveTrailingDotOrSeparator(c[1], c[2]); got != c[0] {
 			t.Errorf("preserve(%q, %q) = %q, want %q", c[1], c[2], got, c[0])
+		}
+	}
+}
+
+// TestUntarMerge extracts as build's COPY does: directories that exist
+// keep their mode and owner, and take the tar's times; "." describes the
+// root, which takes its mode and owner only when the put made it; and
+// parents the tar lacks are made for chown's user.
+func TestUntarMerge(t *testing.T) {
+	needRoot(t)
+	t0 := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+	t1 := time.Date(2021, 1, 2, 3, 4, 5, 0, time.UTC)
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	tw.WriteHeader(&tar.Header{Name: "./", Typeflag: tar.TypeDir, Mode: 0o750, ModTime: t0})
+	tw.WriteHeader(&tar.Header{Name: "e/", Typeflag: tar.TypeDir, Mode: 0o755, ModTime: t1})
+	tw.WriteHeader(&tar.Header{Name: "e/f", Typeflag: tar.TypeReg, Mode: 0o640, Size: 1, ModTime: t0})
+	tw.Write([]byte("x"))
+	tw.WriteHeader(&tar.Header{Name: "n/x", Typeflag: tar.TypeReg, Mode: 0o644, ModTime: t0})
+	tw.Close()
+
+	owner := &[2]int{5, 6}
+	for _, made := range []bool{false, true} {
+		dir := tmpfsDir(t)
+		if err := os.Mkdir(filepath.Join(dir, "e"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		os.Chmod(filepath.Join(dir, "e"), 0o700)
+		os.Lchown(filepath.Join(dir, "e"), 1, 1)
+		opts := untarOptions{merge: true, madeRoot: made, chown: owner, parentOwner: owner}
+		if err := untar(bytes.NewReader(buf.Bytes()), openRoot(t, dir), opts); err != nil {
+			t.Fatal(err)
+		}
+		stat := func(name string) (fs.FileMode, uint32, uint32, time.Time) {
+			fi, err := os.Lstat(filepath.Join(dir, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			st := fi.Sys().(*syscall.Stat_t)
+			return fi.Mode(), st.Uid, st.Gid, fi.ModTime()
+		}
+		mode, uid, gid, mtime := stat(".")
+		wantMode, wantUID := fs.ModeDir|0o755, uint32(0)
+		if made {
+			wantMode, wantUID = fs.ModeDir|0o750, 5
+		}
+		if mode != wantMode || uid != wantUID || !mtime.Equal(t0) {
+			t.Errorf("made %v: root %v %d:%d %v", made, mode, uid, gid, mtime)
+		}
+		if mode, uid, gid, mtime := stat("e"); mode != fs.ModeDir|0o700 || uid != 1 || gid != 1 || !mtime.Equal(t1) {
+			t.Errorf("made %v: existing dir %v %d:%d %v", made, mode, uid, gid, mtime)
+		}
+		if mode, uid, gid, _ := stat("e/f"); mode != 0o640 || uid != 5 || gid != 6 {
+			t.Errorf("made %v: file %v %d:%d", made, mode, uid, gid)
+		}
+		if mode, uid, gid, _ := stat("n"); mode != fs.ModeDir|0o755 || uid != 5 || gid != 6 {
+			t.Errorf("made %v: parent %v %d:%d", made, mode, uid, gid)
 		}
 	}
 }

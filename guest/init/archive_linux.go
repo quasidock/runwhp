@@ -277,6 +277,14 @@ type untarOptions struct {
 	// chown, if set, owns every file extracted instead of the archive's
 	// owners.
 	chown *[2]int
+	// parentOwner, if set, owns the directories made for entries whose
+	// parents the archive lacks; else root does.
+	parentOwner *[2]int
+	// merge is BuildKit's copy: a directory that exists keeps its mode
+	// and owner and takes only the entry's times, and an entry "."
+	// describes root itself, whose mode and owner it sets only if
+	// madeRoot.
+	merge, madeRoot bool
 }
 
 // untar extracts the archive r into root, as go-archive's Unpack does.
@@ -300,6 +308,14 @@ func untar(r io.Reader, root *os.Root, opts untarOptions) error {
 		}
 		name := path.Clean(strings.TrimLeft(hdr.Name, "/"))
 		if name == "." {
+			if opts.merge && hdr.Typeflag == tar.TypeDir {
+				if opts.madeRoot {
+					if err := chownChmod(root, name, hdr, opts); err != nil {
+						return err
+					}
+				}
+				dirs = append(dirs, dirTimes{name, hdr})
+			}
 			continue
 		}
 		if !filepath.IsLocal(name) {
@@ -307,6 +323,10 @@ func untar(r io.Reader, root *os.Root, opts untarOptions) error {
 		}
 		hdr.Name = name
 		if fi, err := root.Lstat(name); err == nil {
+			if opts.merge && fi.IsDir() && hdr.Typeflag == tar.TypeDir {
+				dirs = append(dirs, dirTimes{name, hdr})
+				continue
+			}
 			if opts.noOverwriteDirNonDir && fi.IsDir() && hdr.Typeflag != tar.TypeDir {
 				return fmt.Errorf("cannot overwrite directory %q with non-directory %q", "/"+name, hdr.Name)
 			}
@@ -319,7 +339,7 @@ func untar(r io.Reader, root *os.Root, opts untarOptions) error {
 				}
 			}
 		}
-		if err := makeParents(root, name); err != nil {
+		if err := makeParents(root, name, opts.parentOwner); err != nil {
 			return err
 		}
 		if err := extractEntry(root, name, hdr, tr, opts); err != nil {
@@ -337,8 +357,21 @@ func untar(r io.Reader, root *os.Root, opts untarOptions) error {
 	return nil
 }
 
-// makeParents makes the missing directories above name, 0755.
-func makeParents(root *os.Root, name string) error {
+// chownChmod gives name the entry's owner, or opts.chown's, and mode.
+func chownChmod(root *os.Root, name string, hdr *tar.Header, opts untarOptions) error {
+	uid, gid := hdr.Uid, hdr.Gid
+	if opts.chown != nil {
+		uid, gid = opts.chown[0], opts.chown[1]
+	}
+	if err := root.Lchown(name, uid, gid); err != nil {
+		return err
+	}
+	return root.Chmod(name, hdr.FileInfo().Mode())
+}
+
+// makeParents makes the missing directories above name, 0755, owned by
+// owner if set, else root.
+func makeParents(root *os.Root, name string, owner *[2]int) error {
 	parent := path.Dir(name)
 	if parent == "." {
 		return nil
@@ -362,6 +395,11 @@ func makeParents(root *os.Root, name string) error {
 		}
 		if err := root.Chmod(cur, 0o755); err != nil {
 			return err
+		}
+		if owner != nil {
+			if err := root.Lchown(cur, owner[0], owner[1]); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
