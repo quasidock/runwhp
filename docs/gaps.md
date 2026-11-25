@@ -71,8 +71,36 @@
   the link's 65520-byte MTU makes up for in part: 200 MB crosses in about
   0.4 s out of the container and 0.6-0.8 s into it on the test machine.
 - The prunes take no `--filter`, such as `until=` or `label=`, and
-  `images` no filter but a repository. There is no `push`, and no build,
-  so `system df` has no build cache.
+  `images` no filter but a repository. There is no `login`: `pull` and
+  `push` use the credentials `docker login` stored. There is no
+  `--insecure-registry`: only registries on localhost, a loopback or a
+  private address, or a `.local` name are spoken to over plain HTTP.
+- `build` boots a guest for each `COPY` and `ADD`, and two for each
+  `RUN`, about 0.1-0.2 s and 0.6-0.8 s a step on the test machine, where
+  BuildKit starts a container. A process runs one guest at a time, so
+  stages are built one after another, and `COPY --from` reads its files
+  from a guest of their own first and spools them.
+- `RUN` runs on at most about 54 layers below it, as `run` does, where
+  Docker allows 127.
+- `WORKDIR` makes its directory in the stage's next step that boots a
+  guest, not in a layer of its own as BuildKit does, so an image has
+  fewer layers than BuildKit's, and its history marks `WORKDIR` empty.
+- A `RUN --mount=type=cache` volume is given to one step at a time,
+  whatever `sharing` says, as `locked`. `RUN --mount=type=bind` takes the
+  context only, read-only, and shows files `.dockerignore` excludes.
+  There are no `type=ssh` mounts, no `bind,from=`, and no `--ssh`.
+- `build` takes no git or URL context, `--cache-from`, `--cache-to`,
+  `--output`, `--build-context`, `--ulimit` or `--shm-size`, and ignores
+  `# syntax=`: it is its own Dockerfile frontend. Its steps boot
+  runwhp's kernel, or `RUNWHP_KERNEL`'s, never with `--module`.
+- A RUN step's environment has `HOSTNAME`, which init sets and BuildKit
+  does not.
+- `push` rebuilds and gzips every layer of the image, though the
+  registry has it, and recompresses a pulled image's layers, which then
+  get digests of their own: runwhp keeps no compressed layers, and
+  remembers no digests a layer was pulled or pushed with. A second push
+  of the same image uploads nothing.
+- A prune waits for a build or a push to finish.
 - `cp`, `export`, `diff` and `commit` on a stopped container boot a guest
   with its storage, about 0.1 s, and hold its lock meanwhile: a `start`
   then is refused as busy, rather than waiting, and `delete` says the

@@ -537,3 +537,42 @@
   10.6 MB. `list -q` started in 35-39 ms either way, and `run --rm alpine
   true` took 175-225 ms. The shim is a binary of its own, so runwhp.exe
   stays as it was.
+- **BuildKit's Dockerfile packages cost runwhp.exe half a megabyte.**
+  Its parser, instructions, shell and linter packages, from buildkit
+  v0.35.0, added 447 KB, and no measurable time to `list -q` or `run`;
+  the module brought grpc 1.85.0, x/sys 0.50.0 and patch releases of
+  ttrpc, klauspost/compress and x/net, under which the shim and its
+  nerdctl tests are unchanged.
+- **How Docker 29's BuildKit writes an image**, over a corpus in
+  `out/check17/df`. Each history entry has the comment
+  `buildkit.dockerfile.v0`; RUN, COPY and ADD entries end in
+  ` # buildkit`, and RUN's list every argument in scope, as
+  `RUN |2 A=1 B=bee /bin/sh -c ...`, proxy arguments a stage declares
+  included; COPY's leave out `--from`, `--link` and `--checksum`.
+  WORKDIR is a layer, its directory owned by the user then in effect. A
+  layer's entry is dated when that layer was first made, so even
+  `--no-cache` gave the same image ID; an entry with no layer takes the
+  first new layer's time, or the time of the layer before it. RUN steps
+  have the hostname `buildkitsandbox`, and their layers no mount points,
+  hosts or resolv.conf. A cache mount starts 0755 and root's, or as its
+  `uid`, `gid` and `mode` say.
+- **BuildKit's COPY into a tree that is there** makes missing parents
+  0755, owned as `--chown` says, and dated now; leaves a directory that
+  is there its mode and owner, giving it the source's time; follows a
+  symlinked source and a symlinked destination; takes `--chown=1000` as
+  1000:1000, and a name from the image's own passwd and group files;
+  refuses names with `--link`; keeps owners copying `--from` another
+  stage, but not on the destination directory itself; and unpacks ADD's
+  tars with their owners, unless `--chown`. A URL lands 0600, dated by
+  `Last-Modified`.
+- **BuildKit's client sends files from Windows** owned by root, 0755,
+  read-only ones 0555, with their times, hidden ones too, symlinks as
+  symlinks, and refuses a junction: "invalid file request".
+- **A process runs one WHP partition with memory at a time.** A second
+  partition, made while the first runs, fails to map its memory:
+  `WHvMapGpaRange` returns HRESULT 0xC0370008 at its first chunk. So a
+  build cannot read another stage's guest while its step's guest runs,
+  and COPY --from spools what it copies first.
+- **klauspost's gzip at its default level** compresses an 81 MB layer of
+  python:3.12-slim to 39.3% at 113 MB/s, against compress/gzip's 38.0%
+  at 40 MB/s, about as fast as save rebuilds a layer; push uses it.

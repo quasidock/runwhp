@@ -1,5 +1,17 @@
 # Status
 
+- **Iteration 17** (2026-11-25): images are built and pushed. `build`
+  builds an image from a Dockerfile as Docker 29's BuildKit does: its
+  own parser, the same stages, arguments, configuration and history,
+  COPY's and ADD's rules, heredocs, and cache, tmpfs, bind and secret
+  mounts. Each step that changes files runs in a guest of its own, as
+  Docker's classic builder ran each in a container, and steps are cached
+  by what they were given, so a build again gives the same image. The
+  cache keeps its layers from prunes until `builder prune`. `push` writes
+  an image to a registry as Docker does, rebuilding and gzipping its
+  layers, which the store does not keep compressed, and keeps its ID. See
+  [Building images](../README.md#building-images) and
+  [Iteration 17 results](#iteration-17-results).
 - **Iteration 16** (2026-11-25): stock nerdctl runs Linux containers on
   runwhp. `runwhp containerd` runs a containerd of the user's own,
   unelevated, set up for runwhp, and nerdctl 2.4 drives it as it drives
@@ -1402,3 +1414,87 @@ The new tests cover:
 The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
 the WSL kernel with its vsock modules passed with `--module`; the shim
 boots runwhp's kernel in each.
+
+## Iteration 17 results
+
+Measured on the test machine with runwhp's kernel, from Git Bash, with
+the store on NTFS (`C:`) and build contexts on ReFS (`E:`), over three to
+five runs. "Iteration 16" is that iteration's build, run in turn with this
+one; Docker is Docker 29.10, with BuildKit, in WSL on the same machine,
+its contexts in WSL's own file system.
+
+Runs cost the same:
+
+| Measurement | Iteration 16 | Iteration 17 |
+| --- | --- | --- |
+| `run --rm alpine:3.20 true`, `-m 512m` | 199-208 ms | 184-197 ms |
+| the same, default memory | 250-265 ms | 257-265 ms |
+
+Builds. A step that changes files boots its guests, where BuildKit starts
+a container: a RUN costs about twice what Docker's does, a COPY a little
+more. A build that needs no new steps, or one, is faster, as runwhp has
+no daemon to reach and its cache is a key per step:
+
+| Measurement | runwhp | Docker |
+| --- | --- | --- |
+| alpine, `RUN apk add --no-cache curl`, `COPY` of 50 files, with `--no-cache` | 2.19-2.37 s | 2.81-3.32 s |
+| the same, from the cache | 78-80 ms | 304-317 ms |
+| the same, one copied file changed | 221-229 ms | 418-447 ms |
+| 10 `RUN echo` steps, with `--no-cache` | 8.05 s | 3.89-4.02 s |
+| the same, the guests at `-m 512m` | 7.39-7.41 s | |
+| 10 `COPY` steps of one file | 1.34-1.36 s | 0.90-1.12 s |
+| `COPY` of a 100 MB file | 0.87-0.99 s | |
+| the same, from the cache, its contents hashed | 142-154 ms | |
+| `COPY` of 10,000 small files | 3.18-3.27 s | |
+| the same, from the cache | 579-594 ms | |
+
+A RUN takes about 0.8 s at the default memory, and 0.74 s with
+`-m 512m`: two guests, one to run the command and one to read its
+changes, as a guest stops with its process. A COPY boots one guest, about
+0.13 s. A build from the cache hashes the files every COPY selects, about
+50 µs a small file.
+
+Pushes of python:3.12-slim, 4 layers, 124 MB of tars, to a registry on
+the test machine. runwhp rebuilds and gzips every layer each time, about
+3 s of the 3.2 s; Docker knows its layers are there:
+
+| Measurement | runwhp | Docker |
+| --- | --- | --- |
+| `push` into an empty registry | 3.21-3.32 s, and 12.0 s once, first | 3.51 s |
+| again | 3.12-4.18 s | 62-97 ms |
+
+runwhp.exe is 22.0 MB, 1.35 MB more than in iteration 16: BuildKit's
+Dockerfile packages 0.45 MB, the builder and push the rest.
+
+The new tests cover:
+
+- **Building, with a fake worker:** BuildKit's history and configuration
+  for every metadata instruction; times, and `SOURCE_DATE_EPOCH`; the
+  cache kept across a rebuild and a touched file, and broken by a changed
+  one and `--no-cache`; global and build arguments, proxies kept out of
+  history, and unused ones warned of; stages the target needs, and none
+  else; COPY's destinations, owners, `--chmod`, `--exclude`, wildcards,
+  heredocs and errors; RUN's arguments and heredocs, mounts, refusals,
+  and failures, with the Dockerfile's line; ONBUILD; symbolic modes.
+- **The guest:** extracting as BuildKit's COPY does, a directory there
+  kept, the destination made, and parents given `--chown`'s owner.
+- **The build cache and gc:** entries written at once and read back,
+  layers they keep through an image prune, and `builder prune` with and
+  without `-a`.
+- **Pushing,** to a registry that counts uploads: a v2 schema 2 manifest
+  with the image's ID, valid, and nothing uploaded again; a layer rebuilt
+  wrong failing the push.
+- **End to end:** a build run, its history, rebuilt from the cache with
+  the same ID, and after a change; `-q`, `--iidfile`, `--no-cache` and an
+  untagged build; stages and `--target`; COPY's owners, modes,
+  destinations, symlinks, `--link`, ADD of a tar and of a URL with
+  `--checksum`; heredocs; cache, secret, tmpfs and bind mounts, the cache
+  kept between builds; a failing RUN; the host reached with `--add-host`
+  and not without a network; Dockerfiles on stdin; Ctrl+C during a RUN;
+  `builder prune` and `system df`; push, pulled back into another store
+  with its ID and run, pushed again with nothing uploaded, a pulled image
+  pushed elsewhere with all its tags, and what cannot be pushed.
+
+The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
+the WSL kernel with its vsock modules passed with `--module`; build's
+guests boot runwhp's kernel in each.

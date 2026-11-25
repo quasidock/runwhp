@@ -19,9 +19,11 @@ what it frees. Images, containers and volumes can be listed, measured and
 pruned as Docker's can, and images tagged, imported, and saved to and
 loaded from archives Docker takes, with the same IDs. A container's files
 can be copied in and out, running or stopped, exported, listed as its
-changes and committed to an image, and a container paused. Stock nerdctl
-runs Linux containers on it too, through a containerd of the user's own
-and runwhp's containerd shim, unelevated.
+changes and committed to an image, and a container paused. Images are
+built from Dockerfiles, as BuildKit builds them, each step in a guest of
+its own, and pushed to registries. Stock nerdctl runs Linux containers on
+it too, through a containerd of the user's own and runwhp's containerd
+shim, unelevated.
 
 See [status](docs/status.md) for details.
 
@@ -125,6 +127,8 @@ Images in and out of the store:
 .\out\runwhp.exe tag python:3.12-slim mine/python:dev
 .\out\runwhp.exe history python:3.12-slim
 .\out\runwhp.exe import -c 'ENV GREETING=hi' rootfs.tar mine/rootfs:1
+.\out\runwhp.exe build -t registry.example.com/mine/app:1 .
+.\out\runwhp.exe push registry.example.com/mine/app:1
 ```
 
 A container's files:
@@ -770,6 +774,22 @@ and come into it from them, keeping their IDs, as well as by `pull`.
   files take once unpacked, symlinks counting their targets' length. A
   layer pulled before iteration 14 shows its ext4 image's size instead.
 
+- **push** writes an image to its registry as `docker push` does with
+  Docker's classic store: a Docker v2 schema 2 manifest, indented as
+  Docker writes it, gzip layers, and the configuration blob as it is, so
+  the image keeps its ID and `docker pull` gives it back. The store keeps
+  no compressed layers, so push rebuilds each from its metadata and files,
+  as `save` does, in a guest booted for the purpose, gzips it and uploads
+  it, three at a time while the next is rebuilt; a layer the registry has
+  already is not uploaded, and as gzip gives the same bytes each time, a
+  second push of an image uploads nothing. A pulled image pushed to
+  another repository gets layer digests of its own. The pushed digest is
+  kept, and `image inspect` lists it in `RepoDigests`. Credentials are
+  those `docker login` stored; a registry on localhost, a loopback or a
+  private address, or a `.local` name is spoken to over plain HTTP, as
+  pulls do.
+
+
 | Command | |
 | --- | --- |
 | `save [-o FILE] IMAGE...` | Write images to an archive, to stdout unless `-o`; refuses a console. `image save` too |
@@ -777,6 +797,95 @@ and come into it from them, keeping their IDs, as well as by `pull`.
 | `import [-c CHANGE]... [-m MESSAGE] FILE\|- [REPOSITORY[:TAG]]` | Make an image of one layer from a root file system's tar, and print its ID. `image import` too |
 | `tag SOURCE TARGET` | Name an image anew, replacing what TARGET named. `image tag` too |
 | `history [-H=false] [--no-trunc] [-q] [--format table\|json] IMAGE` | Show how an image was built. `image history` too |
+| `push [-a] [-q] NAME[:TAG]` | Push an image to its registry; `-a` every tag of the repository. `image push` too |
+
+### Building images
+
+`runwhp build` builds an image from a Dockerfile, as `docker build` does
+with BuildKit, Docker 29's builder, and records it in the store:
+
+```powershell
+.\out\runwhp.exe build -t app:1 .
+.\out\runwhp.exe build -f build\Dockerfile --target release --build-arg VERSION=1.2 -t app:1.2 .
+Get-Content Dockerfile | .\out\runwhp.exe build -t app:stdin -
+.\out\runwhp.exe build --secret id=npm,src=$HOME\.npmrc -t web:1 .
+.\out\runwhp.exe builder prune -a
+```
+
+- **How it runs.** The Dockerfile is parsed by BuildKit's own parser, and
+  dispatched as BuildKit dispatches it: the same stages, argument scopes,
+  configuration and history, down to each entry's `created by` and
+  BuildKit's comment, and the same rules for when those entries are
+  dated. Each step that changes files boots a guest of its own on the
+  layers below it, as Docker's classic builder ran each in a container,
+  and its changes become the step's layer. A `RUN` takes two guests: one
+  runs the command, with the network unless `--network none`, as the
+  image's user, in its working directory, with the hostname
+  `buildkitsandbox`; and, since a guest stops with its process, a second
+  reads what it changed. `COPY` and `ADD` put the files into one guest
+  that reads its changes back. Every other instruction changes only the
+  configuration, and boots nothing. Stages are built one at a time, and
+  only those the target needs.
+- **The cache.** A step that has run before with the same inputs is not
+  run again: its key is its parent's, the instruction as expanded, the
+  arguments, environment, user, working directory and mounts in effect,
+  and, for `COPY` and `ADD`, what the files hold, their names, modes and
+  links, but not their times, as BuildKit's. A step's layer keeps the
+  time it was first made, so building again from the cache gives the same
+  image, with the same ID. `--no-cache` runs every step. The cache's
+  entries keep their layers from prunes; `builder prune` removes the
+  entries no image uses, and with `-a` all of them, and `system prune`
+  does as much. `system df` counts them.
+- **WORKDIR** makes its directory, as the user in effect, in the stage's
+  next step that boots a guest, or in one more step at the stage's end,
+  rather than in a layer of its own, as BuildKit does, and its history
+  entry is empty, as the classic builder's was; the files in the image
+  are the same.
+- **Files from Windows.** The build context is a directory, less what its
+  `.dockerignore` excludes, or `Dockerfile.dockerignore` beside the
+  Dockerfile. Its files arrive as BuildKit's client sends them from
+  Windows: owned by root, with the times they have, directories and files
+  `0755` and read-only files `0555`; symlinks as they are, with Developer
+  Mode, and junctions refused, as BuildKit refuses them.
+- **COPY and ADD** follow BuildKit's rules: directories copied by their
+  contents, wildcards, destinations made with their parents, a directory
+  that is there keeping its mode and owner, `--chown` by name or number,
+  resolved in the image's own `/etc/passwd` and `/etc/group`, `--chmod` in
+  octal or chmod's symbolic form, `--exclude`, `--parents`, `--link`,
+  `--from` a stage or an image, and heredocs. `ADD` unpacks a local tar,
+  plain or compressed with gzip, zstd or bzip2, and fetches a URL,
+  checked with `--checksum`, from the host, as BuildKit's daemon fetches
+  it.
+- **RUN** takes BuildKit's heredocs, `--network=none`, and these mounts:
+  `type=cache`, a volume of its own per id, kept in the build cache and
+  given to one step at a time; `type=tmpfs`; `type=bind` of a context
+  directory or file, read-only; and `type=secret`, from `--secret`'s file
+  or environment variable, as a file or with `env=` as a variable, in no
+  layer and no history. Mount points are left out of the step's layer, as
+  BuildKit leaves them.
+- **Output** is BuildKit's plain progress, on stderr, each step's output
+  timed from its start, then the image's ID; `-q` prints only the ID.
+  Linter warnings follow, as Docker prints them. Ctrl+C stops the step
+  under way, and the build exits 130; the steps done stay in the cache.
+
+| Flag | Meaning |
+| --- | --- |
+| `-t`, `--tag NAME` | Name the image; repeatable. Without one, the image is untagged, listed as `<none>` |
+| `-f`, `--file FILE` | The Dockerfile; `PATH\Dockerfile` by default, `-` for stdin |
+| `--build-arg K[=V]` | A build argument; `K` alone takes it from the environment |
+| `--target STAGE` | Build that stage, and what it needs |
+| `--no-cache`, `--pull` | Run every step; pull every `FROM` image again |
+| `-q`, `--iidfile FILE` | Print only the ID; write it to FILE |
+| `--network default\|host\|none` | `RUN` steps' network: runwhp's own, or none |
+| `--add-host NAME:IP` | An `/etc/hosts` entry for `RUN` steps; `host-gateway` reaches the host |
+| `--label K=V` | A label on the image |
+| `--secret id=ID[,src=FILE\|,env=VAR]` | A secret for `RUN --mount=type=secret` |
+| `-m`, `--memory`, `--cpus` | Each `RUN` guest's memory and vCPUs, as `run` takes them |
+
+| Command | |
+| --- | --- |
+| `build [flags] PATH\|-` | Build an image. `image build` too |
+| `builder prune [-a] [-f]` | Remove the build cache no image uses, or all of it and its cache mounts |
 
 ### nerdctl and containerd
 
@@ -1062,8 +1171,6 @@ bzImage.
 | [`cmd/runwhp`](cmd/runwhp) | Command line |
 | [`cmd/containerd-shim-runwhp-v1`](cmd/containerd-shim-runwhp-v1) | The containerd shim, and runwhp's snapshotter |
 | [`internal/ocispec`](internal/ocispec) | An OCI runtime spec, as nerdctl writes one on Windows or ctr one for Linux, turned into a container's configuration |
-| [`cmd/containerd-shim-runwhp-v1`](cmd/containerd-shim-runwhp-v1) | The containerd shim, and runwhp's snapshotter |
-| [`internal/ocispec`](internal/ocispec) | An OCI runtime spec, as nerdctl writes one on Windows or ctr on Linux, turned into a container's configuration |
 | [`internal/vmm`](internal/vmm) | Running a container's VM: its devices and storage, the guest's boot, the supervisor that holds the container and serves its pipe, attached clients and pause, and the helper guests that read image layers and stopped containers' files |
 | [`internal/whp`](internal/whp) | Bindings for `WinHvPlatform.dll` and `WinHvEmulation.dll` |
 | [`internal/vm`](internal/vm) | Partition setup, guest memory committed as it is touched, vCPU loops, decoding of device register accesses, processor topology, serial port, RTC stub, I/O APIC |
@@ -1076,7 +1183,9 @@ bzImage.
 | [`internal/volume`](internal/volume) | Named volumes in the store: names, making, listing and removing them |
 | [`internal/container`](internal/container) | Containers in the store: records, names, locks, state, restart policies, logs, written, rotated and read with their times, and the pipe of the runwhp running one, whose attach requests carry frames in the framing of logs before iteration 13 |
 | [`internal/hostfs`](internal/hostfs) | The host end of bind mounts: Windows files served as that file system, with WSL's metadata |
-| [`internal/image`](internal/image), [`internal/layer`](internal/layer) | Registry pulls, image records and configuration blobs, layer conversion and cache with each layer's tar metadata, image archives read and written, imports, commits and Dockerfile changes, and listing and removing them |
+| [`internal/image`](internal/image), [`internal/layer`](internal/layer) | Registry pulls, image records and configuration blobs, layer conversion and cache with each layer's tar metadata, image archives read and written, imports, commits and Dockerfile changes, pushes, and listing and removing them |
+| [`internal/build`](internal/build), [`internal/buildcache`](internal/buildcache) | The Dockerfile builder: stages, arguments, history and configuration as BuildKit's, the build context and `.dockerignore`, COPY's rules, RUN's heredocs and mounts, the step cache's keys and entries, and the guests that run steps |
+| [`internal/rootfs`](internal/rootfs) | The host's client of init's root file server, which cp, export, diff, commit and build reach guests' files through |
 | [`internal/gc`](internal/gc) | What in the store is in use: which images and containers list each layer, which volumes and kernels are used; removals planned from that, and the store lock that keeps pulls and runs from racing them |
 | [`internal/storefile`](internal/storefile) | Reading and replacing records while other runwhps read them |
 | [`internal/kernel`](internal/kernel) | The kernel artifact's format, the pinned build, and fetching it into the store |
@@ -1120,11 +1229,12 @@ container's supervisor, with no daemon.
 | Host to guest | Console ports for the main process; a virtio socket device for further connections | Done: `runwhp exec` uses vsock |
 | Bind mounts and volumes | virtio-fs, with a FUSE server in Go serving Windows files and keeping Unix metadata as WSL does, and the writeback cache for delegated mounts; volumes as journaled ext4 disk images on virtio-blk | Done; a volume is used by one container at a time |
 | Networking | User-mode network stack in the VMM (gVisor netstack); published ports are loopback listeners | Done, IPv4 only, TCP ports only |
-| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | Done over runwhp's own images, plus `run`, `list`, `stats`, `stop`, `restart`, `rename`, `logs`, `attach`, `wait`, `pause`, `unpause`, `cp`, `export`, `diff`, `commit`, `images`, `rmi`, the prunes, `system df`, `tag`, `history`, `save`, `load`, `import` and `containerd`, and restart policies; OCI bundles only through the shim |
+| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | Done over runwhp's own images, plus `run`, `list`, `stats`, `stop`, `restart`, `rename`, `logs`, `attach`, `wait`, `pause`, `unpause`, `cp`, `export`, `diff`, `commit`, `images`, `rmi`, the prunes, `system df`, `tag`, `history`, `save`, `load`, `import`, `build`, `builder prune`, `push` and `containerd`, and restart policies; OCI bundles only through the shim |
 | containerd | A shim v2 (`containerd-shim-runwhp-v1`) that is the task's VMM, taking nerdctl's spec and containerd's LCOW layers; a snapshotter whose views have no mounts; a user containerd set up by `runwhp containerd` | Done: stock nerdctl 2.4, unelevated, `--network none` and runwhp's network |
 | Container files | A file server in init, reached through the container's runwhp, or for a stopped container through a guest booted with its storage; tars written and read as Docker's daemon does | Done: `cp`, `export`, `diff`, `commit` |
 | Container logs | Frames stamped with the host's time, rotated as Docker's `local` driver rotates | Done; every kept container has one |
 | Image archives | Docker 29's `docker save` format, rebuilt from each layer's tar-split metadata and its files, read in a guest booted for the purpose | Done; same IDs and blobs as Docker |
+| Image builds | runwhp's own Dockerfile builder: BuildKit's parser, and its dockerfile2llb's dispatch, with each RUN, COPY and ADD in a guest of its own, a cache keyed by each step's inputs, and `push` from the store, its layers rebuilt and gzipped | Done; BuildKit's history and configuration, and cache, tmpfs, bind and secret mounts; WORKDIR folded into the next step |
 | Kernel | Our own build with virtio drivers built in, shipped as a signed OCI artifact | Done: Linux 6.18 LTS on ghcr.io, pinned by digest rather than signed |
 
 ### Out of scope for now
@@ -1272,6 +1382,10 @@ starts, which covers decompressing the kernel and early memory setup.
   bundles, as runc's does, is still open; and whether nerdctl should run
   Linux containers on Windows without the flags it needs today
   (`--runtime`, `--platform`, `--network none`) is nerdctl's to settle.
+- Should `build` also run BuildKit itself, in a guest, for what its own
+  builder lacks: `bind,from=` and ssh mounts, cache export and import,
+  stages built at once, and steps that share one guest rather than boot
+  one each?
 - Is a one-time administrator step acceptable on machines where the hypervisor
   is off, or must there be a fallback that needs none?
 - virtio-mmio with generated ACPI, as spiked, or virtio over PCI with MSI-X,
