@@ -124,7 +124,10 @@ func (s *Supervisor) RunBackground(o Background) {
 				}
 			}
 		}
-		code, err := bootContainer(ctx, s.root, s.rec, nil, image.PullNever, proxy, bb, hooks, o.Logf, time.Now())
+		bootCfg := s.rec.Config
+		layer := StartLayer(s.rec.RW(), bootCfg.StorageSize, bootCfg.AutoRemove)
+		code, err := bootContainer(ctx, s.root, bootCfg, layer, guestOpts{}, image.PullNever, proxy, bb, hooks, o.Logf, time.Now())
+		layer.Close()
 		cancel()
 		if err != nil {
 			errorf("%v", err)
@@ -184,7 +187,7 @@ func (s *Supervisor) RunForeground(ctx context.Context, o Foreground) (int, erro
 	s.policy = s.rec.Config.Restart
 	s.backoff = o.Backoff
 	b := s.beginBoot(o.Proxy)
-	code, err := bootContainer(ctx, s.root, s.rec, o.Layer, o.Policy, o.Proxy, o.IO, s.hooks(b, false), o.Logf, o.Start)
+	code, err := bootContainer(ctx, s.root, s.rec.Config, o.Layer, guestOpts{}, o.Policy, o.Proxy, o.IO, s.hooks(b, false), o.Logf, o.Start)
 	o.Layer.Close()
 	if restart, delay := s.endBoot(b, code, err); restart {
 		// As Docker's daemon would, a runwhp in the background starts it

@@ -3,6 +3,7 @@
 package vmm
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -129,19 +130,27 @@ func clockPeriod(logf func(string, ...any)) time.Duration {
 // -t but no console of runwhp's own.
 const DetachedRows, DetachedCols = 24, 80
 
-// bootContainer runs a container's VM until it stops, and returns the
-// container's exit code. The caller holds the container's lock.
-//
-// layer is the writable layer, being opened; if nil, bootContainer opens
-// the container's own, while it reads the kernel.
-func bootContainer(ctx context.Context, root string, rec *container.Container, layer *PendingLayer, policy image.Policy, proxy *SignalProxy, bio BootIO, hooks bootHooks, logf func(string, ...any), start time.Time) (int, error) {
-	const fail = guestspec.ExitRuntime
-	cfg := rec.Config
+// guestOpts shape a guest booted from a container's config for something
+// other than running its process.
+type guestOpts struct {
+	// serve, if set, boots the container's root with no process: init
+	// serves it as guestspec.Spec.Serve says until the host sends
+	// Shutdown.
+	serve string
+	// noNIC leaves the network device out, though init names the network
+	// as the config says; noBalloon leaves the balloon out.
+	noNIC, noBalloon bool
+	// memory and cpus, if set, size the guest instead of the config.
+	memory uint64
+	cpus   int
+}
 
-	if layer == nil {
-		layer = StartLayer(rec.RW(), cfg.StorageSize, cfg.AutoRemove)
-		defer layer.Close()
-	}
+// bootContainer runs the VM of a container, configured by cfg, until it
+// stops, and returns the container's exit code. layer is its writable
+// layer, being opened; the caller closes it, and holds whatever lock the
+// container's storage needs.
+func bootContainer(ctx context.Context, root string, cfg *container.Config, layer *PendingLayer, opts guestOpts, policy image.Policy, proxy *SignalProxy, bio BootIO, hooks bootHooks, logf func(string, ...any), start time.Time) (int, error) {
+	const fail = guestspec.ExitRuntime
 
 	storage, err := openStorage(root, cfg, logf)
 	if err != nil {
@@ -158,17 +167,24 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 	if lr.err != nil {
 		return fail, lr.err
 	}
-	keep := lr.file != nil && !cfg.AutoRemove
+	keep := lr.file != nil && !layer.scratch
+	var layerSize int64
 	if lr.file != nil {
-		logf("%4d ms  writable layer ready: %d GiB, kept %v, opened in %d ms", time.Since(start).Milliseconds(), cfg.StorageSize>>30, keep, lr.took.Milliseconds())
+		if layerSize, err = lr.file.Size(); err != nil {
+			return fail, err
+		}
+		logf("%4d ms  writable layer ready: %d GiB, kept %v, opened in %d ms", time.Since(start).Milliseconds(), layerSize>>30, keep, lr.took.Milliseconds())
 	}
 
 	spec := guestspec.Spec{
 		Args: cfg.Args, Env: cfg.Env, Cwd: cfg.Cwd, User: cfg.User,
 		Hostname: cfg.Hostname, Hosts: cfg.Hosts, Layers: len(storage.layers), Scratch: lr.file != nil, KeepLayer: keep,
 		Volumes: len(storage.volumes), Debug: cfg.Debug, Stdin: cfg.Stdin, TTY: cfg.TTY, Network: GuestNetwork(cfg.Network),
-		Mounts: cfg.Mounts, WaitStart: hooks.waitStart, Reclaim: reclaimPolicy(logf),
-		ClockSync: clockPeriod(logf) > 0,
+		Mounts: cfg.Mounts, WaitStart: hooks.waitStart, Serve: opts.serve,
+	}
+	if opts.serve == "" {
+		spec.Reclaim = reclaimPolicy(logf)
+		spec.ClockSync = clockPeriod(logf) > 0
 	}
 	if cfg.TTY {
 		if bio.Terminal {
@@ -193,13 +209,20 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 			stdin = strings.NewReader("")
 		}
 	}
+	stdout, stderr := bio.Stdout, bio.Stderr
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
 	guest := newGuestStats(proxy)
 	freezer := newGuestFreezer(proxy)
 	status := &eventWriter{onReady: hooks.ready, onStarted: hooks.started, onStats: guest.deliver, onFreeze: freezer.deliver}
 	console := &virtio.Console{
 		Ports: []virtio.Port{
-			{Name: guestspec.PortStdout, Out: bio.Stdout},
-			{Name: guestspec.PortStderr, Out: bio.Stderr},
+			{Name: guestspec.PortStdout, Out: stdout},
+			{Name: guestspec.PortStderr, Out: stderr},
 			{Name: guestspec.PortControl, Out: status, In: proxy.queue},
 			{Name: guestspec.PortStdin, In: stdin},
 		},
@@ -211,8 +234,11 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 	defer func() { logf("%s", vsock.Stats()) }()
 	handles := &vmHandles{vsock: vsock, probe: &vm.Probe{}, guest: guest, freezer: freezer}
 	// The balloon gives back to Windows the memory the guest reports free.
-	devices := []virtio.Device{console, vsock, &virtio.Balloon{}}
-	if cfg.Network {
+	devices := []virtio.Device{console, vsock}
+	if !opts.noBalloon {
+		devices = append(devices, &virtio.Balloon{})
+	}
+	if cfg.Network && !opts.noNIC {
 		nic := &virtio.Net{MAC: netstack.GuestMAC, MTU: netstack.MTU}
 		handles.nic = nic
 		stack, err := netstack.New(netstack.Config{
@@ -237,13 +263,16 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 		// host's disk, as it would under Docker. A scratch disk does not:
 		// it is thrown away after the run, so the guest need never wait for
 		// the host's disk.
-		storage.setScratch(lr.file, cfg.StorageSize, keep)
+		storage.setScratch(lr.file, layerSize, keep)
 	}
 	devices = append(devices, storage.devices()...)
 	for _, d := range devices {
 		if b, ok := d.(*virtio.Blk); ok {
 			handles.blks = append(handles.blks, b)
 		}
+	}
+	if len(devices) > vm.MaxDevices {
+		return fail, fmt.Errorf("%d devices are more than a guest can take", len(devices))
 	}
 	if hooks.attached != nil {
 		hooks.attached(handles)
@@ -270,8 +299,8 @@ func bootContainer(ctx context.Context, root string, rec *container.Container, l
 		Kernel:      guestFiles.kernel,
 		Initrd:      initrd,
 		Cmdline:     guestCmdline(cfg.Debug),
-		Memory:      cfg.Memory,
-		CPUs:        cfg.CPUs,
+		Memory:      cmp.Or(opts.memory, cfg.Memory),
+		CPUs:        cmp.Or(opts.cpus, cfg.CPUs),
 		Devices:     devices,
 		Probe:       handles.probe,
 		ConsoleLine: consoleLine,

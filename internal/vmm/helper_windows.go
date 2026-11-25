@@ -256,125 +256,80 @@ func (ls *LayerServers) Close() {
 	}
 }
 
-// A root server is a guest runwhp boots with a stopped container's
-// storage, for cp, export, diff and commit: its layers, its writable
-// layer, its volumes and its shares, which init mounts as it would for the
-// container, serving its files on guestspec.RootPort. It runs no process,
-// and has no network or balloon. The caller holds the container's lock
-// throughout, so the container cannot start meanwhile.
+// A served guest is one runwhp boots from a container's config to reach
+// its files rather than to run its process: init mounts its root as it
+// would for the container, serves it on guestspec.RootPort, and waits for
+// the host to send Shutdown. It has no network device or balloon, and a
+// root server's memory and processors.
 type RootGuest struct {
-	vsock   *virtio.Vsock
-	queue   *controlQueue
-	storage *containerStorage
-	rw      *disk.File // nil: the container has no writable layer yet
-	cancel  context.CancelFunc
-	done    chan error
-	logf    func(string, ...any)
+	vsock  *virtio.Vsock
+	queue  *controlQueue
+	layer  *PendingLayer
+	cancel context.CancelFunc
+	done   chan error
+	logf   func(string, ...any)
 }
 
-// rootShutdownWait bounds how long a root server takes to freeze its file
+// rootShutdownWait bounds how long a served guest takes to freeze its file
 // systems and stop once asked.
 const rootShutdownWait = 10 * time.Second
 
-// BootRootServer boots a root server for the stopped container c, and
-// returns once init is ready to serve.
-func BootRootServer(ctx context.Context, root string, c *container.Container) (_ *RootGuest, err error) {
-	cfg := c.Config
-	logf := func(string, ...any) {}
-	if cfg.Debug {
-		logf = func(format string, a ...any) { fmt.Fprintf(os.Stderr, format+"\n", a...) }
-	}
-	g := &RootGuest{vsock: &virtio.Vsock{CID: guestspec.GuestCID, Logf: logf}, queue: newControlQueue(), done: make(chan error, 1), logf: logf}
-	defer func() {
-		if err != nil {
-			g.closeFiles()
-		}
-	}()
-	if g.storage, err = openStorage(root, cfg, logf); err != nil {
-		return nil, err
-	}
+// BootRootServer boots a guest serving the files of the stopped container
+// c: its layers, its writable layer, its volumes and its shares. The caller
+// holds the container's lock throughout, so the container cannot start
+// meanwhile.
+func BootRootServer(ctx context.Context, root string, c *container.Container) (*RootGuest, error) {
 	// The writable layer, if the container has one: a container whose
 	// writable layer is in memory, or that never booted, has none, and
 	// init gives it an empty one.
+	var rw *disk.File
 	if f, err := disk.Open(c.RW(), disk.Exclusive); err == nil {
-		size, err := f.Size()
-		if err != nil {
-			f.Close()
-			return nil, err
-		}
-		g.rw = f
-		g.storage.setScratch(f, size, true)
+		rw = f
 	} else if errors.Is(err, disk.ErrInUse) {
 		return nil, fmt.Errorf("container %s's writable layer is in use", c.Short())
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
-	guestFiles, err := loadGuest(ctx, root, cfg.Kernel, cfg.Modules, cfg.Init, image.PullMissing)
-	if err != nil {
-		return nil, err
+	return bootServed(ctx, root, c.Config, ReadyLayer(rw, false), "container "+c.Short()+"'s files")
+}
+
+// bootServed boots a guest serving the root cfg describes, with layer as
+// its writable layer, which the guest closes when it stops, and returns
+// once init is ready to serve. what names what it serves, in errors.
+func bootServed(ctx context.Context, root string, cfg *container.Config, layer *PendingLayer, what string) (*RootGuest, error) {
+	logf := func(string, ...any) {}
+	if cfg.Debug {
+		logf = func(format string, a ...any) { fmt.Fprintf(os.Stderr, format+"\n", a...) }
 	}
-	spec := guestspec.Spec{
-		User: cfg.User, Hostname: cfg.Hostname, Hosts: cfg.Hosts, Network: GuestNetwork(cfg.Network),
-		Layers: len(g.storage.layers), Scratch: g.rw != nil, KeepLayer: g.rw != nil, Volumes: len(g.storage.volumes),
-		Mounts: cfg.Mounts, Debug: cfg.Debug, Serve: guestspec.ServeRoot,
-	}
-	initrd, err := guestFiles.initramfs(&spec)
-	if err != nil {
-		return nil, err
-	}
+	// The guest outlives ctx, which bounds only its boot; Close or stop
+	// ends it.
+	vmCtx, cancel := context.WithCancel(context.Background())
+	proxy := NewSignalProxy(cancel, logf)
+	g := &RootGuest{queue: proxy.queue, layer: layer, cancel: cancel, done: make(chan error, 1), logf: logf}
 	ready := make(chan struct{})
 	var once sync.Once
-	status := &eventWriter{onReady: func() { once.Do(func() { close(ready) }) }}
-	devices := append([]virtio.Device{
-		&virtio.Console{Ports: []virtio.Port{{Name: guestspec.PortControl, Out: status, In: g.queue}}, Logf: logf},
-		g.vsock,
-	}, g.storage.devices()...)
-	// Fewer than the container boots with: no network or balloon.
-	if len(devices) > vm.MaxDevices {
-		return nil, fmt.Errorf("container %s has more devices than a guest can take", c.Short())
+	hooks := bootHooks{
+		ready:    func() { once.Do(func() { close(ready) }) },
+		attached: func(h *vmHandles) { g.vsock = h.vsock },
 	}
-	tail := &ring{max: consoleTail}
-	var tailMu sync.Mutex
-	consoleLine := func(line string) {
-		tailMu.Lock()
-		tail.add(line)
-		tailMu.Unlock()
-	}
-	if cfg.Debug {
-		consoleLine = func(line string) { fmt.Fprintln(os.Stderr, line) }
-	}
-	vmCtx, cancel := context.WithCancel(context.Background())
-	g.cancel = cancel
+	opts := guestOpts{serve: guestspec.ServeRoot, noNIC: true, noBalloon: true, memory: serverMemory, cpus: min(serverCPUs, runtime.NumCPU())}
 	go func() {
-		_, err := vm.Run(vmCtx, vm.Config{
-			Kernel: guestFiles.kernel, Initrd: initrd, Cmdline: guestCmdline(cfg.Debug),
-			Memory: serverMemory, CPUs: min(serverCPUs, runtime.NumCPU()),
-			Devices: devices, ConsoleLine: consoleLine, Logf: logf,
-		})
+		_, err := bootContainer(vmCtx, root, cfg, layer, opts, image.PullMissing, proxy, BootIO{Diag: os.Stderr}, hooks, logf, time.Now())
 		g.done <- err
 	}()
-	fail := func(err error) (*RootGuest, error) {
-		tailMu.Lock()
-		tail.print(os.Stderr)
-		tailMu.Unlock()
-		return nil, err
-	}
 	select {
 	case <-ready:
 		return g, nil
 	case err := <-g.done:
 		g.done <- err
 		g.stop()
-		if st, ok := status.get(); ok && st.Error != "" {
-			return fail(fmt.Errorf("the guest serving container %s's files failed: %s", c.Short(), st.Error))
-		}
 		if err == nil {
 			err = errors.New("it stopped")
 		}
-		return fail(fmt.Errorf("the guest serving container %s's files failed: %w", c.Short(), err))
+		return nil, fmt.Errorf("the guest serving %s failed: %w", what, err)
 	case <-time.After(serverTimeout):
 		g.stop()
-		return fail(fmt.Errorf("the guest serving container %s's files was not ready after %v", c.Short(), serverTimeout))
+		return nil, fmt.Errorf("the guest serving %s was not ready after %v", what, serverTimeout)
 	case <-ctx.Done():
 		g.stop()
 		return nil, ctx.Err()
@@ -401,20 +356,8 @@ func (g *RootGuest) Close() {
 
 // stop stops the machine at once, and lets go of the disks.
 func (g *RootGuest) stop() {
-	if g.cancel != nil {
-		g.cancel()
-		err := <-g.done
-		g.done <- err
-	}
-	g.closeFiles()
-}
-
-func (g *RootGuest) closeFiles() {
-	if g.storage != nil {
-		g.storage.close()
-	}
-	if g.rw != nil {
-		g.rw.Close()
-		g.rw = nil
-	}
+	g.cancel()
+	err := <-g.done
+	g.done <- err
+	g.layer.Close()
 }

@@ -6,6 +6,8 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/quasidock/runwhp/internal/rootfs"
 )
 
 func testTar(t *testing.T) []byte {
@@ -29,11 +31,11 @@ func TestCutTar(t *testing.T) {
 		if err := copyTar(io.Discard, bytes.NewReader(whole[:cut])); err == nil || !strings.Contains(err.Error(), "early") {
 			t.Errorf("copyTar of %d bytes of %d: %v", cut, len(whole), err)
 		}
-		if _, err := io.ReadAll(&tarChecker{r: bytes.NewReader(whole[:cut])}); err == nil {
-			t.Errorf("tarChecker of %d bytes of %d passed", cut, len(whole))
+		if _, err := io.ReadAll(rootfs.CheckTar(bytes.NewReader(whole[:cut]))); err == nil {
+			t.Errorf("CheckTar of %d bytes of %d passed", cut, len(whole))
 		}
 	}
-	if _, err := io.ReadAll(&tarChecker{r: bytes.NewReader(whole)}); err != nil {
-		t.Errorf("tarChecker of a whole tar: %v", err)
+	if _, err := io.ReadAll(rootfs.CheckTar(bytes.NewReader(whole))); err != nil {
+		t.Errorf("CheckTar of a whole tar: %v", err)
 	}
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/moby/go-archive"
 
 	"github.com/quasidock/runwhp/internal/container"
+	"github.com/quasidock/runwhp/internal/rootfs"
 	"github.com/quasidock/runwhp/internal/vmm"
 )
 
@@ -162,13 +163,13 @@ func copyFromContainer(ctx context.Context, rc *rootClient, o cpOptions, srcPath
 	// is copied under the symlink's name.
 	var rebaseName string
 	if o.followLink {
-		if st, err := rc.stat(ctx, srcPath); err == nil && st.Mode&os.ModeSymlink != 0 {
+		if st, err := rc.Stat(ctx, srcPath); err == nil && st.Mode&os.ModeSymlink != 0 {
 			linkTarget := joinLink(srcPath, st.LinkTarget)
 			linkTarget, rebaseName = archive.GetRebaseName(srcPath, linkTarget)
 			srcPath = linkTarget
 		}
 	}
-	content, st, err := rc.get(ctx, srcPath)
+	content, st, err := rc.Get(ctx, srcPath)
 	if err != nil {
 		return err
 	}
@@ -209,11 +210,11 @@ func copyToContainer(ctx context.Context, rc *rootClient, o cpOptions, srcPath, 
 		srcPath = p
 	}
 	dstInfo := archive.CopyInfo{Path: dstPath}
-	if st, err := rc.stat(ctx, dstPath); err == nil {
+	if st, err := rc.Stat(ctx, dstPath); err == nil {
 		if st.Mode&os.ModeSymlink != 0 {
 			linkTarget := joinLink(dstPath, st.LinkTarget)
 			dstInfo.Path = linkTarget
-			st, err = rc.stat(ctx, linkTarget)
+			st, err = rc.Stat(ctx, linkTarget)
 		}
 		if err == nil {
 			if err := validateOutputPathFileMode(st.Mode); err != nil {
@@ -256,7 +257,7 @@ func copyToContainer(ctx context.Context, rc *rootClient, o cpOptions, srcPath, 
 		resolvedDst = dstDir
 		content = &countingReader{prepared, &copied}
 	}
-	if err := rc.put(ctx, resolvedDst, content, true, o.copyUIDGID); err != nil {
+	if err := rc.Put(ctx, resolvedDst, content, rootfs.PutOptions{NoOverwriteDirNonDir: true, CopyUIDGID: o.copyUIDGID}); err != nil {
 		return err
 	}
 	if !o.quiet {
@@ -361,5 +362,5 @@ func joinLink(p, target string) string {
 		return target
 	}
 	parent, _ := archive.SplitPathDirEntry(p)
-	return path.Join(slashPath(parent), target)
+	return path.Join(rootfs.Slash(parent), target)
 }

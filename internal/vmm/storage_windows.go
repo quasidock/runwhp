@@ -87,10 +87,21 @@ type layerResult struct {
 
 // PendingLayer is the writable layer being opened in the background.
 type PendingLayer struct {
-	ch        <-chan layerResult
+	ch <-chan layerResult
+	// scratch says the layer is thrown away after this boot: the guest
+	// mounts it volatile, and is offered no FLUSH.
+	scratch   bool
 	once      sync.Once
 	res       layerResult
 	closeOnce sync.Once
+}
+
+// ReadyLayer is a writable layer already open: f, or none, with f nil,
+// which gives the guest one in memory. scratch is as for StartLayer.
+func ReadyLayer(f *disk.File, scratch bool) *PendingLayer {
+	ch := make(chan layerResult, 1)
+	ch <- layerResult{file: f}
+	return &PendingLayer{ch: ch, scratch: scratch}
 }
 
 // StartLayer starts opening the writable layer while the caller does other
@@ -106,7 +117,7 @@ func StartLayer(path string, size int64, scratch bool) *PendingLayer {
 		}
 		ch <- layerResult{f, err, time.Since(start)}
 	}()
-	return &PendingLayer{ch: ch}
+	return &PendingLayer{ch: ch, scratch: scratch}
 }
 
 // get waits for the writable layer.

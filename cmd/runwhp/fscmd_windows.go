@@ -18,6 +18,7 @@ import (
 	"github.com/quasidock/runwhp/internal/container"
 	"github.com/quasidock/runwhp/internal/guestspec"
 	"github.com/quasidock/runwhp/internal/image"
+	"github.com/quasidock/runwhp/internal/rootfs"
 	"github.com/quasidock/runwhp/internal/vmm"
 )
 
@@ -58,7 +59,7 @@ func cmdExport(args []string, stdout io.Writer) int {
 	}
 	defer rc.close()
 	write := func(w io.Writer) error {
-		content, err := rc.tarOf(ctx, guestspec.RootExport)
+		content, err := rc.Tar(ctx, guestspec.RootExport)
 		if err != nil {
 			return err
 		}
@@ -86,7 +87,7 @@ func cmdExport(args []string, stdout io.Writer) int {
 func copyTar(dst io.Writer, src io.Reader) error {
 	// A tar cut between two entries reads to tar as one that ends there;
 	// tarChecker catches it lacking its end marker.
-	src = &tarChecker{r: src}
+	src = rootfs.CheckTar(src)
 	tr := tar.NewReader(io.TeeReader(src, dst))
 	for {
 		_, err := tr.Next()
@@ -133,7 +134,7 @@ func cmdDiff(args []string, stdout io.Writer) int {
 		return 1
 	}
 	defer rc.close()
-	cs, err := rc.changes(ctx)
+	cs, err := rc.Changes(ctx)
 	if err != nil {
 		errorf("diff: %v", err)
 		return 1
@@ -232,7 +233,7 @@ func cmdCommit(args []string, stdout io.Writer) int {
 			}
 		}()
 	}
-	diff, err := rc.tarOf(ctx, guestspec.RootDiff)
+	diff, err := rc.Tar(ctx, guestspec.RootDiff)
 	if err != nil {
 		errorf("commit: %v", err)
 		return 1
