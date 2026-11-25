@@ -64,6 +64,9 @@ type Image struct {
 	// it: the image's ID, as Docker shows it. Records written before
 	// iteration 12 lack it.
 	ConfigDigest string `json:"configDigest,omitempty"`
+	// RepoDigests are the manifests runwhp push wrote of the image, as
+	// REPOSITORY@DIGEST, besides Digest.
+	RepoDigests []string `json:"repoDigests,omitempty"`
 	// Config is the image configuration. The record holds it re-indented,
 	// so its bytes are not the blob's.
 	Config json.RawMessage `json:"config"`

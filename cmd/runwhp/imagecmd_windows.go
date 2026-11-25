@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -28,6 +29,7 @@ const imageUsage = `Usage:
   runwhp image import [-c CHANGE]... [-m MESSAGE] FILE|- [REPOSITORY[:TAG]]   make an image from a root file system tar (also: runwhp import)
   runwhp image save [-o FILE] IMAGE...                                       write images to an archive docker load takes (also: runwhp save)
   runwhp image build [flags] PATH|-                                         build an image from a Dockerfile (also: runwhp build)
+  runwhp image push [-a] [-q] NAME[:TAG]                                    push an image to its registry (also: runwhp push)
 
 An image is named by its reference, as pulled, or by its ID or a unique
 prefix of it. Its layers are shared with other images and with containers
@@ -62,6 +64,8 @@ func cmdImage(args []string, stdin io.Reader, stdout io.Writer) int {
 		return cmdSave(args, stdout)
 	case "build":
 		return cmdBuild(args, stdin, stdout, os.Stderr)
+	case "push":
+		return cmdPush(args, stdout)
 	case "prune":
 		return cmdImagePrune(args, stdin, stdout)
 	case "help", "-h", "-help", "--help":
@@ -299,6 +303,11 @@ func cmdImageInspect(args []string, stdout io.Writer) int {
 			// A tag, a load or an import gives no registry digest.
 			if rec.Digest != "" {
 				info.RepoDigests = append(info.RepoDigests, repo+"@"+rec.Digest)
+			}
+			for _, d := range rec.RepoDigests {
+				if !slices.Contains(info.RepoDigests, d) {
+					info.RepoDigests = append(info.RepoDigests, d)
+				}
 			}
 		}
 		img := byPath[strings.ToLower(found[0].Path)]
