@@ -86,6 +86,11 @@ type vmBoot struct {
 	// killed says a kill or stop reached this boot: its process ended by
 	// hand, and is not started again, as Docker counts any kill.
 	killed bool
+	// reprepare says the boot, of a created container, is stopped to boot
+	// again with a configuration changed meanwhile, as network connect
+	// changes it: its process never ran, and the next boot waits to start
+	// in its place. Once it is set, b.exited means that, not an end.
+	reprepare bool
 }
 
 // streams has the container's output pass through the hub to attached
@@ -539,8 +544,25 @@ func (s *Supervisor) stop(timeout time.Duration) {
 }
 
 // Start starts the process of a container booted to wait for its Start,
-// and waits until it runs or has failed to.
+// and waits until it runs or has failed to. A container still being
+// created, or booted again for a network it was connected to, is waited
+// for.
 func (s *Supervisor) Start() container.Reply {
+	for {
+		s.mu.Lock()
+		status, changed := s.state.Status, s.changed
+		s.mu.Unlock()
+		if status != container.Creating {
+			break
+		}
+		select {
+		case <-changed:
+		case <-s.done:
+			return container.Reply{Error: ErrNotRunning.Error()}
+		case <-time.After(time.Minute):
+			return container.Reply{Error: "the container is still being created"}
+		}
+	}
 	b := s.current()
 	switch s.status() {
 	case container.Creating:
@@ -590,9 +612,84 @@ func (s *Supervisor) Wait() container.Reply {
 		}
 		<-b.exited
 		s.mu.Lock()
+		if b.reprepare {
+			s.mu.Unlock()
+			continue // the next boot takes its place
+		}
 		defer s.mu.Unlock()
 		return b.exit
 	}
+}
+
+// Networks connects the container to a network, or disconnects it, as req
+// says, unless it runs. The change is recorded, and goes for the next
+// boot: a container waiting to start again starts so, and a created one is
+// booted again at once, ready to start, before Networks returns.
+func (s *Supervisor) Networks(req container.Request) container.Reply {
+	s.mu.Lock()
+	status, b := s.state.Status, s.cur
+	if status == container.Running {
+		s.mu.Unlock()
+		return container.Reply{Error: container.ErrNetworksRunning.Error()}
+	}
+	if status == container.Creating || status == container.Stopped || b == nil && status != container.Restarting {
+		s.mu.Unlock()
+		return container.Reply{Error: "the container is being created or stopped; try again"}
+	}
+	var cfg *container.Config
+	var err error
+	if req.Connect != nil {
+		cfg, err = s.rec.Config.Connect(*req.Connect)
+	} else {
+		cfg, err = s.rec.Config.Disconnect(req.Disconnect, req.Disconnect)
+	}
+	if err == nil {
+		err = s.lock.WriteConfig(cfg)
+	}
+	if err != nil {
+		s.mu.Unlock()
+		return container.Reply{Error: err.Error()}
+	}
+	s.rec.Config = cfg
+	if status != container.Created {
+		s.mu.Unlock()
+		return s.reply()
+	}
+	b.reprepare = true
+	s.mu.Unlock()
+	// The VM waits to start its process, which has not run: stop it, and
+	// the loop boots it again as it is now configured.
+	b.proxy.stop()
+	for {
+		s.mu.Lock()
+		status, changed, cur := s.state.Status, s.changed, s.cur
+		s.mu.Unlock()
+		if cur != b && status != container.Creating {
+			return s.reply()
+		}
+		select {
+		case <-changed:
+		case <-s.done:
+			return s.reply()
+		}
+	}
+}
+
+// reprepared reports whether boot b ended to boot again, as Networks asked,
+// and if so records that: the container is being created again.
+func (s *Supervisor) reprepared(b *vmBoot) bool {
+	s.mu.Lock()
+	again := b.reprepare && !s.stopping
+	s.mu.Unlock()
+	if !again {
+		return false
+	}
+	s.change(func(st *container.State) {
+		st.Status, st.GuestPid = container.Creating, 0
+		b.vm = nil
+	})
+	close(b.exited)
+	return true
 }
 
 // serveConns answers requests on the container's pipe until it closes.
@@ -646,6 +743,8 @@ func (s *Supervisor) handle(c net.Conn) {
 			rep = s.Pause()
 		case container.OpUnpause:
 			rep = s.Unpause()
+		case container.OpNetworks:
+			rep = s.Networks(req)
 		default:
 			rep = container.Reply{Error: fmt.Sprintf("this runwhp does not know the request %q", req.Op)}
 		}

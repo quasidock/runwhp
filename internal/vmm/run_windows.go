@@ -41,7 +41,11 @@ func CheckDevices(cfg *container.Config, volumes int) error {
 	// The console, the vsock device, the balloon and the writable layer,
 	// and the others named here.
 	others, users := 4, []string{}
-	if cfg.Network {
+	switch {
+	case len(cfg.Networks) > 1:
+		others += len(cfg.Networks)
+		users = append(users, fmt.Sprintf("%d networks", len(cfg.Networks)))
+	case cfg.Network:
 		others++
 		users = append(users, "the network")
 	}

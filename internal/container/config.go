@@ -4,6 +4,9 @@
 package container
 
 import (
+	"errors"
+	"fmt"
+	"sort"
 	"time"
 
 	"github.com/quasidock/runwhp/internal/guestspec"
@@ -60,8 +63,20 @@ type Config struct {
 
 	Hostname string `json:"hostname"`
 	// Hosts are extra /etc/hosts lines, "ADDRESS NAME".
-	Hosts       []string        `json:"hosts,omitempty"`
-	Network     bool            `json:"network"`
+	Hosts []string `json:"hosts,omitempty"`
+	// Network says the container has a network device: on the default
+	// network, or on each of Networks.
+	Network bool `json:"network"`
+	// NetworkMode is the network --network named first: user, none or a
+	// network's name, as Docker's HostConfig keeps it. Empty, as in
+	// containers made before iteration 18, means user or none, as Network
+	// says.
+	NetworkMode string `json:"networkMode,omitempty"`
+	// Networks are the user-defined networks the container is on, by name:
+	// the first is its primary, with the default route, as Docker routes
+	// through the network whose name sorts first. With any, the container
+	// is not on the default network.
+	Networks    []Attachment    `json:"networks,omitempty"`
 	Publish     []netstack.Port `json:"publish,omitempty"`
 	HostGateway bool            `json:"hostGateway,omitempty"`
 
@@ -99,6 +114,79 @@ type Config struct {
 	LogDriver   string `json:"logDriver,omitempty"`
 	LogMaxSize  int64  `json:"logMaxSize,omitempty"`
 	LogMaxFiles int    `json:"logMaxFiles,omitempty"`
+}
+
+// Attachment is a container's place on a user-defined network.
+type Attachment struct {
+	// Network is the network's ID, and Name its name.
+	Network string `json:"network"`
+	Name    string `json:"name"`
+	// Aliases are further names the container has on the network.
+	Aliases []string `json:"aliases,omitempty"`
+	// IPv4 is the address --ip asked for; empty means any.
+	IPv4 string `json:"ipv4,omitempty"`
+}
+
+// Mode is the container's network mode, as NetworkMode keeps it.
+func (c *Config) Mode() string {
+	switch {
+	case c.NetworkMode != "":
+		return c.NetworkMode
+	case len(c.Networks) > 0:
+		return c.Networks[0].Name
+	case c.Network:
+		return "user"
+	}
+	return "none"
+}
+
+// ErrNetworksRunning refuses to connect or disconnect a running container.
+var ErrNetworksRunning = errors.New("cannot connect a running container to a network, nor disconnect it: its VM cannot take or give up a network device while it runs; stop the container first")
+
+// Connect is the configuration with the container on network a too, which
+// it must not be on yet. A container on the default network, or none,
+// cannot join another.
+func (c *Config) Connect(a Attachment) (*Config, error) {
+	switch c.Mode() {
+	case "none":
+		return nil, errors.New("container cannot be connected to multiple networks with one of the networks in private (none) mode")
+	case "user":
+		return nil, fmt.Errorf("container %s is on runwhp's default network, which cannot be joined with another; make it with --network %s instead", c.ID, a.Name)
+	}
+	for _, x := range c.Networks {
+		if x.Network == a.Network {
+			return nil, fmt.Errorf("endpoint with name %s already exists in network %s", c.ID[:12], a.Name)
+		}
+	}
+	n := *c
+	n.Networks = append(append([]Attachment(nil), c.Networks...), a)
+	SortNetworks(n.Networks)
+	n.Network = true
+	return &n, nil
+}
+
+// Disconnect is the configuration with the container off the network with
+// the ID id, called name. Off its last network, it has loopback alone, as
+// with Docker.
+func (c *Config) Disconnect(id, name string) (*Config, error) {
+	n := *c
+	n.Networks = nil
+	for _, x := range c.Networks {
+		if x.Network != id {
+			n.Networks = append(n.Networks, x)
+		}
+	}
+	if len(n.Networks) == len(c.Networks) {
+		return nil, fmt.Errorf("container %s is not connected to network %s", c.ID, name)
+	}
+	n.Network = len(n.Networks) > 0
+	return &n, nil
+}
+
+// SortNetworks puts the attachments in the order the guest is given them:
+// by name, the primary first.
+func SortNetworks(as []Attachment) {
+	sort.SliceStable(as, func(i, j int) bool { return as[i].Name < as[j].Name })
 }
 
 // ContainerdTask is the containerd namespace and container ID of a

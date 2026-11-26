@@ -532,6 +532,16 @@ func (s *Store) lock(c *Container, retry bool) (*Lock, error) {
 }
 
 // WriteState records st as the container's state.
+// WriteConfig replaces the container's configuration, as network connect
+// and disconnect change it.
+func (l *Lock) WriteConfig(cfg *Config) error {
+	if err := writeJSON(filepath.Join(l.c.dir, "config.json"), cfg); err != nil {
+		return err
+	}
+	l.c.Config = cfg
+	return nil
+}
+
 func (l *Lock) WriteState(st State) error {
 	if err := writeJSON(filepath.Join(l.c.dir, "state.json"), st); err != nil {
 		return err

@@ -91,6 +91,7 @@ func (s *Supervisor) RunBackground(o Background) {
 		}
 	}
 
+	again := false // booting a created container again, to wait for its start
 	for n := 0; ; n++ {
 		ctx, cancel := context.WithCancel(context.Background())
 		proxy := NewSignalProxy(cancel, o.Logf)
@@ -107,7 +108,7 @@ func (s *Supervisor) RunBackground(o Background) {
 		case n > 0:
 			bb.Stdin = nil // a file or pipe of input goes to the first run only
 		}
-		hooks := s.hooks(b, o.WaitStart && n == 0)
+		hooks := s.hooks(b, o.WaitStart && n == 0 || again)
 		if n == 0 {
 			// The runwhp that started this one waits to hear how the first
 			// boot went.
@@ -129,6 +130,9 @@ func (s *Supervisor) RunBackground(o Background) {
 		code, err := bootContainer(ctx, s.root, bootCfg, layer, guestOpts{}, image.PullNever, proxy, bb, hooks, o.Logf, time.Now())
 		layer.Close()
 		cancel()
+		if again = s.reprepared(b); again {
+			continue
+		}
 		if err != nil {
 			errorf("%v", err)
 		}

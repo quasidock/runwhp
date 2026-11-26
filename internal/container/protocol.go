@@ -40,6 +40,11 @@ const (
 	// thaws them; each replies once that is done.
 	OpPause   = "pause"
 	OpUnpause = "unpause"
+	// OpNetworks connects a created or restarting container to the network
+	// Connect names, or disconnects it from the network with the ID
+	// Disconnect: a created one boots again, ready to start, before the
+	// reply. A running one is refused.
+	OpNetworks = "networks"
 )
 
 // After the reply to OpAttach, both ends send frames in the log's framing
@@ -73,6 +78,9 @@ type Request struct {
 	Port    uint32  `json:"port,omitempty"`
 	// Stdin asks OpAttach to pass on the attached runwhp's input.
 	Stdin bool `json:"stdin,omitempty"`
+	// Connect and Disconnect are OpNetworks's.
+	Connect    *Attachment `json:"connect,omitempty"`
+	Disconnect string      `json:"disconnect,omitempty"`
 }
 
 // Reply is a container's runwhp's answer to a Request.

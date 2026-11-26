@@ -175,7 +175,7 @@ func bootContainer(ctx context.Context, root string, cfg *container.Config, laye
 		logf("%4d ms  writable layer ready: %d GiB, kept %v, opened in %d ms", time.Since(start).Milliseconds(), layerSize>>30, keep, lr.took.Milliseconds())
 	}
 
-	network, err := openNetwork(cfg, !opts.noNIC, logf)
+	network, err := openNetwork(root, cfg, !opts.noNIC, logf)
 	if err != nil {
 		return fail, err
 	}
