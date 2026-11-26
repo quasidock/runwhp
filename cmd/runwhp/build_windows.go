@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -155,32 +156,16 @@ func cmdBuild(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		opts.Dockerfile, opts.DockerfileName = data, "Dockerfile"
 	default:
 		dockerfile := *file
-		switch {
-		case dockerfile == "-":
-			data, err := io.ReadAll(stdin)
-			if err != nil {
+		var data []byte
+		if dockerfile == "-" {
+			var err error
+			if data, err = io.ReadAll(stdin); err != nil {
 				errorf("reading the Dockerfile from stdin: %v", err)
 				return 1
 			}
-			opts.Dockerfile, dockerfile = data, ""
-		case dockerfile == "":
-			dockerfile = filepath.Join(path, "Dockerfile")
 		}
-		if dockerfile != "" {
-			data, err := os.ReadFile(dockerfile)
-			if err != nil {
-				errorf("failed to read dockerfile: %v", err)
-				return 1
-			}
-			opts.Dockerfile = data
-		}
-		opts.DockerfileName = cmpOr(filepath.Base(dockerfile), "Dockerfile")
-		ignore, err := build.ReadIgnore(path, dockerfile)
-		if err != nil {
-			errorf("reading .dockerignore: %v", err)
-			return 1
-		}
-		if opts.Context, err = build.NewContext(path, ignore); err != nil {
+		var err error
+		if err = openBuildContext(&opts, path, dockerfile, data); err != nil {
 			errorf("%v", err)
 			return 1
 		}
@@ -205,64 +190,29 @@ func cmdBuild(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		opts.Secrets[sec.id] = build.Secret{Path: sec.path}
 	}
 
-	policy := image.PullMissing
-	if *pull {
-		policy = image.PullAlways
-	}
-	kernel := vmm.ExplicitKernel("")
-	if _, err := vmm.ResolveKernel(ctx, root, kernel, image.PullMissing); err != nil {
-		errorf("%v", err)
-		return 1
-	}
 	out := io.Writer(stderr)
 	if *quiet {
 		out = nil
 	}
-	progress := build.NewProgress(out, time.Now)
-	opts.Progress = progress
-	opts.TempDir = filepath.Join(root, "tmp")
-	if err := os.MkdirAll(opts.TempDir, 0o755); err != nil {
-		errorf("%v", err)
-		return 1
-	}
-	is := image.Open(root)
-	worker := &build.VM{Root: root, Images: is, Policy: policy, Memory: mem, CPUs: ncpu,
-		StorageSize: defaultDiskSize, Kernel: kernel, Debug: *debug}
-	res, err := build.Build(ctx, worker, buildcache.Open(root), opts)
+	res, err := buildImage(ctx, root, buildRequest{opts: opts, refs: refs, pull: *pull, memory: mem, cpus: ncpu, debug: *debug}, out)
 	if err != nil {
 		if ctx.Err() != nil {
 			errorf("build cancelled")
 			return 130
 		}
 		var le *build.LocatedError
-		if errors.As(err, &le) {
+		var re recordError
+		switch {
+		case errors.As(err, &re):
+			errorf("%v", re.err)
+		case errors.As(err, &le):
 			fmt.Fprintln(stderr, le.Excerpt())
+			fallthrough
+		default:
+			fmt.Fprintf(stderr, "ERROR: failed to build: failed to solve: %v\n", err)
 		}
-		fmt.Fprintf(stderr, "ERROR: failed to build: failed to solve: %v\n", err)
 		return 1
 	}
-
-	v := progress.Vertex("exporting to image")
-	v.Log("exporting layers done")
-	if len(refs) == 0 {
-		if _, err := is.Record("", res.Config); err != nil {
-			v.End(err)
-			errorf("%v", err)
-			return 1
-		}
-		v.Log("writing image %s done", res.ID)
-	} else {
-		v.Log("writing image %s done", res.ID)
-		for _, r := range refs {
-			if _, err := is.Record(r, res.Config); err != nil {
-				v.End(err)
-				errorf("%v", err)
-				return 1
-			}
-			v.Log("naming to %s done", r)
-		}
-	}
-	v.End(nil)
 	if *iidfile != "" {
 		if err := writeFileAtomically(*iidfile, func(w io.Writer) error {
 			_, err := io.WriteString(w, res.ID)
@@ -282,6 +232,99 @@ func cmdBuild(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, res.ID)
 	}
 	return 0
+}
+
+// openBuildContext fills a build's Dockerfile and context from the
+// directory path: the Dockerfile is data, if given, or the file dockerfile,
+// relative to the working directory, or path\Dockerfile if empty.
+func openBuildContext(opts *build.Options, path, dockerfile string, data []byte) error {
+	switch {
+	case data != nil:
+		dockerfile = ""
+	case dockerfile == "":
+		dockerfile = filepath.Join(path, "Dockerfile")
+	}
+	if dockerfile != "" {
+		var err error
+		if data, err = os.ReadFile(dockerfile); err != nil {
+			return fmt.Errorf("failed to read dockerfile: %w", err)
+		}
+	}
+	opts.Dockerfile = data
+	opts.DockerfileName = cmpOr(filepath.Base(dockerfile), "Dockerfile")
+	ignore, err := build.ReadIgnore(path, dockerfile)
+	if err != nil {
+		return fmt.Errorf("reading .dockerignore: %w", err)
+	}
+	opts.Context, err = build.NewContext(path, ignore)
+	return err
+}
+
+// buildRequest is a build to run: what build's flags ask for, or a compose
+// service's build section.
+type buildRequest struct {
+	opts   build.Options
+	refs   []string // the names to give the image, normalized
+	pull   bool     // pull every FROM image, though it is in the store
+	memory uint64   // each step's guest
+	cpus   int
+	debug  bool
+}
+
+// recordError is a failure to record a built image, which build reports
+// as one of runwhp's own errors rather than as a failed solve.
+type recordError struct{ err error }
+
+func (e recordError) Error() string { return e.err.Error() }
+func (e recordError) Unwrap() error { return e.err }
+
+// buildImage builds an image and records it under its names, or untagged,
+// writing BuildKit's plain progress to out, or nothing if out is nil. The
+// caller holds the store from prunes.
+func buildImage(ctx context.Context, root string, req buildRequest, out io.Writer) (*build.Result, error) {
+	opts := req.opts
+	policy := image.PullMissing
+	if req.pull {
+		policy = image.PullAlways
+	}
+	kernel := vmm.ExplicitKernel("")
+	if _, err := vmm.ResolveKernel(ctx, root, kernel, image.PullMissing); err != nil {
+		return nil, recordError{err}
+	}
+	progress := build.NewProgress(out, time.Now)
+	opts.Progress = progress
+	opts.TempDir = filepath.Join(root, "tmp")
+	if err := os.MkdirAll(opts.TempDir, 0o755); err != nil {
+		return nil, recordError{err}
+	}
+	is := image.Open(root)
+	worker := &build.VM{Root: root, Images: is, Policy: policy, Memory: req.memory, CPUs: req.cpus,
+		StorageSize: defaultDiskSize, Kernel: kernel, Debug: req.debug}
+	res, err := build.Build(ctx, worker, buildcache.Open(root), opts)
+	if err != nil {
+		return nil, err
+	}
+
+	v := progress.Vertex("exporting to image")
+	v.Log("exporting layers done")
+	if len(req.refs) == 0 {
+		if _, err := is.Record("", res.Config); err != nil {
+			v.End(err)
+			return nil, recordError{err}
+		}
+		v.Log("writing image %s done", res.ID)
+	} else {
+		v.Log("writing image %s done", res.ID)
+		for _, r := range req.refs {
+			if _, err := is.Record(r, res.Config); err != nil {
+				v.End(err)
+				return nil, recordError{err}
+			}
+			v.Log("naming to %s done", r)
+		}
+	}
+	v.End(nil)
+	return res, nil
 }
 
 // buildSecret is a --secret: its id, and the file that holds it.

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"io"
 	"net/netip"
@@ -190,5 +191,54 @@ func TestNetworkFlags(t *testing.T) {
 	args = []string{"--network", "a", "--net", "b", "--network-alias", "x", "--network-alias", "y", "--ip", "172.18.0.2", "alpine"}
 	if err := fs.Parse(args); err != nil || len(o.networks) != 2 || len(o.aliases) != 2 || o.ip != "172.18.0.2" {
 		t.Errorf("parsed %+v, %v", o, err)
+	}
+}
+
+func TestParseRunOptions(t *testing.T) {
+	parse := func(args ...string) (runSpec, error) {
+		var o runOptions
+		fs := runFlags(&o)
+		fs.SetOutput(io.Discard)
+		if err := fs.Parse(args); err != nil {
+			t.Fatalf("%q: %v", args, err)
+		}
+		set := false
+		fs.Visit(func(f *flag.Flag) { set = set || f.Name == "entrypoint" })
+		return parseRunOptions(&o, set, fs.Args())
+	}
+	s, err := parse("--entrypoint", "/bin/sh", "-e", "A=1", "-w", "/w", "--rm", "-p", "8080:80", "--network-alias", "x", "--network", "n", "alpine", "-c", "echo hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.image != "alpine" || !reflect.DeepEqual(s.command, []string{"-c", "echo hi"}) || !s.entrypointSet ||
+		!reflect.DeepEqual(s.entrypoint, []string{"/bin/sh"}) || !s.rm || s.workdir != "/w" || !reflect.DeepEqual(s.env, []string{"A=1"}) {
+		t.Errorf("parsed %+v", s)
+	}
+	if len(s.network.attach) != 1 || s.network.attach[0].name != "n" || !reflect.DeepEqual(s.network.attach[0].aliases, []string{"x"}) ||
+		len(s.network.publish) != 1 || s.network.publish[0].Guest != 80 {
+		t.Errorf("network %+v", s.network)
+	}
+	if s, err := parse("--entrypoint", "", "alpine"); err != nil || !s.entrypointSet || s.entrypoint != nil {
+		t.Errorf("empty entrypoint: %+v, %v", s, err)
+	}
+	if s, err := parse("alpine"); err != nil || s.entrypointSet || s.memory == 0 || s.cpus == 0 || s.storageSize == 0 || len(s.network.attach) != 0 {
+		t.Errorf("defaults: %+v, %v", s, err)
+	}
+	if s, err := parse("--layer", "a.ext4", "sh", "-c", "x"); err != nil || s.image != "" || !reflect.DeepEqual(s.command, []string{"sh", "-c", "x"}) {
+		t.Errorf("layers: %+v, %v", s, err)
+	}
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{nil, "no image given"},
+		{[]string{"--rm", "--restart", "always", "alpine"}, "both --restart and --rm"},
+		{[]string{"-m", "1x", "alpine"}, "invalid memory size"},
+		{[]string{"-p", "80", "alpine"}, "random host ports"},
+	} {
+		_, err := parse(c.args...)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%q: %v, want an error saying %q", c.args, err, c.want)
+		}
 	}
 }

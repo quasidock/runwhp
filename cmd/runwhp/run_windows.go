@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -179,11 +180,26 @@ func cmdRun(args []string) int {
 	if o.detach {
 		return runDetached(&o, entrypointSet, fs.Args())
 	}
+	spec, err := parseRunOptions(&o, entrypointSet, fs.Args())
+	if err != nil {
+		errorf("%v", err)
+		return guestspec.ExitRuntime
+	}
+	policy, err := image.ParsePolicy(o.pull)
+	if err != nil {
+		errorf("%v", err)
+		return guestspec.ExitRuntime
+	}
+	return runForeground(&spec, o.name, policy)
+}
 
+// runForeground runs a container in this process, its output on this
+// console, and returns its exit code, as run without -d does.
+func runForeground(spec *runSpec, name string, policy image.Policy) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	proxyLogf := func(string, ...any) {}
-	if o.debug {
+	if spec.debug {
 		proxyLogf = func(format string, a ...any) { fmt.Fprintf(os.Stderr, "[vmm] "+format+"\n", a...) }
 	}
 	proxy := vmm.NewSignalProxy(cancel, proxyLogf)
@@ -191,7 +207,7 @@ func cmdRun(args []string) int {
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sigs)
 	go proxy.Run(sigs)
-	code, err := run(ctx, &o, entrypointSet, fs.Args(), proxy)
+	code, err := run(ctx, spec, name, policy, proxy)
 	if err != nil {
 		if ctx.Err() != nil {
 			errorf("interrupted")
@@ -202,9 +218,9 @@ func cmdRun(args []string) int {
 	return code
 }
 
-func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, proxy *vmm.SignalProxy) (int, error) {
+func run(ctx context.Context, spec *runSpec, name string, policy image.Policy, proxy *vmm.SignalProxy) (int, error) {
 	const fail = guestspec.ExitRuntime
-	if o.interactive && o.tty && !vmm.IsTerminal(os.Stdin) {
+	if spec.interactive && spec.tty && !vmm.IsTerminal(os.Stdin) {
 		return fail, errors.New("the input device is not a TTY; if you are using mintty, try prefixing the command with 'winpty'")
 	}
 	root, err := storeRoot()
@@ -212,12 +228,8 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 		return fail, err
 	}
 	logf := func(format string, a ...any) {}
-	if o.debug {
+	if spec.debug {
 		logf = func(format string, a ...any) { fmt.Fprintf(os.Stderr, "[vmm] "+format+"\n", a...) }
-	}
-	policy, err := image.ParsePolicy(o.pull)
-	if err != nil {
-		return fail, err
 	}
 	start := time.Now()
 	sweepStore(root, logf)
@@ -225,12 +237,8 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 	// image is resolved; a kept one is made in the container's directory
 	// once there is one.
 	var layer *vmm.PendingLayer
-	if o.rm {
-		size, err := parseStorageOpts(o.storageOpts)
-		if err != nil {
-			return fail, err
-		}
-		layer = vmm.StartLayer(vmm.ScratchPath(root), size, true)
+	if spec.rm {
+		layer = vmm.StartLayer(vmm.ScratchPath(root), spec.storageSize, true)
 		defer layer.Close()
 	}
 	// A prune waits until the container is recorded, and keeps its layers.
@@ -238,14 +246,13 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 	if err != nil {
 		return fail, err
 	}
-	cfg, err := resolveConfig(ctx, root, o, entrypointSet, args, policy, logf)
+	cfg, err := resolveSpec(ctx, root, spec, policy, os.Stderr, logf)
 	if err != nil {
 		release()
 		return fail, err
 	}
-	cfg.AutoRemove = o.rm
 	store := container.Open(root)
-	rec, err := store.CreateWith(cfg, o.name, container.State{Pid: os.Getpid(), Output: container.OutputTerminal})
+	rec, err := store.CreateWith(cfg, name, container.State{Pid: os.Getpid(), Output: container.OutputTerminal})
 	release()
 	if err != nil {
 		return fail, err
@@ -286,76 +293,133 @@ func run(ctx context.Context, o *runOptions, entrypointSet bool, args []string, 
 	})
 }
 
-// resolveConfig turns run's flags and arguments into a container's
-// configuration: it pulls the image if need be, makes missing volumes,
-// fetches runwhp's kernel if it is missing, and resolves everything that
-// depends on this process, such as its working directory and environment.
-func resolveConfig(ctx context.Context, root string, o *runOptions, entrypointSet bool, args []string, policy image.Policy, logf func(string, ...any)) (*container.Config, error) {
-	memory, err := parseMemory(o.memory)
+// runSpec is a container to make: run's or create's flags and arguments,
+// parsed, or a compose service, translated. resolveSpec turns it into the
+// container's configuration.
+type runSpec struct {
+	image   string   // the image reference; empty with layers
+	command []string // replaces the image's Cmd when not empty
+	// entrypoint replaces the image's entrypoint when entrypointSet; empty,
+	// it removes it.
+	entrypoint    []string
+	entrypointSet bool
+	env           []string // KEY=VALUE, or KEY to copy from this process's environment
+	workdir       string
+	user          string
+	hostname      string // empty: the start of the container's ID
+	interactive   bool
+	tty           bool
+
+	memory      uint64
+	cpus        int
+	network     networkRequest
+	mounts      []mountSpec
+	storageSize int64
+	logs        logConfig
+	restart     container.RestartPolicy
+	rm          bool
+
+	// Development flags: the kernel, init and kernel modules to use, and
+	// ext4 layers instead of an image.
+	kernel  string
+	init    string
+	layers  []string
+	modules []string
+	debug   bool
+}
+
+// parseRunOptions checks run's or create's flags and arguments, args being
+// the image and the command, without yet touching the store.
+func parseRunOptions(o *runOptions, entrypointSet bool, args []string) (runSpec, error) {
+	s := runSpec{
+		env: o.env, workdir: o.workdir, user: o.user, hostname: o.hostname,
+		interactive: o.interactive, tty: o.tty, rm: o.rm,
+		kernel: o.kernel, init: o.init, layers: o.layers, modules: o.modules, debug: o.debug,
+		entrypointSet: entrypointSet,
+	}
+	if entrypointSet && o.entrypoint != "" {
+		s.entrypoint = []string{o.entrypoint}
+	}
+	switch {
+	case len(o.layers) > 0:
+		s.command = args
+	case len(args) == 0:
+		return s, fmt.Errorf("no image given; run 'runwhp run -h' for usage")
+	default:
+		s.image, s.command = args[0], args[1:]
+	}
+	var err error
+	if s.memory, err = parseMemory(o.memory); err != nil {
+		return s, err
+	}
+	if s.cpus, err = parseCPUs(o.cpus, runtime.NumCPU()); err != nil {
+		return s, err
+	}
+	if s.network, err = parseNetworkRequest(networkFlags{modes: o.networks, aliases: o.aliases, ip: o.ip, publish: o.publish, addHosts: o.addHosts}); err != nil {
+		return s, err
+	}
+	if s.mounts, err = parseMountFlags(o.volumes, o.mounts, o.tmpfs); err != nil {
+		return s, err
+	}
+	if s.storageSize, err = parseStorageOpts(o.storageOpts); err != nil {
+		return s, err
+	}
+	if s.logs, err = parseLogOptions(o.logDriver, o.logOpts); err != nil {
+		return s, err
+	}
+	if s.restart, err = container.ParseRestartPolicy(o.restart); err != nil {
+		return s, err
+	}
+	if s.restart.IsSet() && o.rm {
+		return s, errors.New("conflicting options: cannot specify both --restart and --rm")
+	}
+	return s, nil
+}
+
+// resolveSpec turns a container to make into its configuration: it
+// resolves the networks it names, pulls the image if need be, writing
+// progress to out, makes missing volumes and bind sources, fetches
+// runwhp's kernel if it is missing, and resolves everything that depends on
+// this process, such as its working directory and environment.
+func resolveSpec(ctx context.Context, root string, s *runSpec, policy image.Policy, out io.Writer, logf func(string, ...any)) (*container.Config, error) {
+	network, err := planNetwork(root, s.network)
 	if err != nil {
 		return nil, err
 	}
-	cpus, err := parseCPUs(o.cpus, runtime.NumCPU())
+	plan, err := planMounts(s.mounts)
 	if err != nil {
 		return nil, err
-	}
-	network, err := parseNetworkFlags(root, networkFlags{modes: o.networks, aliases: o.aliases, ip: o.ip, publish: o.publish, addHosts: o.addHosts})
-	if err != nil {
-		return nil, err
-	}
-	plan, err := parseMounts(o.volumes, o.mounts, o.tmpfs)
-	if err != nil {
-		return nil, err
-	}
-	storageSize, err := parseStorageOpts(o.storageOpts)
-	if err != nil {
-		return nil, err
-	}
-	logs, err := parseLogOptions(o.logDriver, o.logOpts)
-	if err != nil {
-		return nil, err
-	}
-	restart, err := container.ParseRestartPolicy(o.restart)
-	if err != nil {
-		return nil, err
-	}
-	if restart.IsSet() && o.rm {
-		return nil, errors.New("conflicting options: cannot specify both --restart and --rm")
 	}
 	cfg := &container.Config{
 		Version: container.ConfigVersion, ID: container.NewID(), Created: time.Now().UTC(),
-		Stdin: o.interactive, TTY: o.tty,
+		Stdin: s.interactive, TTY: s.tty,
 		Hosts: network.hosts, Network: network.enabled, NetworkMode: network.mode, Networks: network.networks, Publish: network.publish, HostGateway: network.hostGateway,
 		Shares: plan.shares, Mounts: plan.mounts,
-		Memory: memory, CPUs: cpus, StorageSize: storageSize, Debug: o.debug,
-		LogDriver: logs.driver, LogMaxSize: logs.maxSize, LogMaxFiles: logs.maxFiles,
-		Restart: restart,
+		Memory: s.memory, CPUs: s.cpus, StorageSize: s.storageSize, Debug: s.debug,
+		LogDriver: s.logs.driver, LogMaxSize: s.logs.maxSize, LogMaxFiles: s.logs.maxFiles,
+		Restart: s.restart, AutoRemove: s.rm,
 	}
 
 	// The process and its layers, from an image or (for development)
 	// from ext4 files given with --layer.
 	overrides := image.Overrides{
-		Entrypoint: o.entrypoint, EntrypointSet: entrypointSet,
-		Env: o.env, Workdir: o.workdir, User: o.user, LookupEnv: os.LookupEnv,
+		Entrypoint: s.entrypoint, EntrypointSet: s.entrypointSet, Cmd: s.command,
+		Env: s.env, Workdir: s.workdir, User: s.user, LookupEnv: os.LookupEnv,
 	}
 	var process image.Process
-	if len(o.layers) > 0 {
-		overrides.Cmd = args
+	if len(s.layers) > 0 {
 		if process, err = image.BuildProcess(v1.Config{}, overrides); err != nil {
 			return nil, err
 		}
-		for _, p := range o.layers {
+		for _, p := range s.layers {
 			if cfg.LayerFiles, err = appendAbs(cfg.LayerFiles, p); err != nil {
 				return nil, err
 			}
 		}
 	} else {
-		if len(args) == 0 {
-			return nil, fmt.Errorf("no image given; run 'runwhp run -h' for usage")
-		}
 		store := image.Open(root)
-		store.Progress = os.Stderr
-		img, err := store.Ensure(ctx, args[0], policy)
+		store.Progress = out
+		img, err := store.Ensure(ctx, s.image, policy)
 		if err != nil {
 			return nil, err
 		}
@@ -363,14 +427,13 @@ func resolveConfig(ctx context.Context, root string, o *runOptions, entrypointSe
 		if err != nil {
 			return nil, err
 		}
-		overrides.Cmd = args[1:]
 		if process, err = image.BuildProcess(cf.Config, overrides); err != nil {
 			return nil, err
 		}
 		if cfg.Layers, err = img.Layers(); err != nil {
 			return nil, err
 		}
-		cfg.Image, cfg.ImageName, cfg.ImageDigest, cfg.ImageID = args[0], img.Ref, img.Digest, img.ID()
+		cfg.Image, cfg.ImageName, cfg.ImageDigest, cfg.ImageID = s.image, img.Ref, img.Digest, img.ID()
 		cfg.StopSignal = cf.Config.StopSignal
 	}
 	cfg.Args, cfg.Env, cfg.Cwd, cfg.User = process.Args, process.Env, process.Cwd, process.User
@@ -401,25 +464,25 @@ func resolveConfig(ctx context.Context, root string, o *runOptions, entrypointSe
 
 	// The kernel is fetched now, if it has to be, so that booting later
 	// needs no network. Only a kernel named explicitly is recorded.
-	if cfg.Kernel = vmm.ExplicitKernel(o.kernel); cfg.Kernel != "" {
+	if cfg.Kernel = vmm.ExplicitKernel(s.kernel); cfg.Kernel != "" {
 		if cfg.Kernel, err = filepath.Abs(cfg.Kernel); err != nil {
 			return nil, err
 		}
 	} else if _, err := vmm.ResolveKernel(ctx, root, "", policy); err != nil {
 		return nil, err
 	}
-	if o.init != "" {
-		if cfg.Init, err = filepath.Abs(o.init); err != nil {
+	if s.init != "" {
+		if cfg.Init, err = filepath.Abs(s.init); err != nil {
 			return nil, err
 		}
 	}
-	for _, p := range o.modules {
+	for _, p := range s.modules {
 		if cfg.Modules, err = appendAbs(cfg.Modules, p); err != nil {
 			return nil, err
 		}
 	}
 
-	if cfg.Hostname = o.hostname; cfg.Hostname == "" {
+	if cfg.Hostname = s.hostname; cfg.Hostname == "" {
 		cfg.Hostname = cfg.ID[:12] // as Docker names it
 	}
 	return cfg, nil

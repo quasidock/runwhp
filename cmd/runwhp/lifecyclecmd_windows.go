@@ -78,23 +78,51 @@ func cmdCreate(args []string) int {
 	return 0
 }
 
-// createDetached makes a container and has a background runwhp boot it,
-// up to the point of starting its process. With -i and no file or pipe for
-// input, the container's input is open to attached runwhps: for create,
-// until the first of them ends its own, as docker create -i does.
+// createDetached is create, and run -d up to starting the container: it
+// parses their flags and has createContainer make the container. With -i
+// and no file or pipe for input, the container's input is open to attached
+// runwhps: for create, until the first of them ends its own, as docker
+// create -i does.
 func createDetached(ctx context.Context, o *runOptions, entrypointSet bool, args []string, create bool) (*container.Container, int, error) {
 	const fail = guestspec.ExitRuntime
 	root, err := storeRoot()
 	if err != nil {
 		return nil, fail, err
 	}
-	logf := func(string, ...any) {}
-	if o.debug {
-		logf = func(format string, a ...any) { fmt.Fprintf(os.Stderr, "[vmm] "+format+"\n", a...) }
+	spec, err := parseRunOptions(o, entrypointSet, args)
+	if err != nil {
+		return nil, fail, err
 	}
 	policy, err := image.ParsePolicy(o.pull)
 	if err != nil {
 		return nil, fail, err
+	}
+	return createContainer(ctx, root, &spec, createOptions{name: o.name, policy: policy, stdinOnce: create, ownIO: true, progress: os.Stderr})
+}
+
+// createOptions say how createContainer makes a container.
+type createOptions struct {
+	name   string
+	policy image.Policy
+	// stdinOnce ends an interactive container's input with the first
+	// attached runwhp's, as docker create -i does.
+	stdinOnce bool
+	// ownIO gives the container this process's stdout and stderr, when
+	// they are files, and its stdin, when it is a file or a pipe, as run -d
+	// and create do; without it, the container's output goes to its log.
+	ownIO bool
+	// progress is where pulls report; nil reports nothing.
+	progress io.Writer
+}
+
+// createContainer makes a container and has a background runwhp boot it,
+// up to the point of starting its process. It returns the exit code to
+// give if it fails.
+func createContainer(ctx context.Context, root string, spec *runSpec, co createOptions) (*container.Container, int, error) {
+	const fail = guestspec.ExitRuntime
+	logf := func(string, ...any) {}
+	if spec.debug {
+		logf = func(format string, a ...any) { fmt.Fprintf(os.Stderr, "[vmm] "+format+"\n", a...) }
 	}
 	sweepStore(root, logf)
 	// A prune waits until the container is recorded, and keeps its layers.
@@ -102,20 +130,19 @@ func createDetached(ctx context.Context, o *runOptions, entrypointSet bool, args
 	if err != nil {
 		return nil, fail, err
 	}
-	cfg, err := resolveConfig(ctx, root, o, entrypointSet, args, policy, logf)
+	cfg, err := resolveSpec(ctx, root, spec, co.policy, co.progress, logf)
 	if err != nil {
 		release()
 		return nil, fail, err
 	}
-	cfg.AutoRemove = o.rm
-	cfg.StdinOnce = create && cfg.Stdin
+	cfg.StdinOnce = co.stdinOnce && cfg.Stdin
 	store := container.Open(root)
-	rec, err := store.Create(cfg, o.name)
+	rec, err := store.Create(cfg, co.name)
 	release()
 	if err != nil {
 		return nil, fail, err
 	}
-	rep, err := spawnSupervisor(ctx, root, rec, true, true)
+	rep, err := spawnSupervisor(ctx, root, rec, true, co.ownIO)
 	if err != nil {
 		if ctx.Err() != nil {
 			store.Remove(rec)

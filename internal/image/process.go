@@ -11,8 +11,8 @@ import (
 // configuration, as docker run applies them.
 type Overrides struct {
 	// Entrypoint replaces the image's entrypoint when EntrypointSet; an
-	// empty value removes it. Setting it also drops the image's Cmd.
-	Entrypoint    string
+	// empty one removes it. Setting it also drops the image's Cmd.
+	Entrypoint    []string
 	EntrypointSet bool
 	Cmd           []string // replaces the image's Cmd when non-empty
 	Env           []string // KEY=VALUE; a bare KEY takes the value from LookupEnv
@@ -43,8 +43,8 @@ func BuildProcess(cfg v1.Config, o Overrides) (Process, error) {
 	entrypoint, cmd := cfg.Entrypoint, cfg.Cmd
 	if o.EntrypointSet {
 		entrypoint, cmd = nil, nil
-		if o.Entrypoint != "" {
-			entrypoint = []string{o.Entrypoint}
+		if len(o.Entrypoint) > 0 {
+			entrypoint = o.Entrypoint
 		}
 	}
 	if len(o.Cmd) > 0 {

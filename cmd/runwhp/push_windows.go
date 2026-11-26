@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -60,29 +61,40 @@ func cmdPush(args []string, stdout io.Writer) int {
 		errorf("push: %v", err)
 		return 1
 	}
-	tmp := filepath.Join(root, "tmp")
-	if err := os.MkdirAll(tmp, 0o755); err != nil {
+	if err := pushTags(ctx, root, is, recs, quiet, debug, stdout); err != nil {
+		if ctx.Err() != nil {
+			errorf("push cancelled")
+			return 130
+		}
 		errorf("push: %v", err)
 		return 1
 	}
+	return 0
+}
+
+// pushTags pushes records to their registries, writing docker push's
+// output to out, or only the references pushed if quiet. The caller holds
+// the store from prunes.
+func pushTags(ctx context.Context, root string, is *image.Store, recs []pushRecord, quiet, debug bool, out io.Writer) error {
+	tmp := filepath.Join(root, "tmp")
+	if err := os.MkdirAll(tmp, 0o755); err != nil {
+		return err
+	}
 	repo := image.Familiar(recs[0].tag.Context().Name())
 	if !quiet {
-		fmt.Fprintf(stdout, "The push refers to repository [%s]\n", repo)
+		fmt.Fprintf(out, "The push refers to repository [%s]\n", repo)
 	}
 	for _, r := range recs {
 		if err := is.Backfill(ctx, []*image.Record{r.rec}); err != nil {
-			errorf("push: %v", err)
-			return 1
+			return err
 		}
 		raw, err := is.RawConfig(r.rec.Image)
 		if err != nil {
-			errorf("push: %v", err)
-			return 1
+			return err
 		}
 		layers, err := r.rec.Layers()
 		if err != nil {
-			errorf("push: %v", err)
-			return 1
+			return err
 		}
 		var order []string
 		for _, d := range layers {
@@ -98,21 +110,16 @@ func cmdPush(args []string, stdout io.Writer) int {
 			}
 			mu.Lock()
 			defer mu.Unlock()
-			fmt.Fprintf(stdout, "%s: %s\n", strings.TrimPrefix(diffID, "sha256:")[:12], status)
+			fmt.Fprintf(out, "%s: %s\n", strings.TrimPrefix(diffID, "sha256:")[:12], status)
 		})
 		src.Close()
 		if err != nil {
-			if ctx.Err() != nil {
-				errorf("push cancelled")
-				return 130
-			}
-			errorf("push: %v", err)
-			return 1
+			return err
 		}
 		if quiet {
-			fmt.Fprintln(stdout, image.Familiar(r.tag.Name()))
+			fmt.Fprintln(out, image.Familiar(r.tag.Name()))
 		} else {
-			fmt.Fprintf(stdout, "%s: digest: %s size: %d\n", r.tag.TagStr(), pushed.Digest, pushed.Size)
+			fmt.Fprintf(out, "%s: digest: %s size: %d\n", r.tag.TagStr(), pushed.Digest, pushed.Size)
 		}
 		// The record remembers the manifest, as Docker's RepoDigests do.
 		rd := repo + "@" + pushed.Digest
@@ -123,7 +130,7 @@ func cmdPush(args []string, stdout io.Writer) int {
 			}
 		}
 	}
-	return 0
+	return nil
 }
 
 // pushRecord is a record to push, and the tag to push it under.

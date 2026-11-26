@@ -362,33 +362,49 @@ type mountPlan struct {
 // parseMounts turns -v, --mount and --tmpfs into a mountPlan, with parents
 // mounted before what is mounted inside them.
 func parseMounts(volumes, mounts, tmpfs []string) (mountPlan, error) {
-	var plan mountPlan
+	specs, err := parseMountFlags(volumes, mounts, tmpfs)
+	if err != nil {
+		return mountPlan{}, err
+	}
+	return planMounts(specs)
+}
+
+// parseMountFlags reads -v, --mount and --tmpfs, resolving relative host
+// paths against the working directory.
+func parseMountFlags(volumes, mounts, tmpfs []string) ([]mountSpec, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return plan, err
+		return nil, err
 	}
 	var specs []mountSpec
 	for _, s := range volumes {
 		m, err := parseVolume(s, cwd)
 		if err != nil {
-			return plan, err
+			return nil, err
 		}
 		specs = append(specs, m)
 	}
 	for _, s := range mounts {
 		m, err := parseMount(s, cwd)
 		if err != nil {
-			return plan, err
+			return nil, err
 		}
 		specs = append(specs, m)
 	}
 	for _, s := range tmpfs {
 		m, err := parseTmpfs(s)
 		if err != nil {
-			return plan, err
+			return nil, err
 		}
 		specs = append(specs, m)
 	}
+	return specs, nil
+}
+
+// planMounts turns mounts into a mountPlan, with parents mounted before
+// what is mounted inside them, making missing bind sources it may make.
+func planMounts(specs []mountSpec) (mountPlan, error) {
+	var plan mountPlan
 	seen := map[string]bool{}
 	disks := map[string]int{} // volume name, lower case -> its disk
 	for _, m := range specs {
