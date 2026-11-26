@@ -181,3 +181,11 @@ func TestSpecFromCreateRefusals(t *testing.T) {
 		}
 	}
 }
+
+func TestPipePath(t *testing.T) {
+	for _, in := range []string{"runwhp_engine-x", `\\.\pipe\runwhp_engine-x`, "//./pipe/runwhp_engine-x", `\.\pipe\runwhp_engine-x`, `\\.\PIPE\runwhp_engine-x`} {
+		if got := pipePath(in); got != `\\.\pipe\runwhp_engine-x` {
+			t.Errorf("pipePath(%q) = %q", in, got)
+		}
+	}
+}

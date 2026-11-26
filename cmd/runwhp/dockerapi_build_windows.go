@@ -206,7 +206,8 @@ func jobBuild(ctx context.Context, root string, args json.RawMessage, in io.Read
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(dir)
+	// Removed once the job has answered: removing files is slow on Windows.
+	afterJob(func() { os.RemoveAll(dir) })
 	tr, err := image.Decompress(in)
 	if err != nil {
 		return nil, badRequest("reading the build context: %v", err)

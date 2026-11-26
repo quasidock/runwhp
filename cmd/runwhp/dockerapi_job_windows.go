@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"syscall"
 
 	"golang.org/x/sys/windows"
 
@@ -137,8 +138,19 @@ func cmdAPIJob(args []string) int {
 		return finish(nil, err)
 	}
 	// The server kills the job when its client goes; nothing else ends it.
-	return finish(f(context.Background(), root, h.Args, in, out))
+	code := finish(f(context.Background(), root, h.Args, in, out))
+	os.Stdout.Close()
+	for _, f := range jobCleanups {
+		f()
+	}
+	return code
 }
+
+// jobCleanups run once a job has given its result, so that the client
+// need not wait for them.
+var jobCleanups []func()
+
+func afterJob(f func()) { jobCleanups = append(jobCleanups, f) }
 
 // jobRunner starts jobs for the server, in a job object that ends them
 // with it.
@@ -186,6 +198,9 @@ func (j *jobRunner) run(ctx context.Context, kind string, args any, body io.Read
 	cmd := exec.Command(j.exe, "__api-job")
 	cmd.Dir = j.s.root
 	cmd.Stderr = &logWriter{s: j.s, prefix: kind + " job: "}
+	// The server has no console; without this, Windows would make one for
+	// each job, about 300 ms.
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -244,7 +259,13 @@ func (j *jobRunner) run(ctx context.Context, kind string, args any, body io.Read
 			break
 		}
 	}
-	werr := cmd.Wait()
+	var werr error
+	if result != nil && sinkErr == nil {
+		// It answered: what it cleans up after need not hold the client.
+		go cmd.Wait()
+	} else {
+		werr = cmd.Wait()
+	}
 	switch {
 	case sinkErr != nil:
 		return nil, sinkErr

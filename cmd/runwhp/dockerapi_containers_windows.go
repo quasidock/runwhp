@@ -714,7 +714,7 @@ func (s *apiServer) waitFor(ctx context.Context, c *container.Container, cond st
 		select {
 		case <-ctx.Done():
 			return 0, ctx.Err()
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(20 * time.Millisecond):
 		}
 	}
 }

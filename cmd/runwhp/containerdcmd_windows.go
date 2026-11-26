@@ -321,7 +321,11 @@ func newContainerdJob() (windows.Handle, error) {
 // startInJob starts cmd suspended, puts it in job, and lets it run, so
 // that nothing it starts escapes the job unasked.
 func startInJob(cmd *exec.Cmd, job windows.Handle) error {
-	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_SUSPENDED | windows.CREATE_NEW_PROCESS_GROUP}
+	flags := uint32(windows.CREATE_SUSPENDED | windows.CREATE_NEW_PROCESS_GROUP)
+	if cmd.SysProcAttr != nil {
+		flags |= cmd.SysProcAttr.CreationFlags
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: flags}
 	if err := cmd.Start(); err != nil {
 		return err
 	}

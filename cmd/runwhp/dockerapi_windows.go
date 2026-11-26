@@ -139,11 +139,15 @@ func apiPipe(root string) string { return `\\.\pipe\runwhp_engine` + storeSuffix
 // apiContextName is the docker context written for the store at root.
 func apiContextName(root string) string { return "runwhp" + storeSuffix(root) }
 
+// pipePath is the full path of the pipe name names: a bare name, or a
+// path, \\.\pipe\NAME or //./pipe/NAME, however many of its leading
+// slashes a shell left.
 func pipePath(name string) string {
-	if strings.HasPrefix(name, `\\`) || strings.HasPrefix(name, "//") {
-		return strings.ReplaceAll(name, "/", `\`)
+	n := strings.TrimLeft(strings.ReplaceAll(name, "/", `\`), `\`)
+	if len(n) >= len(`.\pipe\`) && strings.EqualFold(n[:len(`.\pipe\`)], `.\pipe\`) {
+		n = n[len(`.\pipe\`):]
 	}
-	return `\\.\pipe\` + name
+	return `\\.\pipe\` + n
 }
 
 // dockerHost is the DOCKER_HOST value that names pipe.
