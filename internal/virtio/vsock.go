@@ -14,8 +14,9 @@ import (
 
 // Vsock is a virtio socket device (virtio spec 5.10): stream connections
 // between the host, context ID 2, and the guest, context ID CID. The host
-// connects to ports the guest listens on with Dial; the guest's own
-// connection requests are refused, as nothing on the host listens yet.
+// connects to ports the guest listens on with Dial, and the guest to ports
+// the host listens on with Listen; its requests for any other port are
+// refused.
 //
 // Each connection has its own flow control: the guest says how much it can
 // buffer and how much it has consumed, and the host sends no more than
@@ -39,6 +40,9 @@ type Vsock struct {
 	ctrl     []vsockCtrl  // control packets for the guest, sent before data
 	ready    []*VsockConn // connections with data for the guest, in turn
 	stopped  bool
+
+	lmu       sync.Mutex
+	listeners map[uint32]*VsockListener
 }
 
 // Vsock queues, header and protocol constants.
@@ -71,7 +75,11 @@ const (
 	// vsockMaxPacket bounds the payload of a packet from the guest.
 	vsockMaxPacket = 64 << 10
 
+	// vsockFirstPort is the first of the ports Dial takes for itself;
+	// Listen takes those below it.
 	vsockFirstPort = 49152
+	// vsockBacklog bounds the connections a listener holds unaccepted.
+	vsockBacklog = 16
 )
 
 // How long a Dial waits for the guest to answer, and how long a Close waits
@@ -161,6 +169,16 @@ func (v *Vsock) Drain(ctx context.Context) bool {
 			v.failAll(net.ErrClosed)
 		})
 	}
+	v.lmu.Lock()
+	ls := v.listeners
+	v.listeners = nil
+	for _, l := range ls {
+		l.markShut()
+	}
+	v.lmu.Unlock()
+	for _, l := range ls {
+		l.drain()
+	}
 	return true
 }
 
@@ -225,8 +243,13 @@ func (v *Vsock) receive(pkt []byte) {
 	key := vsockKey{h.dstPort, h.srcPort}
 	c := v.conns[key]
 	switch {
+	case c == nil && h.op == vsockOpRequest:
+		if !v.accept(h) {
+			rst() // nothing listens on the port, or its backlog is full
+		}
+		return
 	case c == nil:
-		rst() // a connection request, or a packet for a connection gone
+		rst() // a packet for a connection gone
 		return
 	case int(h.len) != len(payload) || len(payload) > vsockMaxPacket:
 		v.logf("vsock: port %d sent a malformed packet; resetting", c.peer)
@@ -286,6 +309,8 @@ func (v *Vsock) receive(pkt []byte) {
 			v.TxBytes.Add(uint64(len(payload)))
 			c.wake(&c.readable)
 		}
+	case vsockOpRequest:
+		v.reset(c, syscall.ECONNRESET) // a second request for the same pair
 	case vsockOpCreditUpdate:
 	case vsockOpCreditRequest:
 		v.queueCtrl(vsockCtrl{op: vsockOpCreditUpdate, local: c.local, peer: c.peer, c: c})
@@ -424,24 +449,142 @@ func (v *Vsock) pump(t *Transport) {
 	}
 }
 
+func (v *Vsock) newConn(t *Transport, local, peer uint32) *VsockConn {
+	return &VsockConn{v: v, t: t, local: local, peer: peer, done: make(chan struct{}), closed: make(chan struct{}),
+		readable: make(chan struct{}, 1), writable: make(chan struct{}, 1)}
+}
+
+// initConns makes the connection table. The transport's lock is held.
+func (v *Vsock) initConns() {
+	if v.conns == nil {
+		v.conns = map[vsockKey]*VsockConn{}
+		v.nextPort = vsockFirstPort
+	}
+}
+
+// accept answers a connection request from the guest, if something listens
+// on its port and has room for it. The transport's lock is held.
+func (v *Vsock) accept(h vsockHeader) bool {
+	t := v.t.Load()
+	if t == nil || v.stopped {
+		return false
+	}
+	c := v.newConn(t, h.dstPort, h.srcPort)
+	c.state = vsockEstablished
+	c.peerBufAlloc, c.peerFwdCnt = h.bufAlloc, h.fwdCnt
+	c.settle(nil)
+	// The listener's lock is held while the connection is queued, so that
+	// none is queued once it has been shut: shutting drains what is queued.
+	v.lmu.Lock()
+	l := v.listeners[h.dstPort]
+	queued := false
+	if l != nil && !l.isShut {
+		select {
+		case l.backlog <- c:
+			queued = true
+		default:
+			v.logf("vsock: port %d has %d connections waiting; refusing another", h.dstPort, vsockBacklog)
+		}
+	}
+	v.lmu.Unlock()
+	if !queued {
+		return false
+	}
+	v.initConns()
+	v.conns[vsockKey{c.local, c.peer}] = c
+	v.Conns.Add(1)
+	v.queueCtrl(vsockCtrl{op: vsockOpResponse, local: c.local, peer: c.peer, c: c})
+	return true
+}
+
+// VsockListener takes the guest's connections to one host port.
+type VsockListener struct {
+	v       *Vsock
+	port    uint32
+	backlog chan *VsockConn
+	done    chan struct{}
+	isShut  bool // guarded by v.lmu
+}
+
+// Listen takes the guest's connections to port, which must be below the
+// ports Dial takes, until the listener is closed or the device drained.
+func (v *Vsock) Listen(port uint32) (*VsockListener, error) {
+	if port == 0 || port >= vsockFirstPort {
+		return nil, fmt.Errorf("vsock: cannot listen on port %d: ports from %d are the host's own", port, vsockFirstPort)
+	}
+	v.lmu.Lock()
+	defer v.lmu.Unlock()
+	if v.listeners[port] != nil {
+		return nil, fmt.Errorf("vsock: port %d is already listened on", port)
+	}
+	if v.listeners == nil {
+		v.listeners = map[uint32]*VsockListener{}
+	}
+	l := &VsockListener{v: v, port: port, backlog: make(chan *VsockConn, vsockBacklog), done: make(chan struct{})}
+	v.listeners[port] = l
+	return l, nil
+}
+
+// Accept waits for the guest's next connection.
+func (l *VsockListener) Accept() (*VsockConn, error) {
+	select {
+	case c := <-l.backlog:
+		return c, nil
+	case <-l.done:
+		return nil, net.ErrClosed
+	}
+}
+
+// Close stops listening; connections not yet accepted are closed.
+func (l *VsockListener) Close() error {
+	l.v.lmu.Lock()
+	if l.v.listeners[l.port] == l {
+		delete(l.v.listeners, l.port)
+	}
+	l.markShut()
+	l.v.lmu.Unlock()
+	l.drain()
+	return nil
+}
+
+// markShut ends Accept and stops connections being queued; v.lmu is held.
+func (l *VsockListener) markShut() {
+	if !l.isShut {
+		l.isShut = true
+		close(l.done)
+	}
+}
+
+// drain closes the connections queued and never accepted. Neither lock is
+// held: closing a connection takes the transport's.
+func (l *VsockListener) drain() {
+	for {
+		select {
+		case c := <-l.backlog:
+			c.Close()
+		default:
+			return
+		}
+	}
+}
+
+// Port is the host port the listener takes connections to.
+func (l *VsockListener) Port() uint32 { return l.port }
+
 // Dial connects to port on the guest.
 func (v *Vsock) Dial(ctx context.Context, port uint32) (*VsockConn, error) {
 	t := v.t.Load()
 	if t == nil {
 		return nil, errors.New("vsock: the device is not attached")
 	}
-	c := &VsockConn{v: v, t: t, peer: port, done: make(chan struct{}), closed: make(chan struct{}),
-		readable: make(chan struct{}, 1), writable: make(chan struct{}, 1)}
+	c := v.newConn(t, 0, port)
 	var err error
 	ran := t.Do(func() {
 		if v.stopped {
 			err = net.ErrClosed
 			return
 		}
-		if v.conns == nil {
-			v.conns = map[vsockKey]*VsockConn{}
-			v.nextPort = vsockFirstPort
-		}
+		v.initConns()
 		for {
 			c.local = v.nextPort
 			if v.nextPort++; v.nextPort == 0 {

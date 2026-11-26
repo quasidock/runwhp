@@ -402,3 +402,153 @@ func TestVsockResetAndDrain(t *testing.T) {
 		t.Error("dialed an unattached device")
 	}
 }
+
+// guestConnect sends a connection request from guest port src to host port
+// dst, advertising bufAlloc, and returns the host's answer.
+func (g *vsockGuest) guestConnect(src, dst, bufAlloc uint32) vsockPacket {
+	g.t.Helper()
+	g.send(vsockHeader{op: vsockOpRequest, srcPort: src, dstPort: dst, bufAlloc: bufAlloc}, nil)
+	var got []vsockPacket
+	waitFor(g.t, "an answer", func() bool {
+		got = append(got, g.recv()...)
+		return len(got) > 0
+	})
+	return got[0]
+}
+
+func TestVsockListen(t *testing.T) {
+	g := newVsockGuest(t, 8, 4096)
+	if _, err := g.dev.Listen(vsockFirstPort); err == nil {
+		t.Error("listened on a port of Dial's")
+	}
+	l, err := g.dev.Listen(1027)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.dev.Listen(1027); err == nil {
+		t.Error("listened twice on a port")
+	}
+
+	// A request for another port is still refused.
+	if p := g.guestConnect(6000, 1028, 4096); p.h.op != vsockOpRst {
+		t.Errorf("answered %+v for a port nothing listens on", p.h)
+	}
+
+	p := g.guestConnect(6000, 1027, 64<<10)
+	if p.h.op != vsockOpResponse || p.h.srcPort != 1027 || p.h.dstPort != 6000 || p.h.bufAlloc != vsockBufAlloc {
+		t.Fatalf("answer %+v", p.h)
+	}
+	c, err := l.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Port() != 6000 {
+		t.Errorf("port %d", c.Port())
+	}
+
+	// Data both ways, and a half-close each way.
+	g.send(vsockHeader{op: vsockOpRW, srcPort: 6000, dstPort: 1027, bufAlloc: 64 << 10}, []byte("ping"))
+	g.send(vsockHeader{op: vsockOpShutdown, flags: vsockShutSend, srcPort: 6000, dstPort: 1027, bufAlloc: 64 << 10}, nil)
+	got, err := io.ReadAll(c)
+	if err != nil || string(got) != "ping" {
+		t.Errorf("read %q, %v", got, err)
+	}
+	if _, err := c.Write([]byte("pong")); err != nil {
+		t.Fatal(err)
+	}
+	c.CloseWrite()
+	var pkts []vsockPacket
+	waitFor(t, "data and shutdown", func() bool {
+		pkts = append(pkts, g.recv()...)
+		return len(pkts) >= 2
+	})
+	if pkts[0].h.op != vsockOpRW || string(pkts[0].payload) != "pong" || pkts[0].h.srcPort != 1027 ||
+		pkts[1].h.op != vsockOpShutdown || pkts[1].h.flags != vsockShutSend {
+		t.Errorf("packets %+v", pkts)
+	}
+
+	// A second request for the same pair resets it.
+	g.send(vsockHeader{op: vsockOpRequest, srcPort: 6000, dstPort: 1027, bufAlloc: 4096}, nil)
+	g.expect(vsockOpRst)
+
+	// Once closed, the port refuses.
+	l.Close()
+	if _, err := l.Accept(); !errors.Is(err, net.ErrClosed) {
+		t.Errorf("accept after close: %v", err)
+	}
+	if p := g.guestConnect(6001, 1027, 4096); p.h.op != vsockOpRst {
+		t.Errorf("answered %+v after the listener closed", p.h)
+	}
+}
+
+// TestVsockListenCredit has the guest advertise a small buffer on a
+// connection it made: the host sends no more than that until it has room.
+func TestVsockListenCredit(t *testing.T) {
+	g := newVsockGuest(t, 8, 4096)
+	l, err := g.dev.Listen(1027)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.guestConnect(6000, 1027, 1000)
+	c, _ := l.Accept()
+	go c.Write(bytes.Repeat([]byte("x"), 3000))
+	var n int
+	waitFor(t, "the first 1000 bytes and a credit request", func() bool {
+		for _, p := range g.recv() {
+			if p.h.op == vsockOpRW {
+				n += len(p.payload)
+			}
+		}
+		return n >= 1000
+	})
+	time.Sleep(20 * time.Millisecond)
+	for _, p := range g.recv() {
+		n += len(p.payload)
+	}
+	if n != 1000 {
+		t.Errorf("sent %d bytes past a 1000-byte buffer", n)
+	}
+	g.send(vsockHeader{op: vsockOpCreditUpdate, srcPort: 6000, dstPort: 1027, bufAlloc: 1000, fwdCnt: 1000}, nil)
+	waitFor(t, "the next 1000", func() bool {
+		for _, p := range g.recv() {
+			n += len(p.payload)
+		}
+		return n >= 2000
+	})
+}
+
+func TestVsockListenBacklogAndDrain(t *testing.T) {
+	g := newVsockGuest(t, 64, 4096)
+	l, err := g.dev.Listen(1027)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range vsockBacklog {
+		if p := g.guestConnect(uint32(6000+i), 1027, 4096); p.h.op != vsockOpResponse {
+			t.Fatalf("connection %d: %+v", i, p.h)
+		}
+	}
+	if p := g.guestConnect(7000, 1027, 4096); p.h.op != vsockOpRst {
+		t.Errorf("answered %+v past the backlog", p.h)
+	}
+	c, _ := l.Accept()
+	done := make(chan error, 1)
+	go func() {
+		for {
+			if _, err := l.Accept(); err != nil {
+				done <- err
+				return
+			}
+		}
+	}()
+	g.dev.Drain(context.Background())
+	if err := <-done; !errors.Is(err, net.ErrClosed) {
+		t.Errorf("accept after Drain: %v", err)
+	}
+	if _, err := c.Read(make([]byte, 1)); !errors.Is(err, net.ErrClosed) {
+		t.Errorf("read after Drain: %v", err)
+	}
+	if p := g.guestConnect(7001, 1027, 4096); p.h.op != vsockOpRst {
+		t.Errorf("answered %+v after Drain", p.h)
+	}
+}
