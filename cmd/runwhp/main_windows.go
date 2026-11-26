@@ -48,14 +48,15 @@ const usage = `Usage:
   runwhp push [-a] [-q] NAME[:TAG]              push an image to its registry
   runwhp image COMMAND                          list, inspect, tag, save, load, remove and prune images
   runwhp volume COMMAND                         create, list, inspect and remove volumes
+  runwhp network COMMAND                        create, list, inspect, connect and remove networks
   runwhp system df [-v]                         show the space the store takes
   runwhp system prune [-a] [--volumes] [-f]     remove what nothing uses
   runwhp containerd [--address PIPE]            run a containerd of your own for nerdctl, through runwhp
 
-Run 'runwhp run -h' for the run flags, and 'runwhp image' or 'runwhp
-volume' for their commands. A container is named by its ID, a unique
-prefix of it, or its name. It is kept after it stops, with its writable
-layer, until deleted, unless it was run with --rm.
+Run 'runwhp run -h' for the run flags, and 'runwhp image', 'runwhp volume'
+or 'runwhp network' for their commands. A container is named by its ID, a
+unique prefix of it, or its name. It is kept after it stops, with its
+writable layer, until deleted, unless it was run with --rm.
 
 The local store is in %LOCALAPPDATA%\runwhp unless RUNWHP_ROOT is set. The
 first run or pull fetches runwhp's kernel into it.
@@ -75,6 +76,8 @@ func realMain(args []string) int {
 		return cmdPull(args[1:])
 	case "volume":
 		return cmdVolume(args[1:], os.Stdin, os.Stdout)
+	case "network":
+		return cmdNetwork(args[1:], os.Stdin, os.Stdout)
 	case "image":
 		return cmdImage(args[1:], os.Stdin, os.Stdout)
 	case "container":

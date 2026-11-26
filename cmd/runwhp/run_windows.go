@@ -45,7 +45,9 @@ type runOptions struct {
 	pull        string
 	kernel      string
 	debug       bool
-	network     string
+	networks    listFlag
+	aliases     listFlag
+	ip          string
 	publish     listFlag
 	addHosts    listFlag
 	volumes     listFlag
@@ -90,8 +92,10 @@ func runFlags(o *runOptions) *flag.FlagSet {
 	fs.StringVar(&o.pull, "pull", "missing", "")
 	fs.StringVar(&o.kernel, "kernel", "", "")
 	fs.BoolVar(&o.debug, "debug", false, "")
-	fs.StringVar(&o.network, "network", "user", "")
-	fs.StringVar(&o.network, "net", "user", "")
+	fs.Var(&o.networks, "network", "")
+	fs.Var(&o.networks, "net", "")
+	fs.Var(&o.aliases, "network-alias", "")
+	fs.StringVar(&o.ip, "ip", "", "")
 	fs.Var(&o.publish, "p", "")
 	fs.Var(&o.publish, "publish", "")
 	fs.Var(&o.addHosts, "add-host", "")
@@ -131,7 +135,12 @@ Flags:
                          on-failure[:N] (when it fails, at most N times), always or
                          unless-stopped (the same here), unless stopped or killed
       --hostname NAME    container hostname (default: the start of its ID)
-      --network MODE     user (default: outbound access through this machine) or none
+      --network NETWORK  user (default: outbound access through this machine, alone), none,
+                         or a network made with runwhp network create, whose containers reach
+                         each other by name (repeatable); NAME=N,alias=A,ip=X gives a network
+                         its own alias and address
+      --network-alias NAME  another name for the container on its first network (repeatable)
+      --ip ADDRESS       the container's address on its first network
   -p, --publish [IP:]HOSTPORT:PORT  forward a host port to a container TCP port (repeatable);
                          IP defaults to 127.0.0.1
       --add-host NAME:IP add an /etc/hosts entry (repeatable); IP host-gateway reaches
@@ -290,7 +299,7 @@ func resolveConfig(ctx context.Context, root string, o *runOptions, entrypointSe
 	if err != nil {
 		return nil, err
 	}
-	network, err := parseNetworkFlags(o.network, o.publish, o.addHosts)
+	network, err := parseNetworkFlags(root, networkFlags{modes: o.networks, aliases: o.aliases, ip: o.ip, publish: o.publish, addHosts: o.addHosts})
 	if err != nil {
 		return nil, err
 	}
@@ -316,7 +325,7 @@ func resolveConfig(ctx context.Context, root string, o *runOptions, entrypointSe
 	cfg := &container.Config{
 		Version: container.ConfigVersion, ID: container.NewID(), Created: time.Now().UTC(),
 		Stdin: o.interactive, TTY: o.tty,
-		Hosts: network.hosts, Network: network.enabled, Publish: network.publish, HostGateway: network.hostGateway,
+		Hosts: network.hosts, Network: network.enabled, NetworkMode: network.mode, Networks: network.networks, Publish: network.publish, HostGateway: network.hostGateway,
 		Shares: plan.shares, Mounts: plan.mounts,
 		Memory: memory, CPUs: cpus, StorageSize: storageSize, Debug: o.debug,
 		LogDriver: logs.driver, LogMaxSize: logs.maxSize, LogMaxFiles: logs.maxFiles,

@@ -3,40 +3,139 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"strconv"
 	"strings"
 
+	"github.com/quasidock/runwhp/internal/container"
 	"github.com/quasidock/runwhp/internal/netstack"
+	"github.com/quasidock/runwhp/internal/network"
 )
 
 // networkOptions is what the network flags ask for.
 type networkOptions struct {
 	enabled     bool
+	mode        string                 // as Config.NetworkMode keeps it
+	networks    []container.Attachment // user-defined ones, by name
 	publish     []netstack.Port
 	hosts       []string // /etc/hosts lines
 	hostGateway bool
 }
 
-// parseNetworkFlags checks --network, -p and --add-host together.
-func parseNetworkFlags(mode string, publish, addHosts []string) (networkOptions, error) {
+// networkFlags are run's network flags: --network, repeatable, which takes
+// a network's name or Docker's NAME=VALUE,... form, and --network-alias
+// and --ip, which go with the first network named, as Docker's do.
+type networkFlags struct {
+	modes, aliases, publish, addHosts []string
+	ip                                string
+}
+
+// parseNetworkFlags checks the network flags together, resolving the
+// networks they name in the store at root.
+func parseNetworkFlags(root string, f networkFlags) (networkOptions, error) {
 	var n networkOptions
-	switch mode {
-	case "user":
-		n.enabled = true
-	case "none":
-	default:
-		return n, fmt.Errorf("network %q is not supported; use user (the default) or none", mode)
+	modes := f.modes
+	if len(modes) == 0 {
+		modes = []string{network.User}
 	}
-	for _, s := range publish {
+	type wanted struct {
+		name, ip string
+		aliases  []string
+	}
+	var ws []wanted
+	for i, m := range modes {
+		w := wanted{name: m}
+		if strings.Contains(m, "=") {
+			w.name = ""
+			for _, kv := range strings.Split(m, ",") {
+				k, v, _ := strings.Cut(kv, "=")
+				switch k {
+				case "name":
+					w.name = v
+				case "alias":
+					w.aliases = append(w.aliases, v)
+				case "ip":
+					w.ip = v
+				case "mac-address", "driver-opt", "link-local-ip", "gw-priority", "ip6":
+					return n, fmt.Errorf("--network %s: %s is not supported", m, k)
+				default:
+					return n, fmt.Errorf("--network %s: unknown option %q", m, k)
+				}
+			}
+			if w.name == "" {
+				return n, fmt.Errorf("--network %s: no name given", m)
+			}
+		}
+		if i == 0 {
+			if len(f.aliases) > 0 && len(w.aliases) > 0 || f.ip != "" && w.ip != "" {
+				return n, errors.New("conflicting options: cannot specify both --network-alias or --ip and per-network ones")
+			}
+			w.aliases = append(w.aliases, f.aliases...)
+			if w.ip == "" {
+				w.ip = f.ip
+			}
+		}
+		ws = append(ws, w)
+	}
+
+	store := network.Open(root)
+	seen := map[string]bool{}
+	for _, w := range ws {
+		switch {
+		case w.name == "host":
+			return n, errors.New("network host is not supported: every container has a VM, and a network, of its own; publish ports with -p, and reach the host with --add-host NAME:host-gateway")
+		case strings.HasPrefix(w.name, "container:"):
+			return n, fmt.Errorf("network %s is not supported: containers' VMs cannot share a network stack", w.name)
+		}
+		nw, err := store.Resolve(w.name)
+		if err != nil {
+			return n, err
+		}
+		if nw.IsBuiltin() {
+			switch {
+			case len(ws) > 1:
+				return n, errors.New("conflicting options: cannot attach both user-defined and non-user-defined network-modes")
+			case len(w.aliases) > 0:
+				return n, errors.New("network-scoped aliases are only supported for user-defined networks")
+			case w.ip != "":
+				return n, fmt.Errorf("invalid config for network %s: invalid endpoint settings:\nuser-specified IP address is supported on user-defined networks only", w.name)
+			}
+			n.mode, n.enabled = nw.Name, nw.Name == network.User
+			break
+		}
+		if seen[nw.ID] {
+			return n, fmt.Errorf("network %s is given more than once", nw.Name)
+		}
+		seen[nw.ID] = true
+		a := container.Attachment{Network: nw.ID, Name: nw.Name, Aliases: w.aliases}
+		if w.ip != "" {
+			ip, err := netip.ParseAddr(w.ip)
+			if err != nil || !ip.Is4() {
+				return n, fmt.Errorf("invalid IPv4 address: %s", w.ip)
+			}
+			if !nw.Subnet.Contains(ip) {
+				return n, fmt.Errorf("invalid config for network %s: invalid endpoint settings:\nno configured subnet contains IP address %s", nw.Name, ip)
+			}
+			a.IPv4 = ip.String()
+		}
+		if n.mode == "" {
+			n.mode = nw.Name
+		}
+		n.networks = append(n.networks, a)
+		n.enabled = true
+	}
+	container.SortNetworks(n.networks)
+
+	for _, s := range f.publish {
 		p, err := parsePublish(s)
 		if err != nil {
 			return n, err
 		}
 		n.publish = append(n.publish, p)
 	}
-	for _, s := range addHosts {
+	for _, s := range f.addHosts {
 		line, gateway, err := netstack.HostsLine(s)
 		if err != nil {
 			return n, err

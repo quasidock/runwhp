@@ -5,9 +5,13 @@ package main
 import (
 	"fmt"
 	"io"
+	"net/netip"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/quasidock/runwhp/internal/container"
+	"github.com/quasidock/runwhp/internal/network"
 	"github.com/quasidock/runwhp/internal/vm"
 )
 
@@ -107,26 +111,68 @@ func TestParsePublish(t *testing.T) {
 }
 
 func TestParseNetworkFlags(t *testing.T) {
-	n, err := parseNetworkFlags("user", []string{"8080:80"}, []string{"h:host-gateway", "x:1.2.3.4"})
-	if err != nil || !n.enabled || !n.hostGateway || len(n.publish) != 1 || len(n.hosts) != 2 {
-		t.Fatalf("user: %+v, %v", n, err)
+	root := t.TempDir()
+	st := network.Open(root)
+	st.HostPrefixes = func() []netip.Prefix { return nil }
+	front, err := st.Create("front")
+	if err != nil {
+		t.Fatal(err)
 	}
-	n, err = parseNetworkFlags("none", nil, []string{"x:1.2.3.4"})
-	if err != nil || n.enabled || len(n.hosts) != 1 {
+	back, err := st.Create("back")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := parseNetworkFlags(root, networkFlags{publish: []string{"8080:80"}, addHosts: []string{"h:host-gateway", "x:1.2.3.4"}})
+	if err != nil || !n.enabled || n.mode != "user" || n.networks != nil || !n.hostGateway || len(n.publish) != 1 || len(n.hosts) != 2 {
+		t.Fatalf("default: %+v, %v", n, err)
+	}
+	for _, m := range []string{"bridge", "default", "user"} {
+		if n, err := parseNetworkFlags(root, networkFlags{modes: []string{m}}); err != nil || !n.enabled || n.mode != "user" {
+			t.Errorf("%s: %+v, %v", m, n, err)
+		}
+	}
+	n, err = parseNetworkFlags(root, networkFlags{modes: []string{"none"}, addHosts: []string{"x:1.2.3.4"}})
+	if err != nil || n.enabled || n.mode != "none" || len(n.hosts) != 1 {
 		t.Errorf("none: %+v, %v", n, err)
 	}
+
+	// Named networks: sorted, the mode the first given, --network-alias
+	// and --ip on the first given, the advanced form on others.
+	n, err = parseNetworkFlags(root, networkFlags{modes: []string{"front", "name=back,alias=db,alias=pg,ip=172.19.0.9"}, aliases: []string{"web"}, ip: "172.18.0.7"})
+	want := []container.Attachment{
+		{Network: back.ID, Name: "back", Aliases: []string{"db", "pg"}, IPv4: "172.19.0.9"},
+		{Network: front.ID, Name: "front", Aliases: []string{"web"}, IPv4: "172.18.0.7"},
+	}
+	if err != nil || !n.enabled || n.mode != "front" || !reflect.DeepEqual(n.networks, want) {
+		t.Errorf("named: %+v, %v", n, err)
+	}
+	if n, err := parseNetworkFlags(root, networkFlags{modes: []string{front.ID[:6]}}); err != nil || n.networks[0].Name != "front" {
+		t.Errorf("by ID prefix: %+v, %v", n, err)
+	}
+
 	for _, c := range []struct {
-		mode           string
-		publish, hosts []string
+		f    networkFlags
+		want string
 	}{
-		{"host", nil, nil},
-		{"bridge", nil, nil},
-		{"none", []string{"8080:80"}, nil},
-		{"none", nil, []string{"h:host-gateway"}},
-		{"user", []string{"bad"}, nil},
+		{networkFlags{modes: []string{"host"}}, "network host is not supported"},
+		{networkFlags{modes: []string{"container:x"}}, "not supported"},
+		{networkFlags{modes: []string{"nosuch"}}, "network nosuch not found"},
+		{networkFlags{modes: []string{"front", "bridge"}}, "conflicting options: cannot attach both user-defined and non-user-defined network-modes"},
+		{networkFlags{modes: []string{"none", "front"}}, "conflicting options"},
+		{networkFlags{modes: []string{"front", "front"}}, "more than once"},
+		{networkFlags{aliases: []string{"a"}}, "network-scoped aliases are only supported for user-defined networks"},
+		{networkFlags{ip: "10.0.2.9"}, "user-specified IP address is supported on user-defined networks only"},
+		{networkFlags{modes: []string{"front"}, ip: "172.19.0.2"}, "invalid config for network front: invalid endpoint settings:\nno configured subnet contains IP address 172.19.0.2"},
+		{networkFlags{modes: []string{"front"}, ip: "fe80::1"}, "invalid IPv4 address"},
+		{networkFlags{modes: []string{"name=front,mac-address=02:00:00:00:00:01"}}, "mac-address is not supported"},
+		{networkFlags{modes: []string{"name=front,alias=a"}, aliases: []string{"b"}}, "conflicting options"},
+		{networkFlags{modes: []string{"none"}, publish: []string{"8080:80"}}, "--network none"},
+		{networkFlags{modes: []string{"none"}, addHosts: []string{"h:host-gateway"}}, "--network none"},
+		{networkFlags{publish: []string{"bad"}}, "-p bad"},
 	} {
-		if _, err := parseNetworkFlags(c.mode, c.publish, c.hosts); err == nil {
-			t.Errorf("parseNetworkFlags(%q, %q, %q) accepted", c.mode, c.publish, c.hosts)
+		if _, err := parseNetworkFlags(root, c.f); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%+v: %v, want %q", c.f, err, c.want)
 		}
 	}
 }
@@ -136,7 +182,13 @@ func TestNetworkFlags(t *testing.T) {
 	fs := runFlags(&o)
 	fs.SetOutput(io.Discard)
 	args := []string{"--net", "none", "-p", "1:2", "--publish", "3:4", "--add-host", "a:1.1.1.1", "alpine"}
-	if err := fs.Parse(args); err != nil || o.network != "none" || len(o.publish) != 2 || len(o.addHosts) != 1 {
+	if err := fs.Parse(args); err != nil || !reflect.DeepEqual([]string(o.networks), []string{"none"}) || len(o.publish) != 2 || len(o.addHosts) != 1 {
+		t.Errorf("parsed %+v, %v", o, err)
+	}
+	o = runOptions{}
+	fs = runFlags(&o)
+	args = []string{"--network", "a", "--net", "b", "--network-alias", "x", "--network-alias", "y", "--ip", "172.18.0.2", "alpine"}
+	if err := fs.Parse(args); err != nil || len(o.networks) != 2 || len(o.aliases) != 2 || o.ip != "172.18.0.2" {
 		t.Errorf("parsed %+v, %v", o, err)
 	}
 }

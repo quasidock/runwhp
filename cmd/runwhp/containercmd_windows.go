@@ -16,6 +16,8 @@ import (
 
 	"github.com/quasidock/runwhp/internal/container"
 	"github.com/quasidock/runwhp/internal/gc"
+	"github.com/quasidock/runwhp/internal/netswitch"
+	"github.com/quasidock/runwhp/internal/network"
 )
 
 // The container commands return 1 when they fail and 2 for a usage error,
@@ -76,7 +78,7 @@ func cmdList(args []string, stdout io.Writer) int {
 	case format == "json":
 		out := make([]containerState, 0, len(cs))
 		for _, c := range cs {
-			out = append(out, stateOf(c))
+			out = append(out, withNetworks(stateOf(c), c))
 		}
 		printJSON(stdout, out)
 	default:
@@ -113,7 +115,7 @@ func cmdState(args []string, stdout io.Writer) int {
 		errorf("%v", err)
 		return 1
 	}
-	printJSON(stdout, stateOf(c))
+	printJSON(stdout, withNetworks(stateOf(c), c))
 	return 0
 }
 
@@ -332,12 +334,16 @@ type containerState struct {
 	AutoRemove  bool      `json:"autoRemove,omitempty"`
 	// RestartPolicy is --restart's, and RestartCount the times the runwhp
 	// running the container has started it again.
-	RestartPolicy string   `json:"restartPolicy,omitempty"`
-	RestartCount  int      `json:"restartCount,omitempty"`
-	Output        string   `json:"output,omitempty"`
-	Memory        uint64   `json:"memory"` // guest RAM, in bytes
-	Ports         []string `json:"ports,omitempty"`
-	Volumes       []string `json:"volumes,omitempty"`
+	RestartPolicy string `json:"restartPolicy,omitempty"`
+	RestartCount  int    `json:"restartCount,omitempty"`
+	Output        string `json:"output,omitempty"`
+	Memory        uint64 `json:"memory"` // guest RAM, in bytes
+	// NetworkMode is the network --network named first, and Networks those
+	// the container is on, with its addresses there while it runs.
+	NetworkMode string                  `json:"networkMode,omitempty"`
+	Networks    map[string]networkState `json:"networks,omitempty"`
+	Ports       []string                `json:"ports,omitempty"`
+	Volumes     []string                `json:"volumes,omitempty"`
 	// Containerd is the containerd task the container runs, for one a
 	// containerd shim runs.
 	Containerd *container.ContainerdTask `json:"containerd,omitempty"`
@@ -464,4 +470,47 @@ func humanDuration(d time.Duration) string {
 		return plural(int(d.Hours()/24/30), "month")
 	}
 	return plural(int(d.Hours()/24/365), "year")
+}
+
+// networkState is a container's place on a network, as docker inspect's
+// NetworkSettings.Networks describe it: its addresses there are empty
+// unless it runs.
+type networkState struct {
+	NetworkID   string   `json:"networkID"`
+	EndpointID  string   `json:"endpointID,omitempty"`
+	Gateway     string   `json:"gateway,omitempty"`
+	IPAddress   string   `json:"ipAddress,omitempty"`
+	IPPrefixLen int      `json:"ipPrefixLen,omitempty"`
+	MacAddress  string   `json:"macAddress,omitempty"`
+	Aliases     []string `json:"aliases,omitempty"`
+	DNSNames    []string `json:"dnsNames,omitempty"`
+}
+
+// withNetworks adds the container's networks to its state.
+func withNetworks(s containerState, c *container.Container) containerState {
+	s.NetworkMode = c.Config.Mode()
+	if len(c.Config.Networks) == 0 {
+		return s
+	}
+	root, err := storeRoot()
+	if err != nil {
+		return s
+	}
+	store := network.Open(root)
+	s.Networks = map[string]networkState{}
+	for _, a := range c.Config.Networks {
+		ns := networkState{NetworkID: a.Network, Aliases: a.Aliases}
+		if c.Name != "" {
+			ns.DNSNames = append(ns.DNSNames, c.Name)
+		}
+		ns.DNSNames = append(append(ns.DNSNames, a.Aliases...), c.Short())
+		if e, ok := store.EndpointOf(a.Network, c.ID); ok {
+			ns.EndpointID, ns.IPAddress, ns.MacAddress = e.ID, e.IP.String(), netswitch.MACString(e.MAC())
+			if n, err := store.Get(a.Network); err == nil {
+				ns.Gateway, ns.IPPrefixLen = n.Gateway.String(), n.Subnet.Bits()
+			}
+		}
+		s.Networks[a.Name] = ns
+	}
+	return s
 }
