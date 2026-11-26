@@ -44,7 +44,10 @@
 // after which init resets the machine.
 package guestspec
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // SpecPath is where the Spec sits in the initramfs, without a leading slash.
 const SpecPath = "runwhp/spec.json"
@@ -242,6 +245,9 @@ type Control struct {
 	// Stats, when not zero, asks init for the guest's statistics, which
 	// it sends back in an Event with GuestStats.Seq set to Stats.
 	Stats uint64 `json:"stats,omitempty"`
+	// Top, when not zero, asks init for the container's processes, which
+	// it sends back in an Event with Processes.Seq set to Top.
+	Top uint64 `json:"top,omitempty"`
 	// Time, when not zero, is the host's wall clock as the message left
 	// it, in nanoseconds since the Unix epoch. Init brings the guest's
 	// clock to it: gradually when it is close, at once when not.
@@ -281,8 +287,46 @@ type Event struct {
 	Error  string `json:"error,omitempty"`
 	// Stats answers Control.Stats.
 	Stats *GuestStats `json:"stats,omitempty"`
+	// Top answers Control.Top.
+	Top *Processes `json:"top,omitempty"`
 	// Freeze answers Control.Freeze.
 	Freeze *Freeze `json:"freeze,omitempty"`
+}
+
+// Processes is init's list of the container's processes: every process
+// in the guest but init itself and the kernel's own, as ps would show
+// them in the container's PID namespace.
+type Processes struct {
+	Seq   uint64    `json:"seq"`
+	Procs []Process `json:"procs"`
+	// MemTotal is the guest's RAM, in bytes, for each process's share.
+	MemTotal uint64 `json:"memTotal"`
+	// Now is the guest's clock as init listed the processes.
+	Now   time.Time `json:"now"`
+	Error string    `json:"error,omitempty"`
+}
+
+// Process is one process, from /proc/PID/stat, status and cmdline.
+type Process struct {
+	PID     int    `json:"pid"`
+	PPID    int    `json:"ppid"`
+	PGID    int    `json:"pgid"`
+	SID     int    `json:"sid"`
+	TPGID   int    `json:"tpgid"` // the terminal's foreground process group
+	UID     uint32 `json:"uid"`
+	User    string `json:"user,omitempty"` // in the container's /etc/passwd
+	State   string `json:"state"`          // R, S, D, Z, T...
+	TTY     uint32 `json:"tty,omitempty"`  // the terminal's device number
+	Nice    int    `json:"nice,omitempty"`
+	Threads int    `json:"threads"`
+	// Start is when it started; CPU the processor time it has used.
+	Start time.Time     `json:"start"`
+	CPU   time.Duration `json:"cpu"`
+	// VSZ and RSS are its virtual and resident memory, in bytes.
+	VSZ  uint64   `json:"vsz"`
+	RSS  uint64   `json:"rss"`
+	Comm string   `json:"comm"`
+	Args []string `json:"args,omitempty"`
 }
 
 // GuestStats is what init reports of the guest when the host asks.

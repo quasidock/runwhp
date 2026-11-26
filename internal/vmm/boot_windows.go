@@ -78,6 +78,7 @@ type vmHandles struct {
 	blks    []*virtio.Blk
 	probe   *vm.Probe
 	guest   *guestStats
+	top     *guestTop
 	freezer *guestFreezer
 }
 
@@ -222,9 +223,9 @@ func bootContainer(ctx context.Context, root string, cfg *container.Config, laye
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	guest := newGuestStats(proxy)
+	guest, top := newGuestStats(proxy), newGuestTop(proxy)
 	freezer := newGuestFreezer(proxy)
-	status := &eventWriter{onReady: hooks.ready, onStarted: hooks.started, onStats: guest.deliver, onFreeze: freezer.deliver}
+	status := &eventWriter{onReady: hooks.ready, onStarted: hooks.started, onStats: guest.deliver, onTop: top.deliver, onFreeze: freezer.deliver}
 	console := &virtio.Console{
 		Ports: []virtio.Port{
 			{Name: guestspec.PortStdout, Out: stdout},
@@ -238,7 +239,7 @@ func bootContainer(ctx context.Context, root string, cfg *container.Config, laye
 	// The vsock device carries runwhp exec's connections to init.
 	vsock := &virtio.Vsock{CID: guestspec.GuestCID, Logf: logf}
 	defer func() { logf("%s", vsock.Stats()) }()
-	handles := &vmHandles{vsock: vsock, probe: &vm.Probe{}, guest: guest, freezer: freezer}
+	handles := &vmHandles{vsock: vsock, probe: &vm.Probe{}, guest: guest, top: top, freezer: freezer}
 	// The balloon gives back to Windows the memory the guest reports free.
 	devices := []virtio.Device{console, vsock}
 	if !opts.noBalloon {

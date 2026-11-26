@@ -272,9 +272,22 @@ func TestDockerExec(t *testing.T) {
 	if out := d.dok("exec", "ex", "cat", "/tmp/d"); out != "done\n" {
 		t.Errorf("exec -d: %q", out)
 	}
+	// docker top, as ps -ef and ps aux show the processes.
+	if out := d.dok("top", "ex"); !strings.HasPrefix(out, "UID") || !strings.Contains(out, "sleep 600") {
+		t.Errorf("top: %q", out)
+	}
+	if out := d.dok("top", "ex", "aux"); !strings.HasPrefix(out, "USER") || !strings.Contains(out, "sleep 600") {
+		t.Errorf("top aux: %q", out)
+	}
+	if r := d.docker1("top", "ex", "-o", "pid"); r.code == 0 || !strings.Contains(r.stderr, "not supported") {
+		t.Errorf("top -o pid: %+v", r)
+	}
 	d.dok("stop", "-t", "0", "ex")
 	if r := d.docker1("exec", "ex", "true"); r.code == 0 || !strings.Contains(r.stderr, "not running") {
 		t.Errorf("exec in a stopped container: %+v", r)
+	}
+	if r := d.docker1("top", "ex"); r.code == 0 || !strings.Contains(r.stderr, "is not running") {
+		t.Errorf("top of a stopped container: %+v", r)
 	}
 }
 

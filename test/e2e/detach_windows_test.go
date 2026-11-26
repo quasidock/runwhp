@@ -466,6 +466,58 @@ func TestDetachedOutlivesConsole(t *testing.T) {
 	}
 }
 
+// TestTop lists a container's processes as ps -ef and ps aux show them:
+// its process and what it started, with the users the image names, but
+// not init; a paused container's too, and none of a stopped one's.
+func TestTop(t *testing.T) {
+	name := newName(t)
+	detached(t, "--name", name, alpine, "sh", "-c", "su nobody -s /bin/sh -c 'exec sleep 1001' & exec sleep 1000")
+	var r result
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+		if r = cli(t, "top", name); r.code == 0 && strings.Contains(r.stdout, "sleep 1001") {
+			break
+		}
+	}
+	if r.code != 0 {
+		t.Fatalf("top: %+v", r)
+	}
+	rows := strings.Split(strings.TrimSpace(r.stdout), "\n")
+	if f := strings.Fields(rows[0]); !slices.Equal(f, []string{"UID", "PID", "PPID", "C", "STIME", "TTY", "TIME", "CMD"}) {
+		t.Errorf("titles %q", f)
+	}
+	var sawRoot, sawNobody bool
+	for _, row := range rows[1:] {
+		f := strings.Fields(row)
+		switch {
+		case strings.HasSuffix(row, "sleep 1000"):
+			sawRoot = f[0] == "root"
+		case strings.HasSuffix(row, "sleep 1001"):
+			sawNobody = f[0] == "nobody"
+		}
+		if strings.Contains(row, "runwhp-init") || f[1] == "1" {
+			t.Errorf("init listed: %q", row)
+		}
+	}
+	if !sawRoot || !sawNobody {
+		t.Errorf("top:\n%s", r.stdout)
+	}
+	if r := cli(t, "top", name, "aux"); r.code != 0 || !strings.HasPrefix(r.stdout, "USER") || !strings.Contains(r.stdout, "sleep 1000") {
+		t.Errorf("top aux: %+v", r)
+	}
+	if r := cli(t, "top", name, "-o", "pid"); r.code == 0 || !strings.Contains(r.stderr, "not supported") {
+		t.Errorf("top -o pid: %+v", r)
+	}
+	cli(t, "pause", name)
+	if r := cli(t, "top", name); r.code != 0 || !strings.Contains(r.stdout, "sleep 1000") {
+		t.Errorf("top of a paused container: %+v", r)
+	}
+	cli(t, "unpause", name)
+	cli(t, "stop", "-t", "0", name)
+	if r := cli(t, "top", name); r.code == 0 || !strings.Contains(r.stderr, "is not running") {
+		t.Errorf("top of a stopped container: %+v", r)
+	}
+}
+
 // TestRandomPorts checks -p without a host port, --expose and -P: each
 // port is bound to a free one, which port reports and which serves, and
 // is bound again, perhaps elsewhere, when the container starts again.

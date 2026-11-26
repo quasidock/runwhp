@@ -19,6 +19,8 @@ func TestGuestStats(t *testing.T) {
 	g := &guestStats{
 		listening: func() bool { mu.Lock(); defer mu.Unlock(); return listening },
 		send:      func(c guestspec.Control) bool { mu.Lock(); sent = append(sent, c); mu.Unlock(); return true },
+		ask:       func(seq uint64) guestspec.Control { return guestspec.Control{Stats: seq} },
+		seqOf:     func(st *guestspec.GuestStats) uint64 { return st.Seq },
 		replies:   make(chan *guestspec.GuestStats, 1),
 	}
 	if g.get(time.Millisecond) != nil || len(sent) != 0 {
@@ -59,5 +61,11 @@ func TestEventWriterStats(t *testing.T) {
 	w.Write([]byte(`{"stats":{"seq":3,"memTotal":1}}` + "\n" + `{"started":true,"pid":5}` + "\n"))
 	if len(got) != 1 || got[0] != 3 {
 		t.Errorf("stats events: %v", got)
+	}
+	var top []uint64
+	w = eventWriter{onTop: func(p *guestspec.Processes) { top = append(top, p.Seq) }}
+	w.Write([]byte(`{"top":{"seq":4,"procs":[{"pid":7}]}}` + "\n"))
+	if len(top) != 1 || top[0] != 4 {
+		t.Errorf("top events: %v", top)
 	}
 }

@@ -56,6 +56,18 @@ func parse(data []byte, passwd bool) []entry {
 	return out
 }
 
+// Names maps the user IDs in an /etc/passwd to their names, the first
+// name for each, as ps shows them.
+func Names(passwdData []byte) map[uint32]string {
+	names := map[uint32]string{}
+	for _, e := range parse(passwdData, true) {
+		if _, ok := names[e.id]; !ok {
+			names[e.id] = e.name
+		}
+	}
+	return names
+}
+
 func numeric(s string) (uint32, bool) {
 	n, err := strconv.ParseUint(s, 10, 32)
 	return uint32(n), err == nil

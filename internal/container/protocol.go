@@ -49,6 +49,8 @@ const (
 	// OpControl passes Control to the container as an attached runwhp's
 	// control frames do: a terminal size, or a signal to its process.
 	OpControl = "control"
+	// OpTop replies with the running container's processes, in Top.
+	OpTop = "top"
 )
 
 // After the reply to OpAttach, both ends send frames in the log's framing
@@ -101,6 +103,8 @@ type Reply struct {
 	Console []string `json:"console,omitempty"`
 	// Stats answers OpStats.
 	Stats *Stats `json:"stats,omitempty"`
+	// Top answers OpTop.
+	Top *guestspec.Processes `json:"top,omitempty"`
 	// Stdin, in answer to OpAttach, says that the container's input is
 	// open to attached runwhps: it was run in the background with -i and
 	// neither a file nor a pipe for input.

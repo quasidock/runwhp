@@ -139,13 +139,15 @@ type eventWriter struct {
 	ok     bool
 	// onReady, if set, is called when a container booted to wait for its
 	// start is ready; onStarted, when the container process starts, with
-	// its pid in the guest; onStats, with statistics init was asked for;
-	// onFreeze, with init's answer to a freeze or thaw.
+	// its pid in the guest; onStats and onTop, with the statistics or
+	// processes init was asked for; onFreeze, with init's answer to a
+	// freeze or thaw.
 	// They are called with mu held, on the console's output goroutine, so
 	// they must not block.
 	onReady   func()
 	onStarted func(pid int)
 	onStats   func(*guestspec.GuestStats)
+	onTop     func(*guestspec.Processes)
 	onFreeze  func(*guestspec.Freeze)
 }
 
@@ -169,6 +171,8 @@ func (w *eventWriter) Write(p []byte) (int, error) {
 				w.onStarted(ev.Pid)
 			case ev.Stats != nil && w.onStats != nil:
 				w.onStats(ev.Stats)
+			case ev.Top != nil && w.onTop != nil:
+				w.onTop(ev.Top)
 			case ev.Freeze != nil && w.onFreeze != nil:
 				w.onFreeze(ev.Freeze)
 			}

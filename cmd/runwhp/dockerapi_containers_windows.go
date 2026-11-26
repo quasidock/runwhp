@@ -51,9 +51,7 @@ func (s *apiServer) containerRoutes() {
 	s.handle("DELETE /containers/{id}", s.deleteContainer)
 	s.handle("GET /containers/{id}/logs", s.getContainerLogs)
 	s.handle("GET /containers/{id}/stats", s.getContainerStats)
-	s.handle("GET /containers/{id}/top", func(_ http.ResponseWriter, r *http.Request) error {
-		return notImplemented("runwhp does not list a container's processes yet; use 'docker exec %s ps'", r.PathValue("id"))
-	})
+	s.handle("GET /containers/{id}/top", s.getContainerTop)
 	s.handle("GET /containers/{id}/changes", s.getContainerChanges)
 	s.handle("GET /containers/{id}/export", s.getContainerExport)
 	s.handle("HEAD /containers/{id}/archive", s.headContainerArchive)
@@ -1269,6 +1267,25 @@ func (s *apiServer) getContainerExport(w http.ResponseWriter, r *http.Request) e
 type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+// getContainerTop lists a running container's processes, as init sees
+// them, in the columns ps -ef or ps aux would give.
+func (s *apiServer) getContainerTop(w http.ResponseWriter, r *http.Request) error {
+	c, err := s.resolve(r.PathValue("id"))
+	if err != nil {
+		return err
+	}
+	procs, err := containerTop(r.Context(), s.root, c)
+	if err != nil {
+		return err
+	}
+	titles, rows, err := dockerapi.Top(procs, r.URL.Query().Get("ps_args"), time.Local)
+	if err != nil {
+		return badRequest("%v", err)
+	}
+	writeJSON(w, dcontainer.TopResponse{Titles: titles, Processes: rows})
+	return nil
+}
 
 func (s *apiServer) getContainerChanges(w http.ResponseWriter, r *http.Request) error {
 	c, err := s.resolve(r.PathValue("id"))

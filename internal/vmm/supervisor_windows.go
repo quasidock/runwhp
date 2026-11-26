@@ -751,6 +751,8 @@ func (s *Supervisor) handle(c net.Conn) {
 			return
 		case container.OpStats:
 			rep = s.stats()
+		case container.OpTop:
+			rep = s.top()
 		case container.OpAttach:
 			s.attach(c, r, req)
 			return
@@ -824,6 +826,23 @@ func (s *Supervisor) stats() container.Reply {
 	}
 	st.Guest = h.guest.get(time.Second)
 	return container.Reply{OK: true, Stats: st}
+}
+
+// top lists the running container's processes, as init sees them; a
+// paused container's too, as init is not frozen with them.
+func (s *Supervisor) top() container.Reply {
+	h := s.running()
+	if h == nil {
+		return container.Reply{Error: ErrNotRunning.Error()}
+	}
+	p := h.top.get(5 * time.Second)
+	switch {
+	case p == nil:
+		return container.Reply{Error: "the container's init did not list its processes in time"}
+	case p.Error != "":
+		return container.Reply{Error: "listing the container's processes: " + p.Error}
+	}
+	return container.Reply{OK: true, Top: p}
 }
 
 // connect connects c to a vsock port in the guest, and carries bytes both

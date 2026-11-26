@@ -330,6 +330,9 @@ func (c *controller) listen(port *os.File) {
 			// Walking /proc takes a while; signals behind it should not wait.
 			go c.sendStats(m.Stats)
 		}
+		if m.Top != 0 {
+			go c.sendTop(m.Top)
+		}
 		if m.Shutdown {
 			c.shutdownOnce.Do(func() { close(c.shutdown) })
 		}
