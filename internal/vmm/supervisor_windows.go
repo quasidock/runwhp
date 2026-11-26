@@ -533,12 +533,14 @@ func (s *Supervisor) Kill(sig int, all bool) error {
 	return nil
 }
 
-// stop sends the container's stop signal, then SIGKILL after timeout, and
-// waits for it to stop.
-func (s *Supervisor) stop(timeout time.Duration) {
-	sig := guestspec.SIGTERM
-	if n, err := guestspec.ParseSignal(s.rec.Config.StopSignal); err == nil && s.rec.Config.StopSignal != "" {
-		sig = n
+// stop sends signal sig, or the container's stop signal if sig is 0, then
+// SIGKILL after timeout, and waits for it to stop.
+func (s *Supervisor) stop(sig int, timeout time.Duration) {
+	if sig <= 0 || sig > 64 {
+		sig = guestspec.SIGTERM
+		if n, err := guestspec.ParseSignal(s.rec.Config.StopSignal); err == nil && s.rec.Config.StopSignal != "" {
+			sig = n
+		}
 	}
 	s.mu.Lock()
 	s.stopRestarts()
@@ -735,7 +737,7 @@ func (s *Supervisor) handle(c net.Conn) {
 				rep = container.Reply{Error: err.Error()}
 			}
 		case container.OpStop:
-			s.stop(time.Duration(req.Timeout * float64(time.Second)))
+			s.stop(req.Signal, time.Duration(req.Timeout*float64(time.Second)))
 			rep = s.reply()
 		case container.OpWait:
 			rep = s.Wait()
@@ -753,6 +755,15 @@ func (s *Supervisor) handle(c net.Conn) {
 			rep = s.Unpause()
 		case container.OpNetworks:
 			rep = s.Networks(req)
+		case container.OpControl:
+			switch {
+			case req.Control == nil:
+				rep = container.Reply{Error: "bad request: a control request carries no control"}
+			case s.current() == nil:
+				rep = container.Reply{Error: ErrNotRunning.Error()}
+			default:
+				s.Control(*req.Control)
+			}
 		default:
 			rep = container.Reply{Error: fmt.Sprintf("this runwhp does not know the request %q", req.Op)}
 		}

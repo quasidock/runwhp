@@ -23,8 +23,9 @@ const (
 	// OpKill sends Signal to the container's process, or to every process
 	// in the container with All.
 	OpKill = "kill"
-	// OpStop sends the container's stop signal, then SIGKILL after Timeout
-	// seconds, and replies once the container has stopped.
+	// OpStop sends Signal, or the container's stop signal if it is 0,
+	// then SIGKILL after Timeout seconds, and replies once the container
+	// has stopped.
 	OpStop = "stop"
 	// OpWait replies once the container has stopped.
 	OpWait = "wait"
@@ -45,6 +46,9 @@ const (
 	// Disconnect: a created one boots again, ready to start, before the
 	// reply. A running one is refused.
 	OpNetworks = "networks"
+	// OpControl passes Control to the container as an attached runwhp's
+	// control frames do: a terminal size, or a signal to its process.
+	OpControl = "control"
 )
 
 // After the reply to OpAttach, both ends send frames in the log's framing
@@ -81,6 +85,8 @@ type Request struct {
 	// Connect and Disconnect are OpNetworks's.
 	Connect    *Attachment `json:"connect,omitempty"`
 	Disconnect string      `json:"disconnect,omitempty"`
+	// Control is OpControl's.
+	Control *guestspec.Control `json:"control,omitempty"`
 }
 
 // Reply is a container's runwhp's answer to a Request.
