@@ -242,6 +242,15 @@ func (n *guestNetwork) devices() []virtio.Device {
 	return ds
 }
 
+// published is what the first device's stack publishes on the host, as
+// bound; the others publish nothing.
+func (n *guestNetwork) published() []netstack.Port {
+	if n == nil || len(n.nics) == 0 || n.nics[0].stack == nil {
+		return nil
+	}
+	return n.nics[0].stack.Published()
+}
+
 // close stops taking links, closes the links and the stacks, logging what
 // they did, and gives the leases back, once the guest has stopped.
 func (n *guestNetwork) close(logf func(string, ...any)) {

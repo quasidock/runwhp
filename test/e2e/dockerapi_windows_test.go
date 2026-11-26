@@ -166,7 +166,6 @@ func TestDockerRun(t *testing.T) {
 		{[]string{"--privileged"}, "--privileged"},
 		{[]string{"--network", "host"}, "--network host"},
 		{[]string{"--dns", "1.1.1.1"}, "--dns"},
-		{[]string{"-p", "80"}, "give a host port"},
 		{[]string{"-p", "53:53/udp"}, "only tcp"},
 		{[]string{"--cap-add", "NET_ADMIN"}, "--cap-add"},
 	} {
@@ -519,6 +518,51 @@ func TestDockerNetworksVolumes(t *testing.T) {
 	}
 	if got != "served\n" {
 		t.Errorf("published port gave %q", got)
+	}
+
+	// Random host ports, with -p PORT and with -P over the image's and
+	// --expose's ports, as docker port and inspect report them.
+	d.dok("run", "-d", "--name", "rand", "-p", "80", "--expose", "9000", "-P", img, "sh", "-c",
+		"nc -lk -p 9000 -e echo nine & while true; do echo served | nc -l -p 80; done")
+	addr := strings.TrimSpace(d.dok("port", "rand", "80"))
+	if !strings.HasPrefix(addr, "127.0.0.1:") || strings.HasSuffix(addr, ":0") {
+		t.Fatalf("port rand 80: %q", addr)
+	}
+	if out := d.dok("port", "rand"); !strings.Contains(out, "80/tcp -> "+addr) || !strings.Contains(out, "9000/tcp -> 127.0.0.1:") {
+		t.Errorf("port rand: %q", out)
+	}
+	got = ""
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline) && got == ""; time.Sleep(200 * time.Millisecond) {
+		if c, err := net.DialTimeout("tcp", addr, time.Second); err == nil {
+			c.SetDeadline(time.Now().Add(2 * time.Second))
+			got, _ = bufio.NewReader(c).ReadString('\n')
+			c.Close()
+		}
+	}
+	if got != "served\n" {
+		t.Errorf("random port %s gave %q", addr, got)
+	}
+	var insp []struct {
+		Config     struct{ ExposedPorts map[string]any }
+		HostConfig struct {
+			PublishAllPorts bool
+			PortBindings    map[string][]struct{ HostIp, HostPort string }
+		}
+		NetworkSettings struct {
+			Ports map[string][]struct{ HostIp, HostPort string }
+		}
+	}
+	if err := json.Unmarshal([]byte(d.dok("inspect", "rand")), &insp); err != nil || len(insp) != 1 {
+		t.Fatalf("inspect rand: %v", err)
+	}
+	if b := insp[0].HostConfig.PortBindings["80/tcp"]; len(b) != 1 || b[0].HostPort != "" {
+		t.Errorf("PortBindings %+v: want 80/tcp asked for with no host port", insp[0].HostConfig.PortBindings)
+	}
+	if p := insp[0].NetworkSettings.Ports["80/tcp"]; len(p) != 1 || "127.0.0.1:"+p[0].HostPort != addr {
+		t.Errorf("Ports %+v: want 80/tcp at %s", insp[0].NetworkSettings.Ports, addr)
+	}
+	if _, ok := insp[0].Config.ExposedPorts["9000/tcp"]; !ok {
+		t.Errorf("ExposedPorts %v", insp[0].Config.ExposedPorts)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/quasidock/runwhp/internal/container"
+	"github.com/quasidock/runwhp/internal/netstack"
 	"github.com/quasidock/runwhp/internal/network"
 	"github.com/quasidock/runwhp/internal/vm"
 )
@@ -90,6 +91,12 @@ func TestParsePublish(t *testing.T) {
 		"192.168.1.5:443:443": "192.168.1.5:443->443/tcp",
 		"[::1]:8080:80":       "[::1]:8080->80/tcp",
 		":8080:80":            "127.0.0.1:8080->80/tcp",
+		"80":                  "127.0.0.1:0->80/tcp",
+		"80/tcp":              "127.0.0.1:0->80/tcp",
+		"127.0.0.1::80":       "127.0.0.1:0->80/tcp",
+		"0.0.0.0::80":         "0.0.0.0:0->80/tcp",
+		"0:80":                "127.0.0.1:0->80/tcp",
+		"[::1]::80":           "[::1]:0->80/tcp",
 	} {
 		got, err := parsePublish(in)
 		if err != nil || got.String() != want {
@@ -97,9 +104,8 @@ func TestParsePublish(t *testing.T) {
 		}
 	}
 	for in, msg := range map[string]string{
-		"80":              "random host ports",
-		"127.0.0.1::80":   "random host ports",
 		"53:53/udp":       "only tcp",
+		"53/udp":          "only tcp",
 		"8000-8010:80":    "ranges",
 		"8080:0":          "not a port",
 		"8080:70000":      "not a port",
@@ -108,6 +114,60 @@ func TestParsePublish(t *testing.T) {
 		if _, err := parsePublish(in); err == nil || !strings.Contains(err.Error(), msg) {
 			t.Errorf("parsePublish(%q) error = %v, want one mentioning %q", in, err, msg)
 		}
+	}
+}
+
+func TestExposeAndPublishAll(t *testing.T) {
+	for in, want := range map[string][]string{
+		"80":        {"80/tcp"},
+		"53/udp":    {"53/udp"},
+		"8000-8002": {"8000/tcp", "8001/tcp", "8002/tcp"},
+	} {
+		got, err := parseExpose(in)
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Errorf("parseExpose(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"", "0", "80/xyz", "90-80", "80-x"} {
+		if _, err := parseExpose(in); err == nil {
+			t.Errorf("parseExpose(%q) was taken", in)
+		}
+	}
+
+	pub := func(s string) netstack.Port {
+		p, err := parsePublish(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	image := map[string]struct{}{"6379/tcp": {}, "53/udp": {}, "9000": {}}
+	published := []netstack.Port{pub("8080:80")}
+	exposed := exposedPorts(image, []string{"443/tcp", "6379/tcp"}, published)
+	if want := []string{"53/udp", "80/tcp", "443/tcp", "6379/tcp", "9000/tcp"}; !reflect.DeepEqual(exposed, want) {
+		t.Errorf("exposed %q, want %q", exposed, want)
+	}
+	more, skipped := publishAll(exposed, published)
+	var got []string
+	for _, p := range more {
+		got = append(got, p.String())
+	}
+	if want := []string{"127.0.0.1:0->443/tcp", "127.0.0.1:0->6379/tcp", "127.0.0.1:0->9000/tcp"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("-P published %q, want %q", got, want)
+	}
+	if !reflect.DeepEqual(skipped, []string{"53/udp"}) {
+		t.Errorf("-P skipped %q", skipped)
+	}
+
+	// The published ports while a container runs are those bound; before
+	// and after, those asked for.
+	cfg := &container.Config{Publish: []netstack.Port{pub("80")}}
+	bound := []netstack.Port{pub("49152:80")}
+	if got := container.Published(cfg, container.State{Status: container.Running, Ports: bound}); !reflect.DeepEqual(got, bound) {
+		t.Errorf("running: %v", got)
+	}
+	if got := container.Published(cfg, container.State{Status: container.Stopped, Ports: bound}); !reflect.DeepEqual(got, cfg.Publish) {
+		t.Errorf("stopped: %v", got)
 	}
 }
 
@@ -234,7 +294,8 @@ func TestParseRunOptions(t *testing.T) {
 		{nil, "no image given"},
 		{[]string{"--rm", "--restart", "always", "alpine"}, "both --restart and --rm"},
 		{[]string{"-m", "1x", "alpine"}, "invalid memory size"},
-		{[]string{"-p", "80", "alpine"}, "random host ports"},
+		{[]string{"--expose", "80/xyz", "alpine"}, "invalid protocol"},
+		{[]string{"--expose", "90-80", "alpine"}, "invalid range"},
 	} {
 		_, err := parse(c.args...)
 		if err == nil || !strings.Contains(err.Error(), c.want) {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -67,7 +68,14 @@ func TestSpecFromCreate(t *testing.T) {
 	hc.PortBindings = dnetwork.PortMap{
 		dnetwork.MustParsePort("80/tcp"): {{HostPort: "8080"}},
 		dnetwork.MustParsePort("443"):    {{HostIP: netip.MustParseAddr("0.0.0.0"), HostPort: "8443"}},
+		// Random host ports, as Docker Compose and testcontainers-go ask.
+		dnetwork.MustParsePort("5432/tcp"): {{}},
+		dnetwork.MustParsePort("6379/tcp"): {{HostPort: "0"}},
+		// No bindings: only exposed.
+		dnetwork.MustParsePort("9000/tcp"): {},
 	}
+	req.Config.ExposedPorts = dnetwork.PortSet{dnetwork.MustParsePort("53/udp"): {}, dnetwork.MustParsePort("7000/tcp"): {}}
+	hc.PublishAllPorts = true
 	hc.NetworkMode = "app"
 	req.NetworkingConfig = &dnetwork.NetworkingConfig{EndpointsConfig: map[string]*dnetwork.EndpointSettings{
 		"app":   {Aliases: []string{"web"}, IPAMConfig: &dnetwork.EndpointIPAMConfig{IPv4Address: netip.MustParseAddr("172.30.0.9")}},
@@ -105,8 +113,13 @@ func TestSpecFromCreate(t *testing.T) {
 	for _, p := range s.network.publish {
 		ports[p.String()] = true
 	}
-	if !ports["127.0.0.1:8080->80/tcp"] || !ports["0.0.0.0:8443->443/tcp"] || !s.network.hostGateway {
+	if !ports["127.0.0.1:8080->80/tcp"] || !ports["0.0.0.0:8443->443/tcp"] || !ports["127.0.0.1:0->5432/tcp"] ||
+		!ports["127.0.0.1:0->6379/tcp"] || len(ports) != 4 || !s.network.hostGateway {
 		t.Errorf("ports %v, host gateway %v", s.network.publish, s.network.hostGateway)
+	}
+	exposed := exposedPorts(nil, s.network.expose, nil)
+	if want := []string{"53/udp", "80/tcp", "443/tcp", "5432/tcp", "6379/tcp", "7000/tcp", "9000/tcp"}; !reflect.DeepEqual(exposed, want) || !s.network.publishAll {
+		t.Errorf("exposed %q, publish all %v; want %q", exposed, s.network.publishAll, want)
 	}
 	kinds := map[string]string{}
 	for _, m := range s.mounts {
@@ -156,10 +169,6 @@ func TestSpecFromCreateRefusals(t *testing.T) {
 		{"host network", func(r *dcontainer.CreateRequest) { r.HostConfig.NetworkMode = "host" }, "--network host"},
 		{"container network", func(r *dcontainer.CreateRequest) { r.HostConfig.NetworkMode = "container:x" }, "container:x"},
 		{"dns", func(r *dcontainer.CreateRequest) { r.HostConfig.DNS = []netip.Addr{netip.MustParseAddr("1.1.1.1")} }, "--dns"},
-		{"publish all", func(r *dcontainer.CreateRequest) { r.HostConfig.PublishAllPorts = true }, "-P"},
-		{"no host port", func(r *dcontainer.CreateRequest) {
-			r.HostConfig.PortBindings = dnetwork.PortMap{dnetwork.MustParsePort("80/tcp"): {{}}}
-		}, "give a host port"},
 		{"udp", func(r *dcontainer.CreateRequest) {
 			r.HostConfig.PortBindings = dnetwork.PortMap{dnetwork.MustParsePort("53/udp"): {{HostPort: "53"}}}
 		}, "only tcp"},

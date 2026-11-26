@@ -506,7 +506,15 @@ func TestPublish(t *testing.T) {
 		c.Write(bytes.ToUpper(data))
 	}()
 
-	hostAddr := g.host.listeners[0].Addr().String()
+	// The port asked for as 0 is reported as the system bound it.
+	pub := g.host.Published()
+	if len(pub) != 1 || pub[0].Random() || pub[0].Guest != 8080 || pub[0].Host.Addr() != netip.MustParseAddr("127.0.0.1") {
+		t.Fatalf("published %v", pub)
+	}
+	hostAddr := pub[0].Host.String()
+	if hostAddr != g.host.listeners[0].Addr().String() {
+		t.Errorf("published %s, listening on %s", hostAddr, g.host.listeners[0].Addr())
+	}
 	c, err := net.DialTimeout("tcp", hostAddr, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)

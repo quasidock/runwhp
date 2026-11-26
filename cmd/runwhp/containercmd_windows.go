@@ -16,6 +16,7 @@ import (
 
 	"github.com/quasidock/runwhp/internal/container"
 	"github.com/quasidock/runwhp/internal/gc"
+	"github.com/quasidock/runwhp/internal/netstack"
 	"github.com/quasidock/runwhp/internal/netswitch"
 	"github.com/quasidock/runwhp/internal/network"
 )
@@ -336,6 +337,77 @@ func cmdRename(args []string) int {
 	return 0
 }
 
+const portUsage = `Usage: runwhp port CONTAINER [PORT[/tcp]]
+
+List a container's published ports, as they were bound, or print where one
+port is published.
+`
+
+func cmdPort(args []string, stdout io.Writer) int {
+	fs := newFlags("port", portUsage)
+	if fs.Parse(args) != nil || fs.NArg() < 1 || fs.NArg() > 2 {
+		fs.Usage()
+		return 2
+	}
+	store, ok := openContainers()
+	if !ok {
+		return 1
+	}
+	c, err := store.Resolve(fs.Arg(0))
+	if err != nil {
+		errorf("%v", err)
+		return 1
+	}
+	lines, err := portLines(c, fs.Arg(1))
+	if err != nil {
+		errorf("%v", err)
+		return 1
+	}
+	for _, l := range lines {
+		fmt.Fprintln(stdout, l)
+	}
+	return 0
+}
+
+// portLines is what docker port prints of a running container's ports:
+// each as PORT/tcp -> ADDRESS:PORT, or for one port asked for, only where
+// it is published.
+func portLines(c *container.Container, want string) ([]string, error) {
+	var ps []netstack.Port
+	if c.State.Active() {
+		ps = container.Published(c.Config, c.State)
+	}
+	if want != "" {
+		n, proto, _ := strings.Cut(want, "/")
+		if proto == "" {
+			proto = "tcp"
+		}
+		var lines []string
+		for _, p := range ps {
+			if proto == "tcp" && strconv.Itoa(int(p.Guest)) == n {
+				lines = append(lines, p.Host.String())
+			}
+		}
+		if len(lines) == 0 {
+			return nil, fmt.Errorf("no public port '%s/%s' published for %s", n, proto, containerLabel(c))
+		}
+		return lines, nil
+	}
+	var lines []string
+	for _, p := range ps {
+		lines = append(lines, fmt.Sprintf("%d/tcp -> %s", p.Guest, p.Host))
+	}
+	return lines, nil
+}
+
+// containerLabel is a container's name, or its short ID without one.
+func containerLabel(c *container.Container) string {
+	if c.Name != "" {
+		return c.Name
+	}
+	return c.Short()
+}
+
 // containerState is what runwhp state prints: runc's fields, then runwhp's.
 type containerState struct {
 	OCIVersion  string            `json:"ociVersion"`
@@ -400,7 +472,7 @@ func stateOf(c *container.Container) containerState {
 		code := c.State.ExitCode
 		s.ExitCode = &code
 	}
-	for _, p := range c.Config.Publish {
+	for _, p := range container.Published(c.Config, c.State) {
 		s.Ports = append(s.Ports, p.String())
 	}
 	for _, v := range c.Config.Volumes {
@@ -439,7 +511,7 @@ func commandOf(cfg *container.Config, n int) string {
 
 func portsOf(c *container.Container) string {
 	var ps []string
-	for _, p := range c.Config.Publish {
+	for _, p := range container.Published(c.Config, c.State) {
 		ps = append(ps, p.String())
 	}
 	return strings.Join(ps, ", ")

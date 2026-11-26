@@ -100,6 +100,13 @@ func networkOf(c compose.Container) (networkRequest, error) {
 		}
 		r.publish = append(r.publish, netstack.Port{Host: netip.AddrPortFrom(ip, p.HostPort), Guest: p.Target})
 	}
+	for _, e := range c.Expose {
+		ps, err := parseExpose(e)
+		if err != nil {
+			return r, err
+		}
+		r.expose = append(r.expose, ps...)
+	}
 	for _, h := range c.ExtraHosts {
 		line, gateway, err := netstack.HostsLine(h)
 		if err != nil {

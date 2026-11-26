@@ -228,8 +228,19 @@ func (s *apiServer) summaryOf(c *container.Container, size bool) dcontainer.Summ
 	if sum.Labels == nil {
 		sum.Labels = map[string]string{}
 	}
-	for _, p := range cfg.Publish {
-		sum.Ports = append(sum.Ports, dcontainer.PortSummary{IP: p.Host.Addr(), PrivatePort: p.Guest, PublicPort: p.Host.Port(), Type: "tcp"})
+	if c.State.Active() {
+		published := map[string]bool{}
+		for _, p := range container.Published(cfg, c.State) {
+			published[fmt.Sprintf("%d/tcp", p.Guest)] = true
+			sum.Ports = append(sum.Ports, dcontainer.PortSummary{IP: p.Host.Addr(), PrivatePort: p.Guest, PublicPort: p.Host.Port(), Type: "tcp"})
+		}
+		// Docker lists the ports exposed and not published too, without
+		// a public port.
+		for _, e := range exposedPorts(nil, cfg.Expose, nil) {
+			if port, err := dnetwork.ParsePort(e); err == nil && !published[e] {
+				sum.Ports = append(sum.Ports, dcontainer.PortSummary{PrivatePort: port.Num(), Type: string(port.Proto())})
+			}
+		}
 	}
 	sum.HostConfig.NetworkMode = dockerNetworkMode(cfg)
 	sum.NetworkSettings = &dcontainer.NetworkSettingsSummary{Networks: s.endpointsOf(c)}
@@ -245,6 +256,34 @@ func (s *apiServer) summaryOf(c *container.Container, size bool) dcontainer.Summ
 		}
 	}
 	return sum
+}
+
+// portMaps are a container's ports as Docker's inspect gives them: the
+// bindings asked for, a random host port's as "", and, while it has a VM,
+// the ports bound, with each port exposed and not published as null.
+func portMaps(c *container.Container) (bindings, ports dnetwork.PortMap) {
+	bindings, ports = dnetwork.PortMap{}, dnetwork.PortMap{}
+	for _, p := range c.Config.Publish {
+		port, _ := dnetwork.PortFrom(p.Guest, dnetwork.TCP)
+		hp := ""
+		if !p.Random() {
+			hp = strconv.Itoa(int(p.Host.Port()))
+		}
+		bindings[port] = append(bindings[port], dnetwork.PortBinding{HostIP: p.Host.Addr(), HostPort: hp})
+	}
+	if !c.State.Active() {
+		return bindings, ports
+	}
+	for _, e := range c.Config.Expose {
+		if port, err := dnetwork.ParsePort(e); err == nil {
+			ports[port] = nil
+		}
+	}
+	for _, p := range container.Published(c.Config, c.State) {
+		port, _ := dnetwork.PortFrom(p.Guest, dnetwork.TCP)
+		ports[port] = append(ports[port], dnetwork.PortBinding{HostIP: p.Host.Addr(), HostPort: strconv.Itoa(int(p.Host.Port()))})
+	}
+	return bindings, ports
 }
 
 // dockerNetworkMode is a container's network mode as Docker names it:
@@ -395,22 +434,19 @@ func (s *apiServer) inspectOf(c *container.Container, size bool) dcontainer.Insp
 		dcfg.Healthcheck = &dcontainer.HealthConfig{Test: hc.Test, Interval: hc.Interval, Timeout: hc.Timeout,
 			StartPeriod: hc.StartPeriod, StartInterval: hc.StartInterval, Retries: hc.Retries}
 	}
-	ports := dnetwork.PortMap{}
-	for _, p := range cfg.Publish {
-		port, ok := dnetwork.PortFrom(p.Guest, dnetwork.TCP)
-		if !ok {
-			continue
+	bindings, ports := portMaps(c)
+	for _, e := range exposedPorts(nil, cfg.Expose, cfg.Publish) {
+		if port, err := dnetwork.ParsePort(e); err == nil {
+			if dcfg.ExposedPorts == nil {
+				dcfg.ExposedPorts = dnetwork.PortSet{}
+			}
+			dcfg.ExposedPorts[port] = struct{}{}
 		}
-		if dcfg.ExposedPorts == nil {
-			dcfg.ExposedPorts = dnetwork.PortSet{}
-		}
-		dcfg.ExposedPorts[port] = struct{}{}
-		ports[port] = append(ports[port], dnetwork.PortBinding{HostIP: p.Host.Addr(), HostPort: strconv.Itoa(int(p.Host.Port()))})
 	}
 	resp.Config = dcfg
 
 	hc := &dcontainer.HostConfig{
-		NetworkMode: dcontainer.NetworkMode(dockerNetworkMode(cfg)), PortBindings: ports,
+		NetworkMode: dcontainer.NetworkMode(dockerNetworkMode(cfg)), PortBindings: bindings,
 		RestartPolicy: dcontainer.RestartPolicy{Name: dcontainer.RestartPolicyMode(cfg.Restart.Name), MaximumRetryCount: cfg.Restart.MaxRetries},
 		AutoRemove:    cfg.AutoRemove,
 		LogConfig:     dcontainer.LogConfig{Type: cfg.LogDriver, Config: map[string]string{}},

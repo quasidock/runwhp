@@ -260,8 +260,9 @@ func network(cfg *container.Config, ann map[string]string) error {
 		if pm.Protocol != "" && !strings.EqualFold(pm.Protocol, "tcp") {
 			return fmt.Errorf("-p %d:%d/%s: runwhp publishes TCP ports only", pm.HostPort, pm.ContainerPort, pm.Protocol)
 		}
-		if pm.HostPort < 1 || pm.HostPort > 65535 || pm.ContainerPort < 1 || pm.ContainerPort > 65535 {
-			return fmt.Errorf("-p %d:%d: give both ports, from 1 to 65535", pm.HostPort, pm.ContainerPort)
+		// A host port of 0 is any free one.
+		if pm.HostPort < 0 || pm.HostPort > 65535 || pm.ContainerPort < 1 || pm.ContainerPort > 65535 {
+			return fmt.Errorf("-p %d:%d: give ports from 1 to 65535, or host port 0 for any", pm.HostPort, pm.ContainerPort)
 		}
 		ip := netip.IPv4Unspecified()
 		if pm.HostIP != "" {

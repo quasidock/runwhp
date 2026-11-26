@@ -1,6 +1,10 @@
 package container
 
-import "time"
+import (
+	"time"
+
+	"github.com/quasidock/runwhp/internal/netstack"
+)
 
 // Status is where a container is in its life, by the OCI runtime spec's
 // names.
@@ -60,6 +64,19 @@ type State struct {
 	// Health is how the container's healthcheck has gone, since it last
 	// started; a stopped container keeps its last, as Docker's does.
 	Health *Health `json:"health,omitempty"`
+	// Ports are the ports published on the host while the container has a
+	// VM, as they were bound: a random host port has the one the system
+	// chose, which the next boot may not get again.
+	Ports []netstack.Port `json:"ports,omitempty"`
+}
+
+// Published is a container's published ports: as bound while it has a VM,
+// and as asked for otherwise, random host ports as 0.
+func Published(cfg *Config, st State) []netstack.Port {
+	if st.Active() && len(st.Ports) == len(cfg.Publish) {
+		return st.Ports
+	}
+	return cfg.Publish
 }
 
 // HealthStatus is the container's health as list shows and filters it:

@@ -86,9 +86,15 @@ type Config struct {
 	// the first is its primary, with the default route, as Docker routes
 	// through the network whose name sorts first. With any, the container
 	// is not on the default network.
-	Networks    []Attachment    `json:"networks,omitempty"`
+	Networks []Attachment `json:"networks,omitempty"`
+	// Publish are the ports published on the host, as asked for: a random
+	// host port is 0, and State.Ports has what each boot bound.
 	Publish     []netstack.Port `json:"publish,omitempty"`
 	HostGateway bool            `json:"hostGateway,omitempty"`
+	// Expose are the ports the container says it listens on, "80/tcp", as
+	// Docker's ExposedPorts: its image's, --expose's and the published
+	// ones. Containers made before iteration 21 have none.
+	Expose []string `json:"expose,omitempty"`
 
 	// Shares are the host directories and files bound into the container,
 	// numbered as Mounts number them; Volumes the named volumes, one disk

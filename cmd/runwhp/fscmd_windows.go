@@ -294,11 +294,11 @@ func commitOf(is *image.Store, c *container.Container, changes []string, author,
 		// Before iteration 15, a container kept its command whole.
 		k.Entrypoint, k.Cmd, cmd = nil, cfg.Args, cfg.Args
 	}
-	for _, p := range cfg.Publish {
+	for _, p := range exposedPorts(nil, cfg.Expose, cfg.Publish) {
 		if k.ExposedPorts == nil {
 			k.ExposedPorts = map[string]struct{}{}
 		}
-		k.ExposedPorts[fmt.Sprintf("%d/tcp", p.Guest)] = struct{}{}
+		k.ExposedPorts[p] = struct{}{}
 	}
 	for _, m := range cfg.Mounts {
 		if m.Kind == guestspec.MountAnon {

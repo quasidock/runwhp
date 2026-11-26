@@ -388,7 +388,7 @@ func (c *composeCtx) psJSON(ct *container.Container, now time.Time) map[string]a
 		mounts = append(mounts, v.Name)
 	}
 	publishers := []map[string]any{}
-	for _, p := range ct.Config.Publish {
+	for _, p := range container.Published(ct.Config, ct.State) {
 		publishers = append(publishers, map[string]any{"URL": p.Host.Addr().String(), "TargetPort": p.Guest, "PublishedPort": p.Host.Port(), "Protocol": "tcp"})
 	}
 	health := ""
@@ -624,7 +624,7 @@ Print the host address a container's port is published on.
 	}
 	port, _, _ := strings.Cut(private, "/")
 	var listed []string
-	for _, p := range ct.Config.Publish {
+	for _, p := range container.Published(ct.Config, ct.State) {
 		if strconv.Itoa(int(p.Guest)) == port {
 			fmt.Fprintln(c.stdout, p.Host.String())
 			return 0

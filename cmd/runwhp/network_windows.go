@@ -3,9 +3,11 @@
 package main
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -28,8 +30,9 @@ type networkOptions struct {
 // a network's name or Docker's NAME=VALUE,... form, and --network-alias
 // and --ip, which go with the first network named, as Docker's do.
 type networkFlags struct {
-	modes, aliases, publish, addHosts []string
-	ip                                string
+	modes, aliases, publish, addHosts, expose []string
+	ip                                        string
+	publishAll                                bool
 }
 
 // networkRequest is what a container asks of the network, before the
@@ -42,6 +45,11 @@ type networkRequest struct {
 	publish     []netstack.Port
 	hosts       []string // /etc/hosts lines
 	hostGateway bool     // a hosts line names host-gateway
+	// expose are ports the container listens on, "80/tcp", beyond its
+	// image's; publishAll publishes every exposed TCP port on a random
+	// host port, as -P does.
+	expose     []string
+	publishAll bool
 }
 
 // networkWant is one network a container joins, with its aliases and
@@ -110,6 +118,14 @@ func parseNetworkRequest(f networkFlags) (networkRequest, error) {
 		}
 		r.publish = append(r.publish, p)
 	}
+	for _, s := range f.expose {
+		ps, err := parseExpose(s)
+		if err != nil {
+			return r, err
+		}
+		r.expose = append(r.expose, ps...)
+	}
+	r.publishAll = f.publishAll
 	for _, s := range f.addHosts {
 		line, gateway, err := netstack.HostsLine(s)
 		if err != nil {
@@ -182,8 +198,9 @@ func planNetwork(root string, r networkRequest) (networkOptions, error) {
 	return n, nil
 }
 
-// parsePublish reads -p [IP:]HOSTPORT:CONTAINERPORT[/tcp]. Without an IP
-// the port listens on 127.0.0.1 only.
+// parsePublish reads -p [[IP:][HOSTPORT]:]CONTAINERPORT[/tcp]. Without an
+// IP the port listens on 127.0.0.1 only; without a host port, or with 0,
+// on any port the system has free, as Docker's random host ports.
 func parsePublish(s string) (netstack.Port, error) {
 	bad := func(format string, a ...any) (netstack.Port, error) {
 		return netstack.Port{}, fmt.Errorf("-p %s: "+format, append([]any{s}, a...)...)
@@ -193,10 +210,10 @@ func parsePublish(s string) (netstack.Port, error) {
 		return bad("only tcp ports can be published so far")
 	}
 	i := strings.LastIndex(spec, ":")
-	if i < 0 {
-		return bad("give a host port, as in -p 8080:%s; random host ports are not supported yet", spec)
+	rest, guestPort := "", spec
+	if i >= 0 {
+		rest, guestPort = spec[:i], spec[i+1:]
 	}
-	rest, guestPort := spec[:i], spec[i+1:]
 	hostIP, hostPort := "127.0.0.1", rest
 	if j := strings.LastIndex(rest, ":"); j >= 0 {
 		hostIP, hostPort = rest[:j], rest[j+1:]
@@ -209,18 +226,109 @@ func parsePublish(s string) (netstack.Port, error) {
 	if err != nil {
 		return bad("%q is not an IP address", hostIP)
 	}
-	if hostPort == "" {
-		return bad("give a host port; random host ports are not supported yet")
-	}
-	hp, err := parsePort(hostPort)
-	if err != nil {
-		return bad("host port: %v", err)
+	var hp uint16
+	if hostPort != "" && hostPort != "0" {
+		if hp, err = parsePort(hostPort); err != nil {
+			return bad("host port: %v", err)
+		}
 	}
 	gp, err := parsePort(guestPort)
 	if err != nil {
 		return bad("container port: %v", err)
 	}
 	return netstack.Port{Host: netip.AddrPortFrom(ip, hp), Guest: gp}, nil
+}
+
+// parseExpose reads --expose PORT[-PORT][/PROTO], as Docker's: ports the
+// container listens on, published only with -P.
+func parseExpose(s string) ([]string, error) {
+	spec, proto, _ := strings.Cut(s, "/")
+	switch proto {
+	case "":
+		proto = "tcp"
+	case "tcp", "udp", "sctp":
+	default:
+		return nil, fmt.Errorf("--expose %s: invalid protocol %q", s, proto)
+	}
+	lo, hi, isRange := strings.Cut(spec, "-")
+	first, err := parsePort(lo)
+	if err != nil {
+		return nil, fmt.Errorf("--expose %s: %v", s, err)
+	}
+	last := first
+	if isRange {
+		if last, err = parsePort(hi); err != nil || last < first {
+			return nil, fmt.Errorf("--expose %s: invalid range", s)
+		}
+	}
+	var ps []string
+	for p := int(first); p <= int(last); p++ {
+		ps = append(ps, fmt.Sprintf("%d/%s", p, proto))
+	}
+	return ps, nil
+}
+
+// exposedPorts is what a container exposes, as Docker's ExposedPorts:
+// its image's, those asked for, and those published, each once, sorted
+// by number, then protocol.
+func exposedPorts(image map[string]struct{}, asked []string, publish []netstack.Port) []string {
+	seen := map[string]bool{}
+	var ps []string
+	add := func(p string) {
+		if !strings.Contains(p, "/") {
+			p += "/tcp"
+		}
+		if !seen[p] {
+			seen[p] = true
+			ps = append(ps, p)
+		}
+	}
+	for p := range image {
+		add(p)
+	}
+	for _, p := range asked {
+		add(p)
+	}
+	for _, p := range publish {
+		add(fmt.Sprintf("%d/tcp", p.Guest))
+	}
+	slices.SortFunc(ps, comparePorts)
+	return ps
+}
+
+// comparePorts orders "PORT/PROTO" by number, then protocol.
+func comparePorts(a, b string) int {
+	an, ap, _ := strings.Cut(a, "/")
+	bn, bp, _ := strings.Cut(b, "/")
+	x, _ := strconv.Atoi(an)
+	y, _ := strconv.Atoi(bn)
+	if c := cmp.Compare(x, y); c != 0 {
+		return c
+	}
+	return cmp.Compare(ap, bp)
+}
+
+// publishAll is -P: every exposed TCP port not already published, on a
+// random host port of 127.0.0.1, and the UDP ones it cannot publish.
+func publishAll(exposed []string, publish []netstack.Port) (more []netstack.Port, skipped []string) {
+	have := map[uint16]bool{}
+	for _, p := range publish {
+		have[p.Guest] = true
+	}
+	for _, e := range exposed {
+		n, proto, _ := strings.Cut(e, "/")
+		if proto != "tcp" {
+			skipped = append(skipped, e)
+			continue
+		}
+		port, err := parsePort(n)
+		if err != nil || have[port] {
+			continue
+		}
+		have[port] = true
+		more = append(more, netstack.Port{Host: netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), 0), Guest: port})
+	}
+	return more, skipped
 }
 
 func parsePort(s string) (uint16, error) {

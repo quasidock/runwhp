@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -462,6 +463,73 @@ func TestDetachedOutlivesConsole(t *testing.T) {
 	time.Sleep(time.Second)
 	if s := stateOf(t, name); s.Status != "running" {
 		t.Errorf("after the console closed: %+v", s)
+	}
+}
+
+// TestRandomPorts checks -p without a host port, --expose and -P: each
+// port is bound to a free one, which port reports and which serves, and
+// is bound again, perhaps elsewhere, when the container starts again.
+func TestRandomPorts(t *testing.T) {
+	name := newName(t)
+	detached(t, "--name", name, "-p", "8080", "--expose", "9000", "-P", alpine, "sh", "-c",
+		`echo "boot $(cut -c1-8 /proc/sys/kernel/random/boot_id)" > /msg; nc -lk -p 9000 -e cat /msg & exec nc -lk -p 8080 -e cat /msg`)
+	portOf := func(guest string) string {
+		r := cli(t, "port", name, guest)
+		if r.code != 0 {
+			t.Fatalf("port %s: %+v", guest, r)
+		}
+		addr := strings.TrimSpace(r.stdout)
+		if !strings.HasPrefix(addr, "127.0.0.1:") || strings.HasSuffix(addr, ":0") {
+			t.Fatalf("port %s: %q", guest, addr)
+		}
+		return addr
+	}
+	get := func(addr string) string {
+		var line string
+		for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+			c, err := net.Dial("tcp", addr)
+			if err != nil {
+				continue
+			}
+			c.SetReadDeadline(time.Now().Add(2 * time.Second))
+			b, _ := io.ReadAll(c)
+			c.Close()
+			if line = string(b); strings.HasPrefix(line, "boot ") {
+				return line
+			}
+		}
+		t.Fatalf("nothing served at %s: %q", addr, line)
+		return ""
+	}
+	web, other := portOf("8080"), portOf("9000/tcp")
+	if web == other {
+		t.Errorf("8080 and 9000 both at %s", web)
+	}
+	first := get(web)
+	if get(other) != first {
+		t.Errorf("the two ports served different boots")
+	}
+	r := cli(t, "port", name)
+	if want := []string{"8080/tcp -> " + web, "9000/tcp -> " + other}; strings.Fields(r.stdout) == nil ||
+		!strings.Contains(r.stdout, want[0]) || !strings.Contains(r.stdout, want[1]) {
+		t.Errorf("port: %q, want %q", r.stdout, want)
+	}
+	if s := stateOf(t, name); !slices.Contains(s.Ports, web+"->8080/tcp") {
+		t.Errorf("state's ports %q, want %s", s.Ports, web)
+	}
+
+	if r := cli(t, "restart", "-t", "1", name); r.code != 0 {
+		t.Fatalf("restart: %+v", r)
+	}
+	if second := get(portOf("8080")); second == first {
+		t.Errorf("served %q before and after the restart", first)
+	}
+	cli(t, "stop", "-t", "1", name)
+	if r := cli(t, "port", name); r.code != 0 || r.stdout != "" {
+		t.Errorf("port of a stopped container: %+v", r)
+	}
+	if r := cli(t, "port", name, "8080"); r.code == 0 || !strings.Contains(r.stderr, "no public port '8080/tcp'") {
+		t.Errorf("port 8080 of a stopped container: %+v", r)
 	}
 }
 

@@ -34,6 +34,7 @@ const usage = `Usage:
   runwhp stats [--no-stream] [CONTAINER...]     show what running containers use
   runwhp delete [-f] CONTAINER...               remove containers
   runwhp rename CONTAINER NAME                  rename a container
+  runwhp port CONTAINER [PORT]                  list a container's published ports, as bound
   runwhp container prune [-f]                   remove stopped and created containers
   runwhp pull IMAGE                             pull an image, and runwhp's kernel, into the local store
   runwhp images [-q] [REPOSITORY[:TAG]]         list images
@@ -120,6 +121,8 @@ func realMain(args []string) int {
 		return cmdDelete(args[1:], os.Stdout)
 	case "rename":
 		return cmdRename(args[1:])
+	case "port":
+		return cmdPort(args[1:], os.Stdout)
 	case "create":
 		return cmdCreate(args[1:])
 	case "start":

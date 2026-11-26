@@ -176,7 +176,7 @@ func TestNetworkNone(t *testing.T) {
 func TestPortErrors(t *testing.T) {
 	for _, ports := range []string{
 		`{"portMappings":[{"HostPort":53,"ContainerPort":53,"Protocol":"udp"}]}`,
-		`{"portMappings":[{"HostPort":0,"ContainerPort":80,"Protocol":"tcp"}]}`,
+		`{"portMappings":[{"HostPort":-1,"ContainerPort":80,"Protocol":"tcp"}]}`,
 		`{"portMappings":[{"HostPort":80,"ContainerPort":80,"Protocol":"tcp","HostIP":"nowhere"}]}`,
 		`{"portMappings":`,
 	} {

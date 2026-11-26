@@ -50,6 +50,8 @@ type runOptions struct {
 	aliases     listFlag
 	ip          string
 	publish     listFlag
+	publishAll  bool
+	expose      listFlag
 	addHosts    listFlag
 	volumes     listFlag
 	mounts      listFlag
@@ -107,6 +109,9 @@ func runFlags(o *runOptions) *flag.FlagSet {
 	fs.StringVar(&o.ip, "ip", "", "")
 	fs.Var(&o.publish, "p", "")
 	fs.Var(&o.publish, "publish", "")
+	fs.BoolVar(&o.publishAll, "P", false, "")
+	fs.BoolVar(&o.publishAll, "publish-all", false, "")
+	fs.Var(&o.expose, "expose", "")
 	fs.Var(&o.addHosts, "add-host", "")
 	fs.Var(&o.volumes, "v", "")
 	fs.Var(&o.volumes, "volume", "")
@@ -174,8 +179,13 @@ Flags:
                          its own alias and address
       --network-alias NAME  another name for the container on its first network (repeatable)
       --ip ADDRESS       the container's address on its first network
-  -p, --publish [IP:]HOSTPORT:PORT  forward a host port to a container TCP port (repeatable);
-                         IP defaults to 127.0.0.1
+  -p, --publish [IP:][HOSTPORT:]PORT  forward a host port to a container TCP port (repeatable);
+                         IP defaults to 127.0.0.1, and without HOSTPORT any free port is
+                         taken, which runwhp port shows
+  -P, --publish-all      publish every exposed TCP port, the image's and --expose's, on
+                         a free host port
+      --expose PORT[/PROTO]  a port the container listens on, published only with -P
+                         (repeatable)
       --add-host NAME:IP add an /etc/hosts entry (repeatable); IP host-gateway reaches
                          this machine's 127.0.0.1
   -v, --volume HOSTPATH:PATH[:ro]  bind a host directory or file into the container (repeatable);
@@ -395,7 +405,7 @@ func parseRunOptions(o *runOptions, entrypointSet bool, args []string) (runSpec,
 	if s.cpus, err = parseCPUs(o.cpus, runtime.NumCPU()); err != nil {
 		return s, err
 	}
-	if s.network, err = parseNetworkRequest(networkFlags{modes: o.networks, aliases: o.aliases, ip: o.ip, publish: o.publish, addHosts: o.addHosts}); err != nil {
+	if s.network, err = parseNetworkRequest(networkFlags{modes: o.networks, aliases: o.aliases, ip: o.ip, publish: o.publish, addHosts: o.addHosts, expose: o.expose, publishAll: o.publishAll}); err != nil {
 		return s, err
 	}
 	if s.mounts, err = parseMountFlags(o.volumes, o.mounts, o.tmpfs); err != nil {
@@ -463,6 +473,7 @@ func resolveSpec(ctx context.Context, root string, s *runSpec, policy image.Poli
 		Env: s.env, Workdir: s.workdir, User: s.user, LookupEnv: s.lookupEnv,
 	}
 	var process image.Process
+	var imageExposed map[string]struct{}
 	if len(s.layers) > 0 {
 		if process, err = image.BuildProcess(v1.Config{}, overrides); err != nil {
 			return nil, err
@@ -495,6 +506,15 @@ func resolveSpec(ctx context.Context, root string, s *runSpec, policy image.Poli
 		cfg.StopSignal = cf.Config.StopSignal
 		cfg.Labels = withLabels(cf.Config.Labels, s.labels)
 		cfg.Healthcheck = resolveHealth(imageHealth(img.Config), s.health)
+		imageExposed = cf.Config.ExposedPorts
+	}
+	cfg.Expose = exposedPorts(imageExposed, s.network.expose, cfg.Publish)
+	if s.network.publishAll && cfg.Network {
+		more, skipped := publishAll(cfg.Expose, cfg.Publish)
+		cfg.Publish = append(cfg.Publish, more...)
+		if len(skipped) > 0 && out != nil {
+			fmt.Fprintf(out, "WARNING: -P publishes TCP ports only; not %s\n", strings.Join(skipped, ", "))
+		}
 	}
 	if s.stopSignal != "" {
 		cfg.StopSignal = s.stopSignal

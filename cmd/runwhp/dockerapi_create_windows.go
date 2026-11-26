@@ -198,7 +198,6 @@ func refuseUnsupported(cfg *dcontainer.Config, hc *dcontainer.HostConfig) error 
 	add(len(hc.Sysctls) > 0, "--sysctl")
 	add(len(hc.SecurityOpt) > 0, "--security-opt")
 	add(hc.Runtime != "" && hc.Runtime != "runwhp" && hc.Runtime != "runc", "--runtime "+hc.Runtime)
-	add(hc.PublishAllPorts, "-P (--publish-all): give each port with a host port, as -p HOSTPORT:PORT")
 	add(len(hc.GroupAdd) > 0, "--group-add")
 	add(hc.CgroupParent != "", "--cgroup-parent")
 	add(hc.PidsLimit != nil && *hc.PidsLimit > 0, "--pids-limit")
@@ -288,13 +287,9 @@ func networkFromCreate(cfg *dcontainer.Config, hc *dcontainer.HostConfig, nc *dn
 		if port.Proto() != dnetwork.TCP {
 			return networkRequest{}, badRequest("-p %s: only tcp ports can be published so far", port)
 		}
-		if len(bindings) == 0 {
-			return networkRequest{}, badRequest("-p %d: give a host port, as in -p 8080:%d; random host ports are not supported yet", port.Num(), port.Num())
-		}
+		// A port with no bindings is only exposed, as Docker's daemon
+		// takes it, unless -P publishes it below.
 		for _, b := range bindings {
-			if b.HostPort == "" || b.HostPort == "0" {
-				return networkRequest{}, badRequest("-p %d: give a host port, as in -p 8080:%d; random host ports are not supported yet", port.Num(), port.Num())
-			}
 			host := "127.0.0.1"
 			if b.HostIP.IsValid() {
 				host = b.HostIP.String()
@@ -302,9 +297,17 @@ func networkFromCreate(cfg *dcontainer.Config, hc *dcontainer.HostConfig, nc *dn
 					host = "[" + host + "]"
 				}
 			}
+			// An empty host port, or 0, is a random one.
 			f.publish = append(f.publish, fmt.Sprintf("%s:%s:%d", host, b.HostPort, port.Num()))
 		}
+		f.expose = append(f.expose, port.String())
 	}
+	if cfg != nil {
+		for port := range cfg.ExposedPorts {
+			f.expose = append(f.expose, port.String())
+		}
+	}
+	f.publishAll = hc.PublishAllPorts
 	sort.Strings(f.publish)
 	f.addHosts = hc.ExtraHosts
 	r, err := parseNetworkRequest(f)

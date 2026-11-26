@@ -52,7 +52,8 @@ services:
       GREETING: ${GREETING:-hello}
       UNSET:
     env_file: [web.env]
-    ports: ["8080:80", "127.0.0.2:8443:443/tcp"]
+    ports: ["8080:80", "127.0.0.2:8443:443/tcp", "9000"]
+    expose: ["9100", "9200/udp"]
     extra_hosts: ["h:host-gateway", "x=1.2.3.4"]
     networks:
       front:
@@ -153,7 +154,8 @@ func TestTranslate(t *testing.T) {
 		Memory: 512 << 20, CPUs: 2,
 		Networks: []Attachment{{Name: "myapp_x_back", Aliases: []string{"web", "frontend"}, IPv4: "172.30.0.9"},
 			{Name: "myapp_x_front", Aliases: []string{"web", "www", "frontend"}}},
-		Ports:      []Port{{HostPort: 8080, Target: 80}, {HostIP: "127.0.0.2", HostPort: 8443, Target: 443}},
+		Ports:      []Port{{HostPort: 8080, Target: 80}, {HostIP: "127.0.0.2", HostPort: 8443, Target: 443}, {Target: 9000}},
+		Expose:     []string{"9100", "9200/udp"},
 		ExtraHosts: []string{"h:host-gateway", "x:1.2.3.4"},
 		Mounts: []Mount{
 			{Kind: MountBind, Source: filepath.Join(dir, "data"), Target: "/data", ReadOnly: true, Create: true},
@@ -215,7 +217,6 @@ services:
   pid: {image: a, pid: host}
   arm: {image: a, platform: linux/arm64}
   udp: {image: a, ports: ["53:53/udp"]}
-  nohost: {image: a, ports: ["80"]}
   range: {image: a, ports: ["8000-8001:80-81"]}
   ok: {image: a, links: [range]}
   sub: {image: a, volumes: [{type: volume, source: v, target: /v, volume: {subpath: x}}]}
@@ -246,7 +247,6 @@ secrets:
 		`service "pid": pid host is not supported`,
 		`service "arm": platform linux/arm64 is not supported: runwhp runs linux/amd64 only`,
 		`service "udp": port 53/udp cannot be published: runwhp publishes TCP ports only`,
-		`service "nohost": port 80 has no host port`,
 		`service "sub": /v: volume subpath is not supported`,
 		`service "envsecret": secret es: only secrets from a file are supported`,
 		`service "ipv6": network n: IPv6 and link-local addresses are not supported`,

@@ -288,6 +288,10 @@ func (s *Supervisor) hooks(b *vmBoot, waitStart bool) bootHooks {
 			s.mu.Unlock()
 		},
 		attached: func(h *vmHandles) {
+			// The ports as bound go in the state, which is recorded as the
+			// guest becomes ready or starts its process.
+			ports := h.network.published()
+			s.change(func(st *container.State) { st.Ports = ports })
 			s.mu.Lock()
 			b.vm = h
 			s.mu.Unlock()
@@ -324,6 +328,7 @@ func (s *Supervisor) endBoot(b *vmBoot, code int, err error) (restart bool, dela
 	s.change(func(st *container.State) {
 		st.GuestPid = 0
 		st.Paused = false
+		st.Ports = nil
 		st.FinishedAt, st.ExitCode, st.Error = now.UTC(), code, ""
 		switch {
 		case b.hardStopped != "":

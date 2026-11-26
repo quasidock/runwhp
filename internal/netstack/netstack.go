@@ -73,11 +73,15 @@ const (
 	tcpInFlight  = 256
 )
 
-// Port is a guest TCP port published on the host.
+// Port is a guest TCP port published on the host. A Host port of 0 asks
+// for any port the system has free, as Docker's random host ports do.
 type Port struct {
 	Host  netip.AddrPort
 	Guest uint16
 }
+
+// Random reports whether the port asks for any free host port.
+func (p Port) Random() bool { return p.Host.Port() == 0 }
 
 func (p Port) String() string { return fmt.Sprintf("%s->%d/tcp", p.Host, p.Guest) }
 
@@ -305,6 +309,20 @@ func (s *Stack) Close() {
 	case <-done:
 	case <-time.After(time.Second):
 	}
+}
+
+// Published returns the ports the stack listens on, as they were bound:
+// one asked for as port 0 has the port the system chose.
+func (s *Stack) Published() []Port {
+	ps := make([]Port, 0, len(s.listeners))
+	for i, ln := range s.listeners {
+		p := s.cfg.Publish[i]
+		if a, ok := ln.Addr().(*net.TCPAddr); ok {
+			p.Host = netip.AddrPortFrom(p.Host.Addr(), uint16(a.Port))
+		}
+		ps = append(ps, p)
+	}
+	return ps
 }
 
 func (s *Stack) closeListeners() {

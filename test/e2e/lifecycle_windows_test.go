@@ -56,6 +56,7 @@ type stateJSON struct {
 	GuestPid   int      `json:"guestPid"`
 	AutoRemove bool     `json:"autoRemove"`
 	Volumes    []string `json:"volumes"`
+	Ports      []string `json:"ports"`
 	Memory     uint64   `json:"memory"`
 	Output     string   `json:"output"`
 

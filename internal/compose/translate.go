@@ -43,6 +43,7 @@ type Container struct {
 	DefaultNetwork bool
 	Networks       []Attachment
 	Ports          []Port
+	Expose         []string // as --expose takes them
 	ExtraHosts     []string // NAME:IP, as --add-host takes them
 	Mounts         []Mount
 
@@ -70,7 +71,7 @@ type Attachment struct {
 // Port is a published port.
 type Port struct {
 	HostIP   string // empty: runwhp's default, 127.0.0.1
-	HostPort uint16
+	HostPort uint16 // 0: any free port, as "80" alone asks
 	Target   uint16
 }
 
@@ -268,6 +269,7 @@ func Translate(p *types.Project, s types.ServiceConfig, pr *Problems) Container 
 		}
 		c.Ports = append(c.Ports, pt)
 	}
+	c.Expose = append(c.Expose, s.Expose...)
 	for _, name := range sortedKeys(s.ExtraHosts) {
 		for _, ip := range s.ExtraHosts[name] {
 			c.ExtraHosts = append(c.ExtraHosts, name+":"+ip)
@@ -390,17 +392,18 @@ func networks(p *types.Project, s types.ServiceConfig, c *Container, pr *Problem
 	}
 }
 
-// publish turns a published port into runwhp's: TCP, with a host port.
+// publish turns a published port into runwhp's: TCP, on the host port
+// given, or any free one.
 func publish(p types.ServicePortConfig) (Port, error) {
 	if p.Protocol != "" && p.Protocol != "tcp" {
 		return Port{}, fmt.Errorf("port %d/%s cannot be published: runwhp publishes TCP ports only", p.Target, p.Protocol)
 	}
-	if p.Published == "" {
-		return Port{}, fmt.Errorf("port %d has no host port: runwhp publishes a port only on a host port it is given, as in \"8080:%d\"", p.Target, p.Target)
-	}
-	hp, err := strconv.ParseUint(p.Published, 10, 16)
-	if err != nil || hp == 0 {
-		return Port{}, fmt.Errorf("port %d: host port %q is not supported: give one port, not a range", p.Target, p.Published)
+	var hp uint64
+	if p.Published != "" {
+		var err error
+		if hp, err = strconv.ParseUint(p.Published, 10, 16); err != nil {
+			return Port{}, fmt.Errorf("port %d: host port %q is not supported: give one port, not a range", p.Target, p.Published)
+		}
 	}
 	if p.Target == 0 || p.Target > math.MaxUint16 {
 		return Port{}, fmt.Errorf("port %d is not a port", p.Target)
