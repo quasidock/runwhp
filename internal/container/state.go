@@ -57,6 +57,18 @@ type State struct {
 	// Paused says the running container's processes are frozen, by runwhp
 	// pause, until runwhp unpause.
 	Paused bool `json:"paused,omitempty"`
+	// Health is how the container's healthcheck has gone, since it last
+	// started; a stopped container keeps its last, as Docker's does.
+	Health *Health `json:"health,omitempty"`
+}
+
+// HealthStatus is the container's health as list shows and filters it:
+// none without a healthcheck.
+func (s State) HealthStatus() string {
+	if s.Health == nil || s.Health.Status == "" {
+		return HealthNone
+	}
+	return s.Health.Status
 }
 
 // Active reports whether the state says a runwhp runs the container: it

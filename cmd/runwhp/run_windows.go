@@ -63,6 +63,12 @@ type runOptions struct {
 	detach      bool
 	labels      listFlag
 	labelFiles  listFlag
+	stopSignal  string
+	stopTimeout string
+
+	healthCmd, healthInterval, healthTimeout              string
+	healthStartPeriod, healthStartInterval, healthRetries string
+	noHealthcheck                                         bool
 
 	// Development flags, left out of the usage text.
 	init    string
@@ -117,6 +123,15 @@ func runFlags(o *runOptions) *flag.FlagSet {
 	fs.Var(&o.labels, "l", "")
 	fs.Var(&o.labels, "label", "")
 	fs.Var(&o.labelFiles, "label-file", "")
+	fs.StringVar(&o.stopSignal, "stop-signal", "", "")
+	fs.StringVar(&o.stopTimeout, "stop-timeout", "", "")
+	fs.StringVar(&o.healthCmd, "health-cmd", "", "")
+	fs.StringVar(&o.healthInterval, "health-interval", "", "")
+	fs.StringVar(&o.healthTimeout, "health-timeout", "", "")
+	fs.StringVar(&o.healthStartPeriod, "health-start-period", "", "")
+	fs.StringVar(&o.healthStartInterval, "health-start-interval", "", "")
+	fs.StringVar(&o.healthRetries, "health-retries", "", "")
+	fs.BoolVar(&o.noHealthcheck, "no-healthcheck", false, "")
 	fs.StringVar(&o.init, "init", "", "")
 	fs.Var(&o.layers, "layer", "")
 	fs.Var(&o.modules, "module", "")
@@ -142,6 +157,16 @@ Flags:
                          unless-stopped (the same here), unless stopped or killed
   -l, --label KEY[=VALUE]  set a label on the container, over the image's (repeatable)
       --label-file FILE  read labels from a file of KEY=VALUE lines (repeatable)
+      --stop-signal SIG  the signal stop sends first (default: the image's, or SIGTERM)
+      --stop-timeout N   seconds stop waits before SIGKILL, unless told (default 10)
+      --health-cmd CMD   check the container's health by running CMD in it with /bin/sh,
+                         over the image's HEALTHCHECK; healthy if it exits 0
+      --health-interval D  time between checks (default 30s); and --health-timeout D
+                         (default 30s), --health-start-period D (failures do not count
+                         while it is starting), --health-start-interval D (checks while
+                         starting, default 5s), --health-retries N (failures in a row
+                         that make it unhealthy, default 3)
+      --no-healthcheck   run no healthcheck, though the image has one
       --hostname NAME    container hostname (default: the start of its ID)
       --network NETWORK  user (default: outbound access through this machine, alone), none,
                          or a network made with runwhp network create, whose containers reach
@@ -326,6 +351,9 @@ type runSpec struct {
 	restart     container.RestartPolicy
 	rm          bool
 	labels      map[string]string // over the image's
+	stopSignal  string            // over the image's
+	stopTimeout *int
+	health      healthOverrides
 
 	// Development flags: the kernel, init and kernel modules to use, and
 	// ext4 layers instead of an image.
@@ -384,6 +412,19 @@ func parseRunOptions(o *runOptions, entrypointSet bool, args []string) (runSpec,
 	if s.labels, err = parseLabels(o.labels, o.labelFiles); err != nil {
 		return s, err
 	}
+	if s.stopSignal, err = parseStopSignal(o.stopSignal); err != nil {
+		return s, err
+	}
+	if o.stopTimeout != "" {
+		n, err := strconv.Atoi(o.stopTimeout)
+		if err != nil || n < 0 {
+			return s, fmt.Errorf("invalid --stop-timeout %q: give a whole number of seconds", o.stopTimeout)
+		}
+		s.stopTimeout = &n
+	}
+	if s.health, err = parseHealthFlags(o); err != nil {
+		return s, err
+	}
 	return s, nil
 }
 
@@ -423,6 +464,7 @@ func resolveSpec(ctx context.Context, root string, s *runSpec, policy image.Poli
 			return nil, err
 		}
 		cfg.Labels = withLabels(nil, s.labels)
+		cfg.Healthcheck = resolveHealth(nil, s.health)
 		for _, p := range s.layers {
 			if cfg.LayerFiles, err = appendAbs(cfg.LayerFiles, p); err != nil {
 				return nil, err
@@ -448,7 +490,12 @@ func resolveSpec(ctx context.Context, root string, s *runSpec, policy image.Poli
 		cfg.Image, cfg.ImageName, cfg.ImageDigest, cfg.ImageID = s.image, img.Ref, img.Digest, img.ID()
 		cfg.StopSignal = cf.Config.StopSignal
 		cfg.Labels = withLabels(cf.Config.Labels, s.labels)
+		cfg.Healthcheck = resolveHealth(imageHealth(img.Config), s.health)
 	}
+	if s.stopSignal != "" {
+		cfg.StopSignal = s.stopSignal
+	}
+	cfg.StopTimeout = s.stopTimeout
 	cfg.Args, cfg.Env, cfg.Cwd, cfg.User = process.Args, process.Env, process.Cwd, process.User
 	cfg.Entrypoint, cfg.Cmd = process.Entrypoint, process.Cmd
 

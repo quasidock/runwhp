@@ -45,7 +45,7 @@ List containers, newest first, running or not.
 
   -q, --quiet        print only their IDs
   -f, --filter K=V   list only containers that match, as docker ps filters them
-                     (repeatable): id, name, label, status, network, ancestor,
+                     (repeatable): id, name, label, status, health, network, ancestor,
                      exited, volume
       --format FMT   table (the default), or json: what runwhp state prints, for each
 `
@@ -363,6 +363,12 @@ type containerState struct {
 	Ports       []string                `json:"ports,omitempty"`
 	Volumes     []string                `json:"volumes,omitempty"`
 	Labels      map[string]string       `json:"labels,omitempty"`
+	StopSignal  string                  `json:"stopSignal,omitempty"`
+	StopTimeout *int                    `json:"stopTimeout,omitempty"`
+	// Healthcheck is the container's check, and Health how it has gone,
+	// as docker inspect's Config.Healthcheck and State.Health.
+	Healthcheck *container.Healthcheck `json:"healthcheck,omitempty"`
+	Health      *container.Health      `json:"health,omitempty"`
 	// Containerd is the containerd task the container runs, for one a
 	// containerd shim runs.
 	Containerd *container.ContainerdTask `json:"containerd,omitempty"`
@@ -375,7 +381,8 @@ func stateOf(c *container.Container) containerState {
 		Created: c.Config.Created, StartedAt: c.State.StartedAt, FinishedAt: c.State.FinishedAt,
 		Error: c.State.Error, GuestPid: c.State.GuestPid, AutoRemove: c.Config.AutoRemove, Output: c.State.Output,
 		Memory: c.Config.Memory, RestartCount: c.State.RestartCount, Containerd: c.Config.Containerd,
-		Labels: c.Config.Labels,
+		Labels: c.Config.Labels, StopSignal: c.Config.StopSignal, StopTimeout: c.Config.StopTimeout,
+		Healthcheck: c.Config.Healthcheck, Health: c.State.Health,
 	}
 	if c.State.Status == container.Running && c.State.Paused {
 		s.Status = container.Paused
@@ -446,6 +453,8 @@ func statusText(st container.State, now time.Time) string {
 		}
 		if st.Paused {
 			up += " (Paused)"
+		} else {
+			up += healthSuffix(st)
 		}
 		return up
 	case container.Stopped:

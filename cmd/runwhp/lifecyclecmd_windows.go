@@ -494,23 +494,25 @@ func ask(c *container.Container, req container.Request, timeout time.Duration) e
 
 const stopUsage = `Usage: runwhp stop [-t SECONDS] CONTAINER...
 
-Stop containers: send each its stop signal, SIGTERM unless the image says
+Stop containers: send each its stop signal, SIGTERM unless --stop-signal or the image says
 otherwise, then SIGKILL if it has not stopped after the timeout.
 
-  -t, --time SECONDS   how long to wait before SIGKILL (default 10)
+  -t, --time SECONDS   how long to wait before SIGKILL (default: the container's
+                       --stop-timeout, or 10)
 `
 
 func stopFlags(fs *flag.FlagSet) *int {
 	t := new(int)
-	fs.IntVar(t, "t", 10, "")
-	fs.IntVar(t, "time", 10, "")
+	// -1 is the container's --stop-timeout, or 10.
+	fs.IntVar(t, "t", -1, "")
+	fs.IntVar(t, "time", -1, "")
 	return t
 }
 
 func cmdStop(args []string, stdout io.Writer) int {
 	fs := newFlags("stop", stopUsage)
 	timeout := stopFlags(fs)
-	if fs.Parse(args) != nil || fs.NArg() == 0 || *timeout < 0 {
+	if fs.Parse(args) != nil || fs.NArg() == 0 || *timeout < -1 {
 		fs.Usage()
 		return 2
 	}
@@ -539,11 +541,23 @@ func stopContainer(store *container.Store, ref string, timeout time.Duration) er
 	if !c.State.Active() {
 		return nil
 	}
+	if timeout < 0 {
+		timeout = stopTimeoutOf(c.Config)
+	}
 	err = ask(c, container.Request{Op: container.OpStop, Timeout: timeout.Seconds()}, timeout+vmm.KillGrace+30*time.Second)
 	if err != nil && !strings.Contains(err.Error(), "not running") {
 		return err
 	}
 	return waitUnlocked(c, 10*time.Second)
+}
+
+// stopTimeoutOf is how long stop waits for a container after its stop
+// signal, unless told: its --stop-timeout, or 10 s, as Docker's.
+func stopTimeoutOf(cfg *container.Config) time.Duration {
+	if cfg.StopTimeout != nil {
+		return time.Duration(*cfg.StopTimeout) * time.Second
+	}
+	return 10 * time.Second
 }
 
 // waitUnlocked waits for the runwhp running c to let it go.
@@ -560,13 +574,14 @@ const restartUsage = `Usage: runwhp restart [-t SECONDS] CONTAINER...
 
 Stop containers, as runwhp stop does, and start them again.
 
-  -t, --time SECONDS   how long to wait before SIGKILL (default 10)
+  -t, --time SECONDS   how long to wait before SIGKILL (default: the container's
+                       --stop-timeout, or 10)
 `
 
 func cmdRestart(args []string, stdout io.Writer) int {
 	fs := newFlags("restart", restartUsage)
 	timeout := stopFlags(fs)
-	if fs.Parse(args) != nil || fs.NArg() == 0 || *timeout < 0 {
+	if fs.Parse(args) != nil || fs.NArg() == 0 || *timeout < -1 {
 		fs.Usage()
 		return 2
 	}

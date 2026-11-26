@@ -148,8 +148,13 @@ func superviseLocked(root string, store *container.Store, rec *container.Contain
 	// finished.
 	if rec.State.Status != container.Restarting && (rec.State.Pid != os.Getpid() || rec.State.Output != output) {
 		s.update(func(st *container.State) {
+			health := st.Health
+			if health != nil {
+				// Starting again, with the last results kept, as Docker's.
+				health = container.StartHealth(health)
+			}
 			*st = container.State{Status: container.Creating, Pid: os.Getpid(), Output: output,
-				FinishedAt: st.FinishedAt, ExitCode: st.ExitCode}
+				FinishedAt: st.FinishedAt, ExitCode: st.ExitCode, Health: health}
 		})
 	}
 	return s, nil
@@ -305,6 +310,9 @@ func (s *Supervisor) started(b *vmBoot, pid int) {
 		b.startedAt, s.armed = now, true
 	})
 	close(b.running)
+	if hc := s.rec.Config.Healthcheck; hc.Enabled() {
+		go s.healthLoop(b, hc, s.execProbe)
+	}
 }
 
 // endBoot records how boot b's process ended, and answers whoever waits

@@ -53,8 +53,14 @@ type Config struct {
 	Env        []string `json:"env,omitempty"`
 	Cwd        string   `json:"cwd,omitempty"`
 	User       string   `json:"user,omitempty"`
-	StopSignal string   `json:"stopSignal,omitempty"` // the image's STOPSIGNAL
-	Stdin      bool     `json:"stdin,omitempty"`
+	StopSignal string   `json:"stopSignal,omitempty"` // --stop-signal, or the image's STOPSIGNAL
+	// StopTimeout is how many seconds stop waits after the stop signal
+	// before SIGKILL, when it is not told: --stop-timeout's. Nil means 10.
+	StopTimeout *int `json:"stopTimeout,omitempty"`
+	// Healthcheck is the check the container's runwhp runs while it runs,
+	// or nil.
+	Healthcheck *Healthcheck `json:"healthcheck,omitempty"`
+	Stdin       bool         `json:"stdin,omitempty"`
 	// StdinOnce, for a container in the background whose input is open to
 	// attached runwhps, ends that input when the first of them ends its
 	// own, as docker create -i does. Without it, the input stays open.

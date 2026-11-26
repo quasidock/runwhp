@@ -171,7 +171,10 @@ func matchName(name string) func(string) bool {
 var containerStates = []string{"created", "running", "paused", "restarting", "removing", "exited", "dead"}
 
 // containerFilterKeys are the keys list --filter takes.
-var containerFilterKeys = []string{"id", "name", "label", "status", "network", "ancestor", "exited", "volume"}
+var containerFilterKeys = []string{"id", "name", "label", "status", "health", "network", "ancestor", "exited", "volume"}
+
+// healthStates are the words a health filter takes.
+var healthStates = []string{container.HealthStarting, container.HealthHealthy, container.HealthUnhealthy, container.HealthNone}
 
 // parseContainerFilters reads list's --filter flags.
 func parseContainerFilters(args []string) (filters, error) {
@@ -182,6 +185,11 @@ func parseContainerFilters(args []string) (filters, error) {
 	for _, s := range f["status"] {
 		if !slices.Contains(containerStates, s) {
 			return nil, fmt.Errorf("invalid filter 'status=%s': invalid value for state (%s): must be one of %s", s, s, strings.Join(containerStates, ", "))
+		}
+	}
+	for _, s := range f["health"] {
+		if !slices.Contains(healthStates, s) {
+			return nil, fmt.Errorf("Unrecognised filter value for health: %s", s)
 		}
 	}
 	for _, s := range f["exited"] {
@@ -219,6 +227,7 @@ func (f filters) matchContainer(c *container.Container) bool {
 		f.match("name", matchName(c.Name)) &&
 		f.matchLabels(cfg.Labels) &&
 		f.match("status", func(v string) bool { return stateWord(c.State) == v }) &&
+		f.match("health", func(v string) bool { return c.State.HealthStatus() == v }) &&
 		f.match("exited", func(v string) bool {
 			n, _ := strconv.Atoi(v)
 			return stateWord(c.State) == "exited" && c.State.ExitCode == n
