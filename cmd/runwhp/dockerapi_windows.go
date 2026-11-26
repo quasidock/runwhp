@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,9 +70,14 @@ docker CLI, and other clients of Docker's API, run containers through
 runwhp. It runs in the background, as a container does, until stopped, and
 containers outlive it.
 
-  start [--pipe NAME] [--debug]   start serving, unless it already is, and
+  start [--pipe NAME] [--docker-engine] [--debug]
+                                  start serving, unless it already is, and
                                   write a docker context for it, named
-                                  runwhp
+                                  runwhp; with --docker-engine, serve
+                                  Docker's own pipe, docker_engine, too,
+                                  which tools that take no context or
+                                  DOCKER_HOST look for, unless Docker
+                                  Desktop or another engine serves it
   stop                            stop serving; containers keep running
   status                          say whether it is serving, and where
 
@@ -155,10 +161,17 @@ func dockerHost(pipe string) string { return "npipe://" + strings.ReplaceAll(pip
 
 func apiDir(root string) string { return filepath.Join(root, "docker-api") }
 
+// dockerEnginePipe is Docker's own pipe, which docker-api start
+// --docker-engine serves too.
+const dockerEnginePipe = `\\.\pipe\docker_engine`
+
 // apiStatus is what a serving runwhp says of itself.
 type apiStatus struct {
-	Pid     int       `json:"pid"`
-	Pipe    string    `json:"pipe"`
+	Pid  int    `json:"pid"`
+	Pipe string `json:"pipe"`
+	// Also are the pipes it serves besides Pipe: docker_engine, with
+	// --docker-engine.
+	Also    []string  `json:"also,omitempty"`
 	Root    string    `json:"root"`
 	Started time.Time `json:"started"`
 	Version string    `json:"version"`
@@ -208,9 +221,10 @@ func pipeServed(pipe string) bool {
 func dockerAPIStart(args []string) int {
 	fs := newFlags("docker-api start", dockerAPIUsage)
 	var pipe string
-	var debugLog bool
+	var debugLog, dockerEngine bool
 	fs.StringVar(&pipe, "pipe", "", "")
 	fs.BoolVar(&debugLog, "debug", false, "")
+	fs.BoolVar(&dockerEngine, "docker-engine", false, "")
 	if fs.Parse(args) != nil || fs.NArg() != 0 {
 		fs.Usage()
 		return 2
@@ -231,14 +245,28 @@ func dockerAPIStart(args []string) int {
 			errorf("%v", err)
 			return 1
 		}
-		fmt.Printf("runwhp's Docker Engine API already serves %s (runwhp process %d).\n", st.Pipe, st.Pid)
-		return writeContextAndHint(root, pipe)
+		if dockerEngine && !slices.Contains(st.Also, dockerEnginePipe) {
+			errorf("runwhp's Docker Engine API already serves %s (runwhp process %d), without --docker-engine; "+
+				"stop it with 'runwhp docker-api stop' first", st.Pipe, st.Pid)
+			return 1
+		}
+		fmt.Printf("runwhp's Docker Engine API already serves %s (runwhp process %d).\n", pipeList(st.Pipe, st.Also), st.Pid)
+		return writeContextAndHint(root, pipe, st.Also)
+	}
+	if dockerEngine && pipeServed(dockerEnginePipe) {
+		errorf("%s is already served, by Docker Desktop or another engine; start without --docker-engine, or stop it first", dockerEnginePipe)
+		return 1
 	}
 	if err := os.MkdirAll(apiDir(root), 0o755); err != nil {
 		errorf("%v", err)
 		return 1
 	}
 	extra := []string{"--pipe", pipe}
+	var also []string
+	if dockerEngine {
+		extra = append(extra, "--docker-engine")
+		also = []string{dockerEnginePipe}
+	}
 	if debugLog {
 		extra = append(extra, "--debug")
 	}
@@ -247,11 +275,19 @@ func dockerAPIStart(args []string) int {
 		return 1
 	}
 	fmt.Printf("runwhp's Docker Engine API serves %s, in the background, until 'runwhp docker-api stop'.\nIts log is %s.\n",
-		pipe, filepath.Join(apiDir(root), "server.log"))
-	return writeContextAndHint(root, pipe)
+		pipeList(pipe, also), filepath.Join(apiDir(root), "server.log"))
+	return writeContextAndHint(root, pipe, also)
 }
 
-func writeContextAndHint(root, pipe string) int {
+// pipeList names a server's pipes, for messages.
+func pipeList(pipe string, also []string) string {
+	return strings.Join(append([]string{pipe}, also...), " and ")
+}
+
+func writeContextAndHint(root, pipe string, also []string) int {
+	if slices.Contains(also, dockerEnginePipe) {
+		fmt.Printf("\nThe docker CLI, Docker Compose, Testcontainers and Docker's SDKs find it on %s with no\ncontext or DOCKER_HOST, as they find Docker Desktop.\n", dockerEnginePipe)
+	}
 	name := apiContextName(root)
 	if pipe != apiPipe(root) {
 		fmt.Printf("\nUse it with DOCKER_HOST=%s.\n", dockerHost(pipe))
@@ -421,7 +457,7 @@ func dockerAPIStatus(args []string) int {
 		return 3
 	}
 	fmt.Printf("runwhp's Docker Engine API serves %s\n  process  %d\n  since    %s\n  store    %s\n  version  %s\n  log      %s\n",
-		st.Pipe, st.Pid, st.Started.Local().Format(time.RFC3339), st.Root, st.Version, st.Log)
+		pipeList(st.Pipe, st.Also), st.Pid, st.Started.Local().Format(time.RFC3339), st.Root, st.Version, st.Log)
 	return 0
 }
 
@@ -431,10 +467,11 @@ func dockerAPIServe(args []string) int {
 	fs := flag.NewFlagSet("docker-api serve", flag.ContinueOnError)
 	var ready uint64
 	var pipe string
-	var debugLog bool
+	var debugLog, dockerEngine bool
 	fs.Uint64Var(&ready, "ready", 0, "")
 	fs.StringVar(&pipe, "pipe", "", "")
 	fs.BoolVar(&debugLog, "debug", false, "")
+	fs.BoolVar(&dockerEngine, "docker-engine", false, "")
 	if fs.Parse(args) != nil || fs.NArg() != 0 {
 		return 2
 	}
@@ -484,11 +521,15 @@ func dockerAPIServe(args []string) int {
 		report(err)
 		return 1
 	}
+	if dockerEngine {
+		s.also = []string{dockerEnginePipe}
+	}
 	if err := s.listen(); err != nil {
-		report(fmt.Errorf("serving %s: %w", pipe, err))
+		report(err)
 		return 1
 	}
-	s.logf("runwhp %s serving the Engine API %s on %s, process %d, store %s", versionString(), dockerapi.APIVersion, pipe, os.Getpid(), root)
+	s.logf("runwhp %s serving the Engine API %s on %s, process %d, store %s", versionString(), dockerapi.APIVersion,
+		pipeList(pipe, s.also), os.Getpid(), root)
 	report(nil)
 	if ready == 0 {
 		fmt.Printf("runwhp's Docker Engine API serves %s until Ctrl+C. Its log is %s.\n", pipe, logPath)
@@ -509,6 +550,7 @@ func openServerLog(path string) (*os.File, error) {
 type apiServer struct {
 	root    string
 	pipe    string
+	also    []string // further pipes: docker_engine
 	started time.Time
 	debug   bool
 
@@ -517,7 +559,7 @@ type apiServer struct {
 
 	containers *container.Store
 	mux        *http.ServeMux
-	listener   net.Listener
+	listeners  []net.Listener // pipe's, then also's
 	http       *http.Server
 
 	// ctx ends when the server shuts down, ending hijacked streams.
@@ -563,26 +605,42 @@ func (s *apiServer) listen() error {
 	if err != nil {
 		return err
 	}
-	// Message mode, as Docker's daemon serves its pipe: a client that has
-	// written all of a stream's input closes its writing end, which only
-	// a message-mode pipe carries.
-	l, err := winio.ListenPipe(s.pipe, &winio.PipeConfig{
-		SecurityDescriptor: sddl,
-		MessageMode:        true,
-		InputBufferSize:    64 << 10,
-		OutputBufferSize:   64 << 10,
-	})
-	if err != nil {
-		return err
+	for _, p := range append([]string{s.pipe}, s.also...) {
+		// Message mode, as Docker's daemon serves its pipe: a client that
+		// has written all of a stream's input closes its writing end,
+		// which only a message-mode pipe carries.
+		l, err := winio.ListenPipe(p, &winio.PipeConfig{
+			SecurityDescriptor: sddl,
+			MessageMode:        true,
+			InputBufferSize:    64 << 10,
+			OutputBufferSize:   64 << 10,
+		})
+		if err != nil {
+			for _, l := range s.listeners {
+				l.Close()
+			}
+			s.listeners = nil
+			// The first instance of a pipe is made with
+			// FILE_FLAG_FIRST_PIPE_INSTANCE, which another server's pipe
+			// of that name refuses.
+			if p == dockerEnginePipe && (errors.Is(err, windows.ERROR_ACCESS_DENIED) || errors.Is(err, windows.ERROR_PIPE_BUSY)) {
+				return fmt.Errorf("%s is already served, by Docker Desktop or another engine; start without --docker-engine, or stop it first", p)
+			}
+			return fmt.Errorf("serving %s: %w", p, err)
+		}
+		s.listeners = append(s.listeners, l)
 	}
-	s.listener = l
 	return nil
 }
 
 func (s *apiServer) serve() int {
 	go s.events.watch(s.ctx)
 	s.http = &http.Server{Handler: s, ReadHeaderTimeout: 30 * time.Second}
-	err := s.http.Serve(s.listener)
+	// Every pipe serves the same; Shutdown closes them all.
+	for _, l := range s.listeners[1:] {
+		go s.http.Serve(l)
+	}
+	err := s.http.Serve(s.listeners[0])
 	if errors.Is(err, http.ErrServerClosed) {
 		<-s.stopped
 		s.logf("stopped serving")
@@ -884,7 +942,7 @@ func (s *apiServer) routes() {
 }
 
 func (s *apiServer) getStatus(w http.ResponseWriter, _ *http.Request) error {
-	writeJSON(w, apiStatus{Pid: os.Getpid(), Pipe: s.pipe, Root: s.root, Started: s.started, Version: versionString(),
+	writeJSON(w, apiStatus{Pid: os.Getpid(), Pipe: s.pipe, Also: s.also, Root: s.root, Started: s.started, Version: versionString(),
 		Log: filepath.Join(apiDir(s.root), "server.log")})
 	return nil
 }
