@@ -522,7 +522,9 @@ type apiServer struct {
 	shutdown sync.Once
 	stopped  chan struct{}
 
-	jobs *jobRunner
+	execs  *execTable
+	events *eventBroker
+	jobs   *jobRunner
 }
 
 func newAPIServer(root, pipe string, log io.Writer, debugLog bool) (*apiServer, error) {
@@ -539,6 +541,8 @@ func newAPIServer(root, pipe string, log io.Writer, debugLog bool) (*apiServer, 
 		return nil, err
 	}
 	s.jobs = jobs
+	s.execs = newExecTable()
+	s.events = newEventBroker(s)
 	s.mux = http.NewServeMux()
 	s.routes()
 	return s, nil
@@ -572,6 +576,7 @@ func (s *apiServer) listen() error {
 }
 
 func (s *apiServer) serve() int {
+	go s.events.watch(s.ctx)
 	s.http = &http.Server{Handler: s, ReadHeaderTimeout: 30 * time.Second}
 	err := s.http.Serve(s.listener)
 	if errors.Is(err, http.ErrServerClosed) {
@@ -591,6 +596,7 @@ func (s *apiServer) stop() {
 			defer close(s.stopped)
 			s.logf("stopping")
 			s.cancel()
+			s.execs.closeAll()
 			s.jobs.close()
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
@@ -736,6 +742,11 @@ type handler func(w http.ResponseWriter, r *http.Request) error
 
 func (s *apiServer) handle(pattern string, h handler) {
 	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && s.events != nil {
+			// What a request changed shows in the events at once, even
+			// for a container gone before the watcher would look.
+			defer func() { go s.events.look() }()
+		}
 		if err := h(w, r); err != nil {
 			if sw, ok := w.(*statusWriter); ok && sw.wrote {
 				s.logf("%s %s failed after answering: %v", r.Method, r.URL.Path, err)
@@ -838,6 +849,10 @@ func (s *apiServer) routes() {
 	s.handle("HEAD /_ping", s.ping)
 	s.handle("GET /version", s.getVersion)
 	s.handle("GET /info", s.getInfo)
+	s.handle("GET /events", s.getEvents)
+
+	s.containerRoutes()
+	s.execRoutes()
 
 	for _, p := range []string{"/swarm", "/swarm/", "/services", "/services/", "/nodes", "/nodes/", "/tasks", "/tasks/",
 		"/secrets", "/secrets/", "/configs", "/configs/"} {

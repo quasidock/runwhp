@@ -248,13 +248,19 @@ func cmdContainerPrune(args []string, stdin io.Reader, stdout io.Writer) int {
 // one's VM stopped first, and returns their IDs and the space they took.
 // A container that starts meanwhile is left.
 func pruneContainers(root string) (ids []string, freed int64, errs []error) {
+	return pruneContainersExcept(root, nil)
+}
+
+// pruneContainersExcept is pruneContainers, leaving the containers keep
+// names by ID.
+func pruneContainersExcept(root string, keep map[string]bool) (ids []string, freed int64, errs []error) {
 	u, err := gc.Load(root)
 	if err != nil {
 		return nil, 0, []error{err}
 	}
 	store := container.Open(root)
 	for _, c := range u.Containers {
-		if !gc.Removable(c.Container) {
+		if !gc.Removable(c.Container) || keep[c.ID] {
 			continue
 		}
 		// deleteContainer reads the state again, and refuses a container

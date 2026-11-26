@@ -36,7 +36,7 @@ func newRootClient(c *container.Container, ref string, dial rootfs.Dialer, relea
 			Dial: dial,
 			Name: "container " + c.Short(),
 			NotFound: func(p string) error {
-				return fmt.Errorf("Could not find the file %s in container %s", p, ref)
+				return notFound("Could not find the file %s in container %s", p, ref)
 			},
 		},
 		c: c, ref: ref, release: release, booted: booted,

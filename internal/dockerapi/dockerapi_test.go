@@ -6,8 +6,12 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/moby/moby/api/types/jsonstream"
+
+	"github.com/quasidock/runwhp/internal/container"
+	"github.com/quasidock/runwhp/internal/guestspec"
 )
 
 func TestSplitVersion(t *testing.T) {
@@ -84,5 +88,61 @@ func TestStream(t *testing.T) {
 	}
 	if flushes != 4 || !s.Failed {
 		t.Errorf("flushes %d, failed %v", flushes, s.Failed)
+	}
+}
+
+func TestStatsCPUPercent(t *testing.T) {
+	t0 := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	prev := &container.Stats{Time: t0, CPUs: 4, CPUTime: 10 * time.Second}
+	// 1.5 s of vCPU time in 1 s: 150%, as runwhp stats shows it.
+	cur := &container.Stats{Time: t0.Add(time.Second), CPUs: 4, CPUTime: 11500 * time.Millisecond, MemLimit: 1 << 30,
+		Guest: &guestspec.GuestStats{MemTotal: 1000, MemAvailable: 400, Tasks: 7}}
+	s := Stats("id", "/name", cur, prev)
+	if got := CPUPercent(s); got < 149.99 || got > 150.01 {
+		t.Errorf("CPU %.3f%%, want 150%%", got)
+	}
+	if s.MemoryStats.Usage != 600 || s.MemoryStats.Limit != 1<<30 || s.PidsStats.Current != 7 {
+		t.Errorf("memory %+v, pids %+v", s.MemoryStats, s.PidsStats)
+	}
+	if !s.PreRead.Equal(t0) || s.OSType != "linux" {
+		t.Errorf("preread %v, os %q", s.PreRead, s.OSType)
+	}
+}
+
+func TestContainerEvents(t *testing.T) {
+	t0 := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	now := t0.Add(10 * time.Second)
+	a := ContainerSnap{ID: "a", Name: "web", Image: "alpine", Created: t0, Labels: map[string]string{"app": "x"}}
+	b := ContainerSnap{ID: "b", Name: "db", Image: "postgres", Created: t0, Running: true, StartedAt: t0.Add(time.Second)}
+	prev := map[string]ContainerSnap{"a": a, "b": b}
+	// a started; b died and started again, became healthy, was renamed;
+	// c appeared and ran to its end; a d that was running is gone.
+	a2 := a
+	a2.Running, a2.StartedAt = true, t0.Add(5*time.Second)
+	b2 := b
+	b2.FinishedAt, b2.ExitCode, b2.StartedAt, b2.Health, b2.Name = t0.Add(3*time.Second), 137, t0.Add(4*time.Second), "healthy", "db2"
+	c := ContainerSnap{ID: "c", Name: "job", Image: "alpine", Created: t0.Add(6 * time.Second), StartedAt: t0.Add(7 * time.Second), FinishedAt: t0.Add(8 * time.Second), ExitCode: 3}
+	d := ContainerSnap{ID: "d", Name: "gone", Running: true}
+	prev["d"] = d
+	got := ContainerEvents(prev, map[string]ContainerSnap{"a": a2, "b": b2, "c": c}, now)
+	var seq []string
+	for _, m := range got {
+		s := m.Actor.ID + " " + string(m.Action)
+		if code, ok := m.Actor.Attributes["exitCode"]; ok {
+			s += " " + code
+		}
+		seq = append(seq, s)
+	}
+	want := []string{"b die 137", "b start", "a start", "c create", "c start", "c die 3",
+		"b rename", "b health_status: healthy", "d die 0", "d destroy"}
+	if !reflect.DeepEqual(seq, want) {
+		t.Errorf("got  %q\nwant %q", seq, want)
+	}
+	if got[0].Actor.Attributes["name"] != "db2" || got[2].Actor.Attributes["app"] != "x" {
+		t.Errorf("attributes: %v, %v", got[0].Actor.Attributes, got[2].Actor.Attributes)
+	}
+	f := EventFilter{"event": {"die"}, "container": {"db2"}}
+	if !f.Match(got[0]) || f.Match(got[1]) {
+		t.Error("filter")
 	}
 }

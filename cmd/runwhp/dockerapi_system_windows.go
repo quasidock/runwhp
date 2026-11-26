@@ -118,7 +118,3 @@ func (s *apiServer) getInfo(w http.ResponseWriter, _ *http.Request) error {
 	writeJSON(w, info)
 	return nil
 }
-
-// eventListeners is how many clients follow /events; until events are
-// served, none.
-func (s *apiServer) eventListeners() int { return 0 }

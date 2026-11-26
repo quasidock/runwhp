@@ -45,7 +45,13 @@ type jobResultFrame struct {
 
 // jobFunc does a job: it reads args, and the request's body from in, and
 // writes what it answers to out. What it returns goes in the result.
-type jobFunc func(ctx context.Context, root string, args json.RawMessage, in io.Reader, out *jobOutput) (any, error)
+// jobSink takes what a job answers: its bytes, and its messages.
+type jobSink interface {
+	io.Writer
+	Message(line []byte) error
+}
+
+type jobFunc func(ctx context.Context, root string, args json.RawMessage, in io.Reader, out jobSink) (any, error)
 
 // apiJobs are the jobs runwhp __api-job does, by kind; the files that
 // serve each endpoint add theirs.
