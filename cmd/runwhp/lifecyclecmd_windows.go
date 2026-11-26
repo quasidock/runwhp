@@ -260,6 +260,12 @@ func cmdStart(args []string, stdout io.Writer) int {
 }
 
 func startContainer(ctx context.Context, store *container.Store, ref string) error {
+	return startContainerIO(ctx, store, ref, true)
+}
+
+// startContainerIO is startContainer; a stopped container's runwhp takes
+// this process's output files with ownIO, as spawnSupervisor's does.
+func startContainerIO(ctx context.Context, store *container.Store, ref string, ownIO bool) error {
 	c, err := store.Resolve(ref)
 	if err != nil {
 		return err
@@ -284,7 +290,7 @@ func startContainer(ctx context.Context, store *container.Store, ref string) err
 		if _, err := vmm.ResolveKernel(ctx, root, c.Config.Kernel, image.PullMissing); err != nil {
 			return err
 		}
-		if rep, err = spawnSupervisor(ctx, root, c, false, true); err != nil {
+		if rep, err = spawnSupervisor(ctx, root, c, false, ownIO); err != nil {
 			return err
 		}
 		if errors.Is(errFromReply(rep), container.ErrRunning) {

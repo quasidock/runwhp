@@ -7,6 +7,7 @@ import (
 	"maps"
 	"math"
 	"path"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -489,4 +490,88 @@ func file(s types.ServiceConfig, c *Container, pr *Problems, kind string, ref ty
 
 func sortedKeys[M ~map[string]V, V any](m M) []string {
 	return slices.Sorted(maps.Keys(m))
+}
+
+// Build is how to build a service's image, in terms of build's flags.
+type Build struct {
+	Context    string // an absolute directory
+	Dockerfile string // an absolute path, or empty with Inline
+	Inline     string // dockerfile_inline
+	Args       map[string]string
+	Target     string
+	NoCache    bool
+	Pull       bool
+	NoNetwork  bool
+	Labels     map[string]string
+	Hosts      []string          // NAME:IP
+	Secrets    map[string]string // id, and the file that holds it
+	Tags       []string          // the image's names: the service's image first
+}
+
+// TranslateBuild is how to build a service's image, or nil if it has no
+// build section.
+func TranslateBuild(p *types.Project, s types.ServiceConfig, pr *Problems) *Build {
+	bc := s.Build
+	if bc == nil {
+		return nil
+	}
+	b := &Build{Context: bc.Context, Inline: bc.DockerfileInline, Target: bc.Target, NoCache: bc.NoCache, Pull: bc.Pull,
+		NoNetwork: bc.Network == "none", Labels: maps.Clone(map[string]string(bc.Labels)), Args: map[string]string{}, Secrets: map[string]string{}}
+	refuse := func(what string) { pr.refuse("service %q: build %s is not supported", s.Name, what) }
+	if strings.Contains(bc.Context, "://") || strings.HasPrefix(bc.Context, "git@") || strings.HasSuffix(bc.Context, ".git") {
+		refuse("from a git or URL context")
+	}
+	if len(bc.SSH) > 0 {
+		refuse("ssh")
+	}
+	if len(bc.AdditionalContexts) > 0 {
+		refuse("additional_contexts")
+	}
+	if len(bc.CacheTo) > 0 {
+		refuse("cache_to")
+	}
+	for _, pl := range bc.Platforms {
+		if pl = strings.ToLower(pl); pl != "linux/amd64" && pl != "linux/x86_64" {
+			refuse("platform " + pl)
+		}
+	}
+	if n := bc.Network; n != "" && n != "default" && n != "host" && n != "none" {
+		refuse("network " + n)
+	}
+	for _, f := range []struct {
+		key string
+		set bool
+	}{{"cache_from", len(bc.CacheFrom) > 0}, {"entitlements", len(bc.Entitlements) > 0}, {"privileged", bc.Privileged},
+		{"shm_size", bc.ShmSize != 0}, {"ulimits", len(bc.Ulimits) > 0}, {"isolation", bc.Isolation != ""},
+		{"provenance", bc.Provenance != ""}, {"sbom", bc.SBOM != ""}, {"no_cache_filter", len(bc.NoCacheFilter) > 0}} {
+		if f.set {
+			pr.warn("service %q: build %s is ignored", s.Name, f.key)
+		}
+	}
+	if b.Inline == "" {
+		b.Dockerfile = cmp.Or(bc.Dockerfile, "Dockerfile")
+		if !filepath.IsAbs(b.Dockerfile) {
+			b.Dockerfile = filepath.Join(b.Context, b.Dockerfile)
+		}
+	}
+	for _, k := range sortedKeys(bc.Args) {
+		if v := bc.Args[k]; v != nil {
+			b.Args[k] = *v
+		}
+	}
+	for _, name := range sortedKeys(bc.ExtraHosts) {
+		for _, ip := range bc.ExtraHosts[name] {
+			b.Hosts = append(b.Hosts, name+":"+ip)
+		}
+	}
+	for _, sec := range bc.Secrets {
+		obj := types.FileObjectConfig(p.Secrets[sec.Source])
+		if obj.File == "" {
+			pr.refuse("service %q: build secret %s: only secrets from a file are supported", s.Name, sec.Source)
+			continue
+		}
+		b.Secrets[cmp.Or(sec.Target, sec.Source)] = obj.File
+	}
+	b.Tags = append([]string{ImageName(p.Name, s)}, bc.Tags...)
+	return b
 }

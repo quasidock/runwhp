@@ -110,6 +110,10 @@ func startSupervisor(ctx context.Context, root string, rec *container.Container,
 	if err != nil {
 		return container.Reply{}, err
 	}
+	if composeBuild {
+		// Containers' runwhps are runwhp.exe, which starts faster.
+		exe = filepath.Join(filepath.Dir(exe), "runwhp.exe")
+	}
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		return container.Reply{}, err

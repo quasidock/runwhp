@@ -8,7 +8,7 @@ Set-Location $PSScriptRoot
 # a running program, but will rename one. Move a busy one aside, and remove
 # what earlier builds moved aside once nothing runs it.
 New-Item -ItemType Directory -Force out | Out-Null
-foreach ($exe in 'runwhp.exe', 'containerd-shim-runwhp-v1.exe') {
+foreach ($exe in 'runwhp.exe', 'runwhp-compose.exe', 'containerd-shim-runwhp-v1.exe') {
     Get-ChildItem out -Filter "$exe.*.old" | ForEach-Object {
         Remove-Item $_.FullName -ErrorAction SilentlyContinue
     }
@@ -25,6 +25,10 @@ foreach ($exe in 'runwhp.exe', 'containerd-shim-runwhp-v1.exe') {
 
 go build -o out/runwhp.exe ./cmd/runwhp
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
+# runwhp compose runs in a runwhp of its own, built with compose-go, whose
+# dependencies would slow every other runwhp's start.
+go build -tags compose -o out/runwhp-compose.exe ./cmd/runwhp
+if ($LASTEXITCODE) { exit $LASTEXITCODE }
 go build -o out/containerd-shim-runwhp-v1.exe ./cmd/containerd-shim-runwhp-v1
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
@@ -35,4 +39,4 @@ try {
 } finally {
     Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED
 }
-Write-Host 'built out\runwhp.exe, out\containerd-shim-runwhp-v1.exe and out\runwhp-init'
+Write-Host 'built out\runwhp.exe, out\runwhp-compose.exe, out\containerd-shim-runwhp-v1.exe and out\runwhp-init'

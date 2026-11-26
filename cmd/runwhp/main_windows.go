@@ -49,6 +49,7 @@ const usage = `Usage:
   runwhp image COMMAND                          list, inspect, tag, save, load, remove and prune images
   runwhp volume COMMAND                         create, list, inspect and remove volumes
   runwhp network COMMAND                        create, list, inspect, connect and remove networks
+  runwhp compose COMMAND                        run a compose.yaml's services, as docker compose does
   runwhp system df [-v]                         show the space the store takes
   runwhp system prune [-a] [--volumes] [-f]     remove what nothing uses
   runwhp containerd [--address PIPE]            run a containerd of your own for nerdctl, through runwhp
@@ -78,6 +79,8 @@ func realMain(args []string) int {
 		return cmdVolume(args[1:], os.Stdin, os.Stdout)
 	case "network":
 		return cmdNetwork(args[1:], os.Stdin, os.Stdout)
+	case "compose":
+		return cmdCompose(args[1:], os.Stdin, os.Stdout, os.Stderr)
 	case "image":
 		return cmdImage(args[1:], os.Stdin, os.Stdout)
 	case "container":
