@@ -34,17 +34,25 @@ func PipeName(root, id string) string {
 // connect, and only from this machine. A second runwhp cannot serve the
 // same pipe.
 func Listen(root, id string) (net.Listener, error) {
-	tok := windows.GetCurrentProcessToken()
-	u, err := tok.GetTokenUser()
+	sddl, err := PipeSecurity()
 	if err != nil {
 		return nil, err
 	}
-	sddl := "D:P(A;;GA;;;SY)(A;;GA;;;" + u.User.Sid.String() + ")"
 	return winio.ListenPipe(PipeName(root, id), &winio.PipeConfig{
 		SecurityDescriptor: sddl,
 		InputBufferSize:    64 << 10,
 		OutputBufferSize:   64 << 10,
 	})
+}
+
+// PipeSecurity is the security descriptor of runwhp's pipes, in SDDL: only
+// this user, and SYSTEM, may connect.
+func PipeSecurity() (string, error) {
+	u, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return "", err
+	}
+	return "D:P(A;;GA;;;SY)(A;;GA;;;" + u.User.Sid.String() + ")", nil
 }
 
 // ErrNoRunwhp means no runwhp serves the container's pipe: the container

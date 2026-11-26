@@ -266,6 +266,19 @@ func (s *Store) Get(id string) (*Container, error) {
 	return c, nil
 }
 
+// Name is the container's name, read afresh, or "" if it has none or is
+// gone.
+func (s *Store) Name(id string) string {
+	if !isID(id) {
+		return ""
+	}
+	name, err := readShared(filepath.Join(s.dir(id), "name"))
+	if err != nil {
+		return ""
+	}
+	return string(name)
+}
+
 // Resolve finds the container ref names: by its full ID, else its name,
 // else a unique prefix of its ID. The state it returns is current: a
 // container whose runwhp died is recorded as stopped.
