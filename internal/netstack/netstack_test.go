@@ -52,13 +52,17 @@ func newGuestWith(t *testing.T, cfg Config, caps stack.LinkEndpointCapabilities,
 	if err := gs.CreateNIC(1, ethernet.New(link)); err != nil {
 		t.Fatal(err)
 	}
-	own := tcpip.AddressWithPrefix{Address: addr(Guest), PrefixLen: Subnet.Bits()}
+	as := cfg.Addresses
+	if !as.Guest.IsValid() {
+		as = Default
+	}
+	own := tcpip.AddressWithPrefix{Address: addr(as.Guest), PrefixLen: as.Subnet.Bits()}
 	if err := gs.AddProtocolAddress(1, tcpip.ProtocolAddress{Protocol: ipv4.ProtocolNumber, AddressWithPrefix: own}, stack.AddressProperties{}); err != nil {
 		t.Fatal(err)
 	}
 	gs.SetRouteTable([]tcpip.Route{
 		{Destination: own.Subnet(), NIC: 1},
-		{Destination: header.IPv4EmptySubnet, Gateway: addr(Gateway), NIC: 1},
+		{Destination: header.IPv4EmptySubnet, Gateway: addr(as.Gateway), NIC: 1},
 	})
 
 	cfg.Output = func(frame []byte) {
@@ -643,5 +647,81 @@ func TestChecksumOffload(t *testing.T) {
 		case guestChecksums && wrong == 0:
 			t.Errorf("all %d segments to a guest that takes them without checksums had them computed", good)
 		}
+	}
+}
+
+// A guest on a network of its own: DNS at the gateway, the host through
+// either gateway with HostGateway, its own subnet and the refused ones kept
+// from the host, and published ports reaching it at its own address.
+func TestOtherAddresses(t *testing.T) {
+	as := Addresses{
+		Subnet:     netip.MustParsePrefix("172.18.0.0/16"),
+		Gateway:    netip.MustParseAddr("172.18.0.1"),
+		DNS:        netip.MustParseAddr("172.18.0.1"),
+		Guest:      netip.MustParseAddr("172.18.0.5"),
+		GatewayMAC: [6]byte{2, 0x42, 172, 18, 0, 1},
+	}
+	ln := upperServer(t)
+	port := uint16(ln.Addr().(*net.TCPAddr).Port)
+	g := newGuest(t, Config{
+		Addresses: as, HostGateway: true, Resolver: fakeResolver{},
+		Refuse:  []netip.Prefix{netip.MustParsePrefix("172.19.0.0/16")},
+		Publish: []Port{{Host: netip.MustParseAddrPort("127.0.0.1:0"), Guest: 8080}},
+	})
+
+	for _, gw := range []netip.Addr{as.Gateway, Gateway} {
+		c, err := g.dialTCP(netip.AddrPortFrom(gw, port), 5*time.Second)
+		if err != nil {
+			t.Fatalf("host through %s: %v", gw, err)
+		}
+		c.Write([]byte("hi"))
+		c.CloseWrite()
+		if got, _ := io.ReadAll(c); string(got) != "HI" {
+			t.Errorf("through %s: got %q", gw, got)
+		}
+		c.Close()
+	}
+	for _, dst := range []string{"172.18.0.9", "172.19.0.3", "10.0.2.15"} {
+		if _, err := g.dialTCP(netip.AddrPortFrom(netip.MustParseAddr(dst), port), 5*time.Second); err == nil || !strings.Contains(err.Error(), "refused") {
+			t.Errorf("%s: %v, want refused", dst, err)
+		}
+	}
+
+	server := full(as.DNS, 53)
+	uc, err := gonet.DialUDP(g.stack, nil, &server, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer uc.Close()
+	uc.SetDeadline(time.Now().Add(5 * time.Second))
+	uc.Write(query(t, "app.example.test.", dnsmessage.TypeA, false))
+	buf := make([]byte, 4096)
+	n, err := uc.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := parseReply(t, buf[:n]); len(m.Answers) != 2 {
+		t.Errorf("DNS at the gateway: %+v", m.Answers)
+	}
+
+	gl, err := gonet.ListenTCP(g.stack, full(as.Guest, 8080), ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gl.Close()
+	go func() {
+		if c, err := gl.Accept(); err == nil {
+			c.Write([]byte("guest"))
+			c.Close()
+		}
+	}()
+	c, err := net.DialTimeout("tcp", g.host.listeners[0].Addr().String(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(5 * time.Second))
+	if got, _ := io.ReadAll(c); string(got) != "guest" {
+		t.Errorf("published port: got %q", got)
 	}
 }

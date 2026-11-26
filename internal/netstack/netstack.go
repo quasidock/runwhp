@@ -35,9 +35,10 @@ import (
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
-// The guest's network, after QEMU's user-mode networking. The guest is the
-// only machine on it; the stack answers at both the gateway and the DNS
-// address.
+// The default network's addresses, after QEMU's user-mode networking. The
+// guest is the only machine on it; the stack answers at both the gateway
+// and the DNS address. Gateway is also where every guest reaches the host,
+// whatever network it is on: host-gateway names it.
 var (
 	Subnet  = netip.MustParsePrefix("10.0.2.0/24")
 	Gateway = netip.MustParseAddr("10.0.2.2")
@@ -47,6 +48,17 @@ var (
 	GatewayMAC = [6]byte{0x02, 0, 0, 0, 0, 0x02}
 	GuestMAC   = [6]byte{0x02, 0, 0, 0, 0, 0x0f}
 )
+
+// Addresses are the addresses on a guest's link: its subnet, the guest's
+// own address, and the gateway and DNS server, which the stack answers at.
+type Addresses struct {
+	Subnet              netip.Prefix
+	Gateway, DNS, Guest netip.Addr
+	GatewayMAC          [6]byte
+}
+
+// Default is the default network's addresses.
+var Default = Addresses{Subnet: Subnet, Gateway: Gateway, DNS: DNS, Guest: Guest, GatewayMAC: GatewayMAC}
 
 // MTU is the link's MTU. The link never reaches a wire, so it is as large as
 // IPv4 allows (less room for headers, as slirp4netns uses): fewer, larger
@@ -74,8 +86,15 @@ type Config struct {
 	// Output receives each Ethernet frame for the guest, which it may keep.
 	// It is called from one goroutine at a time and must not block.
 	Output func(frame []byte)
-	// HostGateway makes connections to the gateway address reach the host's
-	// 127.0.0.1. Without it the gateway refuses them.
+	// Addresses are the link's; the zero value means Default.
+	Addresses Addresses
+	// Refuse lists further subnets the guest may not reach through the
+	// stack: other guests' networks, which the stack must not carry to the
+	// host.
+	Refuse []netip.Prefix
+	// HostGateway makes connections to the gateway address, or the default
+	// network's, reach the host's 127.0.0.1. Without it the gateway refuses
+	// them.
 	HostGateway bool
 	// Publish lists guest ports to listen for on the host.
 	Publish []Port
@@ -128,6 +147,9 @@ func New(cfg Config) (*Stack, error) {
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
 	}
+	if !cfg.Addresses.Guest.IsValid() {
+		cfg.Addresses = Default
+	}
 	// gVisor logs to stderr by default, which in runwhp is the container's
 	// stderr. Its logger is global; the latest stack's Logf gets it.
 	gvlog.SetTarget(logEmitter(cfg.Logf))
@@ -147,7 +169,7 @@ func New(cfg Config) (*Stack, error) {
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, arp.NewProtocol},
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
 	})
-	s.link = channel.New(inboundQueue, MTU+header.EthernetMinimumSize, tcpip.LinkAddress(GatewayMAC[:]))
+	s.link = channel.New(inboundQueue, MTU+header.EthernetMinimumSize, tcpip.LinkAddress(cfg.Addresses.GatewayMAC[:]))
 	if err := s.setup(); err != nil {
 		s.closeListeners()
 		s.stack.Destroy()
@@ -180,9 +202,13 @@ func (s *Stack) setup() error {
 	if err := st.SetSpoofing(nicID, true); err != nil {
 		return fmt.Errorf("netstack: %s", err)
 	}
-	for _, a := range []netip.Addr{Gateway, DNS} {
+	as := s.cfg.Addresses
+	for i, a := range []netip.Addr{as.Gateway, as.DNS} {
+		if i == 1 && a == as.Gateway {
+			break // DNS at the gateway
+		}
 		pa := tcpip.ProtocolAddress{Protocol: ipv4.ProtocolNumber,
-			AddressWithPrefix: tcpip.AddressWithPrefix{Address: addr(a), PrefixLen: Subnet.Bits()}}
+			AddressWithPrefix: tcpip.AddressWithPrefix{Address: addr(a), PrefixLen: as.Subnet.Bits()}}
 		if err := st.AddProtocolAddress(nicID, pa, stack.AddressProperties{}); err != nil {
 			return fmt.Errorf("netstack: adding %s: %s", a, err)
 		}
@@ -194,7 +220,7 @@ func (s *Stack) setup() error {
 	st.SetTransportProtocolHandler(tcp.ProtocolNumber, tcp.NewForwarder(st, 0, tcpInFlight, s.forwardTCP).HandlePacket)
 	st.SetTransportProtocolHandler(udp.ProtocolNumber, udp.NewForwarder(st, s.forwardUDP).HandlePacket)
 
-	dns := tcpip.FullAddress{NIC: nicID, Addr: addr(DNS), Port: 53}
+	dns := tcpip.FullAddress{NIC: nicID, Addr: addr(as.DNS), Port: 53}
 	var err error
 	if s.dnsUDP, err = gonet.DialUDP(st, &dns, nil, ipv4.ProtocolNumber); err != nil {
 		return fmt.Errorf("netstack: DNS over UDP: %w", err)
@@ -326,24 +352,30 @@ func (s *Stack) outbound() {
 
 // target maps the destination of a guest flow to the host address it is
 // carried to. ok is false when the guest may not reach it: the gateway
-// without HostGateway, the rest of its own subnet, and addresses that would
-// otherwise end up on the host's loopback or broadcast. Root in the guest can
-// address packets to 127.0.0.1, so loopback is refused here rather than
-// trusted to the guest's routing.
+// without HostGateway, the rest of its own subnet, the default network's and
+// those Refuse lists, and addresses that would otherwise end up on the
+// host's loopback or broadcast. Root in the guest can address packets to
+// 127.0.0.1, so loopback is refused here rather than trusted to the guest's
+// routing.
 func (s *Stack) target(a tcpip.Address, port uint16) (netip.AddrPort, bool) {
 	if a.Len() != 4 || port == 0 {
 		return netip.AddrPort{}, false
 	}
 	ip := netip.AddrFrom4(a.As4())
 	switch {
-	case ip == Gateway:
+	case ip == s.cfg.Addresses.Gateway, ip == Gateway:
 		if !s.cfg.HostGateway {
 			return netip.AddrPort{}, false
 		}
 		ip = netip.AddrFrom4([4]byte{127, 0, 0, 1})
-	case Subnet.Contains(ip), ip.IsLoopback(), ip.IsUnspecified(), ip.IsMulticast(),
+	case s.cfg.Addresses.Subnet.Contains(ip), Subnet.Contains(ip), ip.IsLoopback(), ip.IsUnspecified(), ip.IsMulticast(),
 		ip == netip.AddrFrom4([4]byte{255, 255, 255, 255}):
 		return netip.AddrPort{}, false
+	}
+	for _, p := range s.cfg.Refuse {
+		if p.Contains(ip) {
+			return netip.AddrPort{}, false
+		}
 	}
 	return netip.AddrPortFrom(ip, port), true
 }
@@ -476,7 +508,7 @@ func (s *Stack) servePort(ln net.Listener, port uint16) {
 
 func (s *Stack) publish(c net.Conn, port uint16) {
 	ctx, cancel := context.WithTimeout(s.ctx, dialTimeout)
-	guest, err := gonet.DialContextTCP(ctx, s.stack, tcpip.FullAddress{NIC: nicID, Addr: addr(Guest), Port: port}, ipv4.ProtocolNumber)
+	guest, err := gonet.DialContextTCP(ctx, s.stack, tcpip.FullAddress{NIC: nicID, Addr: addr(s.cfg.Addresses.Guest), Port: port}, ipv4.ProtocolNumber)
 	cancel()
 	if err != nil {
 		s.cfg.Logf("published port %d: %v", port, err)

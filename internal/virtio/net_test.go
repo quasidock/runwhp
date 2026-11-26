@@ -8,9 +8,15 @@ import (
 
 // netFrames collects what a Net hands to Recv. Recv runs with the transport
 // locked, and the tests read it after their kick returns, so no lock is needed.
-type netFrames struct{ got [][]byte }
+type netFrames struct {
+	got  [][]byte
+	offs []Offload
+}
 
-func (f *netFrames) recv(frame []byte) { f.got = append(f.got, frame) }
+func (f *netFrames) recv(frame []byte, off Offload) {
+	f.got = append(f.got, frame)
+	f.offs = append(f.offs, off)
+}
 
 func newNet(t *testing.T) (*Net, *driver, *netFrames) {
 	frames := &netFrames{}
@@ -291,5 +297,151 @@ func TestNetChecksumOffload(t *testing.T) {
 	dev2.Deliver(pattern(100, 2))
 	if flags := d2.mem[rx2[0]]; flags != 0 {
 		t.Errorf("header flags %#x for a driver without GUEST_CSUM", flags)
+	}
+}
+
+// udpFrame is an Ethernet frame holding an IPv4 UDP datagram whose
+// checksum is partial, as Linux leaves one it offloads: the field holds the
+// pseudo-header's sum, and the offload says where.
+func udpFrame(payload []byte) ([]byte, Offload) {
+	f := make([]byte, 14+20+8+len(payload))
+	f[12], f[13] = 0x08, 0x00
+	ip := f[14:]
+	ip[0] = 0x45
+	ulen := 8 + len(payload)
+	ip[9] = 17
+	copy(ip[12:], []byte{172, 18, 0, 2})
+	copy(ip[16:], []byte{172, 18, 0, 3})
+	u := ip[20:]
+	u[0], u[1], u[2], u[3] = 0x30, 0x39, 0x00, 0x35
+	u[4], u[5] = byte(ulen>>8), byte(ulen)
+	copy(u[8:], payload)
+	pseudo := uint32(172<<8|18) + uint32(0<<8|2) + uint32(172<<8|18) + uint32(0<<8|3) + 17 + uint32(ulen)
+	for pseudo>>16 != 0 {
+		pseudo = pseudo&0xffff + pseudo>>16
+	}
+	u[6], u[7] = byte(pseudo>>8), byte(pseudo)
+	return f, Offload{NeedsCsum: true, Start: 34, Offset: 6}
+}
+
+// udpValid reports whether a frame from udpFrame now has a good checksum.
+func udpValid(f []byte) bool {
+	ip := f[14:]
+	u := ip[20:]
+	sum := uint32(ip[12])<<8 | uint32(ip[13])
+	sum += uint32(ip[14])<<8 | uint32(ip[15])
+	sum += uint32(ip[16])<<8 | uint32(ip[17])
+	sum += uint32(ip[18])<<8 | uint32(ip[19])
+	sum += 17 + uint32(len(u))
+	for i := 0; i < len(u); i += 2 {
+		w := uint32(u[i]) << 8
+		if i+1 < len(u) {
+			w |= uint32(u[i+1])
+		}
+		sum += w
+	}
+	for sum>>16 != 0 {
+		sum = sum&0xffff + sum>>16
+	}
+	return sum == 0xffff
+}
+
+func TestOffloadComplete(t *testing.T) {
+	for _, n := range []int{0, 1, 2, 7, 100, 1001} {
+		f, off := udpFrame(pattern(n, byte(n)))
+		if udpValid(f) && n > 0 {
+			t.Fatalf("%d bytes: a partial checksum already checks", n)
+		}
+		if got := off.Complete(f); got != (Offload{}) {
+			t.Errorf("Complete returned %+v", got)
+		}
+		if !udpValid(f) {
+			t.Errorf("%d bytes: checksum wrong after Complete", n)
+		}
+	}
+	if (Offload{NeedsCsum: true, Start: 34, Offset: 6}).Fits(41) {
+		t.Error("an offload past the frame fits")
+	}
+	if !(Offload{}).Fits(0) {
+		t.Error("no offload does not fit")
+	}
+}
+
+// A frame's partial checksum reaches Recv with it, as the header says.
+func TestNetTransmitOffload(t *testing.T) {
+	dev, d, frames := newNet(t)
+	f, off := udpFrame(pattern(30, 1))
+	send := func(flags, gso byte, start, offset uint16) {
+		hdr := d.alloc(NetHeaderLen)
+		d.mem[hdr], d.mem[hdr+1] = flags, gso
+		le.PutUint16(d.mem[hdr+6:], start)
+		le.PutUint16(d.mem[hdr+8:], offset)
+		// The frame split across two descriptors after the header's own.
+		a, b := d.alloc(20), d.alloc(uint64(len(f)-20))
+		copy(d.mem[a:], f[:20])
+		copy(d.mem[b:], f[20:])
+		d.add(netTxQueue, buf{hdr, NetHeaderLen, false}, buf{a, 20, false}, buf{b, uint32(len(f) - 20), false})
+	}
+	send(netHdrNeedsCsum, 0, off.Start, off.Offset)
+	send(0, 0, 0, 0)
+	send(netHdrNeedsCsum, 0, uint16(len(f)), 0) // past the frame
+	send(0, 1, 0, 0)                            // GSO, which the device never offered
+	d.kick(netTxQueue)
+	if u := d.collect(netTxQueue); len(u) != 4 {
+		t.Fatalf("used = %+v", u)
+	}
+	if len(frames.got) != 2 || !bytes.Equal(frames.got[0], f) || frames.offs[0] != off || frames.offs[1] != (Offload{}) {
+		t.Fatalf("got %d frames, offloads %+v", len(frames.got), frames.offs)
+	}
+	if dev.TxDropped.Load() != 2 || dev.TxFrames.Load() != 2 {
+		t.Errorf("dropped %d passed %d", dev.TxDropped.Load(), dev.TxFrames.Load())
+	}
+}
+
+// A frame with a partial checksum reaches a guest that takes them as it
+// is, with the header saying where to finish it, and one that does not
+// finished.
+func TestNetDeliverOffload(t *testing.T) {
+	dev, d, _ := newNet(t)
+	rx := postRx(d, 1, 2048)
+	d.kick(netRxQueue)
+	f, off := udpFrame(pattern(51, 3))
+	sent := bytes.Clone(f)
+	dev.DeliverWith(f, off)
+	u := d.collect(netRxQueue)
+	if len(u) != 1 {
+		t.Fatalf("used = %+v", u)
+	}
+	h := d.mem[rx[0]:]
+	if h[0] != netHdrNeedsCsum || le.Uint16(h[6:]) != off.Start || le.Uint16(h[8:]) != off.Offset {
+		t.Errorf("header % x", h[:NetHeaderLen])
+	}
+	if !bytes.Equal(h[NetHeaderLen:NetHeaderLen+len(sent)], sent) {
+		t.Error("frame changed for a guest that finishes checksums itself")
+	}
+
+	dev2, d2, _ := newNet(t)
+	d2.tr.Write(regDrvFeatSel, 4, 0)
+	d2.tr.Write(regDrvFeatures, 4, uint64(uint32(dev2.Features()&^netFeatGuestCsum)))
+	// Delivered before the guest has room: it waits, and is finished once,
+	// when it goes.
+	f2, off2 := udpFrame(pattern(51, 3))
+	dev2.DeliverWith(f2, off2)
+	rx2 := postRx(d2, 1, 2048)
+	d2.kick(netRxQueue)
+	if u := d2.collect(netRxQueue); len(u) != 1 {
+		t.Fatalf("used = %+v", u)
+	}
+	h2 := d2.mem[rx2[0]:]
+	if h2[0] != 0 {
+		t.Errorf("header flags %#x for a guest without GUEST_CSUM", h2[0])
+	}
+	if !udpValid(h2[NetHeaderLen : NetHeaderLen+len(f2)]) {
+		t.Error("checksum not finished for a guest without GUEST_CSUM")
+	}
+
+	dev.DeliverWith(make([]byte, 20), Offload{NeedsCsum: true, Start: 14, Offset: 6})
+	if dev.RxDropped.Load() != 1 {
+		t.Error("a frame its offload does not fit was not dropped")
 	}
 }

@@ -255,7 +255,9 @@ func bootContainer(ctx context.Context, root string, cfg *container.Config, laye
 			logf("%s", stack.Stats())
 			stack.Close()
 		}()
-		nic.Recv = stack.Inject
+		// The stack checks no checksums, so a frame's offload means nothing
+		// to it.
+		nic.Recv = func(frame []byte, _ virtio.Offload) { stack.Inject(frame) }
 		devices = append(devices, nic)
 	}
 	if lr.file != nil {
