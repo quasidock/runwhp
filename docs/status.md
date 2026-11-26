@@ -1,5 +1,21 @@
 # Status
 
+- **Iteration 20** (2026-11-26): the docker CLI runs containers through
+  runwhp. `runwhp docker-api start` serves Docker's Engine API, versions
+  1.40 to 1.56, from a runwhp in the background, on a named pipe of
+  runwhp's own, and writes a docker context, `runwhp`, for it. Each request
+  becomes what runwhp's own commands do, on the same store, and each
+  container still runs in a runwhp of its own, so the API and runwhp see
+  the same containers, which outlive the server. The stock docker CLI 29
+  runs, attaches to, execs in, copies to and from, commits, inspects,
+  stops and removes containers, follows their logs, stats and events,
+  pulls, builds, tags, saves, loads and pushes images, logs in to
+  registries, and manages networks and volumes, with Docker's types,
+  framing and errors; what runwhp cannot do as asked is refused, each flag
+  named. What boots a guest, a build, a save, a push or a stopped
+  container's files, runs in a job of its own. See
+  [Docker Engine API](../README.md#docker-engine-api) and
+  [Iteration 20 results](#iteration-20-results).
 - **Iteration 19** (2026-11-26): compose. `runwhp compose` runs a
   compose.yaml project as Docker Compose does, read with compose-go, the
   library Docker Compose reads it with: `up` builds and pulls what is
@@ -1696,3 +1712,92 @@ The new tests cover:
 The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
 the WSL kernel with its vsock modules passed with `--module`; compose's
 containers boot runwhp's kernel in each.
+
+## Iteration 20 results
+
+Measured on the test machine with runwhp's kernel, from Git Bash, with
+the store on NTFS (`C:`), over three to five runs. "Iteration 19" is that
+iteration's build, run in turn with this one. "docker → runwhp" is Docker's
+static docker.exe 29.9.3 through runwhp's Engine API; Docker is Docker
+29.10 in WSL on the same machine, its CLI there.
+
+runwhp's own commands cost what they did. The Engine API adds nothing to
+them: it is a command of its own, `docker-api`, and Moby's API types are
+plain structs:
+
+| Measurement | Iteration 19 | Iteration 20 |
+| --- | --- | --- |
+| `run --rm alpine:3.20 true`, `-m 512m` | 187-218 ms | 188-203 ms |
+| the same, default memory | 249-278 ms | 251-275 ms |
+| `runwhp help` | 61-71 ms | 62-67 ms |
+
+docker.exe itself takes 93-94 ms to print its version, connecting to
+nothing, so every docker command through runwhp starts about 90 ms behind
+runwhp's own; the API answers most requests in 1-10 ms:
+
+| Measurement | runwhp | docker → runwhp | Docker |
+| --- | --- | --- | --- |
+| `run --rm alpine:3.20 true`, `-m 512m` | 182-198 ms | 276-336 ms, and 573 ms once | 530-602 ms, and 820 ms once |
+| the same, default memory | 244-269 ms | 335-356 ms | |
+| `run -d -m 512m alpine:3.20 sleep 1d` | 196-267 ms | 236-255 ms | 326-359 ms |
+| removing it with `-f` | 202-214 ms | 235-242 ms | 262-315 ms |
+| `ps` of 10 containers (runwhp: `list`) | 64-68 ms | 97-108 ms | 34-39 ms |
+| `inspect` | | 97-126 ms | 33-37 ms |
+| `exec CONTAINER true` | 64-70 ms | 104-109 ms | 84-88 ms |
+| `logs` of 200 MB in 2 million lines | 204-219 ms | 279-299 ms | 11.4-12.3 s |
+| `build` from the cache, 50 files copied | 75-96 ms | 195-202 ms | |
+| `build --no-cache`, `apk add curl` and `COPY` | 2.17-2.41 s | 2.36-2.75 s | |
+| `cp` of 10,000 files into a container | 2.24-2.32 s | 2.59-2.85 s | 1.82-1.91 s |
+| `cp` of them out | 10.9-11.0 s | 11.2-11.7 s | 5.1-5.8 s |
+| `pull python:3.12-slim` from a registry on the machine | 747-790 ms | 773-831 ms | |
+
+A `docker run` is four requests after the CLI's ping: create, which boots
+the VM, as runwhp's own `create` does, attach, start, and a wait for the
+container's removal. A cached build through the API sends the context to
+a job, which writes it to disk, about 3.5 ms a file on Windows, before
+the build hashes it. Docker's `ps` and `inspect` beat runwhp's because the
+docker CLI on Linux starts in a few milliseconds; its `logs` is slow,
+reading its json-file log, where runwhp's is framed.
+
+Two of the server's costs came to light measuring it. The server has no
+console, and Windows made one for each job it started, a console
+program, about 300 ms: a cached build took 0.55 s through the API before
+jobs were started without one. And a wait for a container's removal
+looked every 100 ms; it looks every 20 ms now.
+
+runwhp.exe is 24.0 MB, 1.6 MB more than in iteration 19: net/http's
+server, Moby's API types and the server itself; runwhp-compose.exe 27.3 MB.
+
+The new tests cover:
+
+- **Requests to specs:** the body docker.exe sends for `docker run`,
+  captured, taken with no warning; every field runwhp takes, from
+  entrypoints reset to networks with aliases and addresses, ports, binds
+  with drive letters, `--mount`, tmpfs, anonymous volumes, healthchecks and
+  restart policies; Docker's `bridge` and `default` as runwhp's default
+  network; and each refusal, with its status.
+- **The pure parts:** API versions and Docker's too-new and too-old
+  errors; filters as lists and as sets; JSON message streams; stats whose
+  CPU percentage, by the docker CLI's formula, is runwhp's own; events
+  found by comparing containers' states, dated by them and in order; event
+  filters; pipe names however spelt; the supervisor's refusals as typed
+  errors.
+- **End to end, with the docker CLI:** runs attached, detached, with input
+  and a terminal; streams and exit codes; refusals that make nothing;
+  ps filters, logs, healthchecks, pause, rename, stop with the image's
+  signal, wait, kill, restart, `start -a`, and their events; exec with its
+  options, input and `-d`; cp in and out of running and stopped
+  containers, diff, export and commit; pulls, image listing, inspect,
+  history, an image in use refused removal, save and load with the same
+  ID, import; a build with stages, arguments and a `.dockerignore`, rebuilt
+  from the cache, and with the same ID as `runwhp build`'s; pushes, the
+  second uploading nothing; login refused and accepted, and runwhp's own
+  pull using what it stored; networks by name and alias, volumes kept,
+  prunes, a published port; stats, system df and prune; containers made
+  by either seen by the other, through a restart of the server; and the
+  keys of thirteen answers against Docker 29.10's.
+
+The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
+the WSL kernel with its vsock modules passed with `--module`; the API's
+containers boot runwhp's kernel in each. `docker run -it` and
+`docker exec -it` in a console are untried: the tests have no console.

@@ -124,16 +124,53 @@
   `--timestamps` prints UTC times, where Docker Compose's are local.
 - `compose`'s containers boot runwhp's kernel, or `RUNWHP_KERNEL`'s, never
   with `--module`.
+- The Engine API is tested with the docker CLI 29 alone. Docker Compose
+  through it, the Docker SDKs, Testcontainers and VS Code's Dev Containers
+  are untried; Testcontainers' Ryuk, which mounts the API's socket into a
+  container, cannot work, as no pipe reaches a guest.
+- The API serves its own pipe, `\\.\pipe\runwhp_engine`, never Docker's
+  `docker_engine`, so tools that take no docker context or `DOCKER_HOST`
+  do not find it. It runs until `docker-api stop`, a logoff, or the end of
+  a session whose job object keeps its processes in, and nothing starts
+  it at logon.
+- Execs, attaches, log follows and event streams the API serves end with
+  the server; the containers do not. An exec started with `-d` is not
+  followed: its inspect never says it ended.
+- The API has no `top`, `update` (but an empty one), image search,
+  `attach/ws`, checkpoints, plugins or swarm, and no BuildKit session:
+  `docker build` uses the classic builder's endpoint, warning that it is
+  deprecated, and `docker buildx` cannot build through runwhp. A build's
+  secrets and ssh, `--cache-from`, `--output` and a git or URL context are
+  refused.
+- Containers the API makes without a name go by their short ID, where
+  Docker gives each a name of two words. One-character names are refused,
+  as Docker 29 refuses them.
+- `docker stop` and `docker wait --condition` on a created container
+  answer as Docker's do, but the container's VM, already booted, stays up
+  until it is started or removed.
+- Events about containers that other runwhps change come up to a second
+  late, 250 ms while a client follows them, and a container made and
+  removed between two looks, by runwhp's own commands, shows no events.
+- The API's `system df` gives Docker 29's usage objects and the older
+  lists, but not the kernels runwhp's own `system df` counts. Its stats
+  give a container's memory used and cached, not the guest's other cgroup
+  figures, nor a pids limit.
+- The API answers every version from 1.40 to 1.56 with 1.56's shapes; a
+  client of an older version may find fields it does not know.
 - A healthcheck runs through `exec`'s server, so it needs vsock in the
   guest's kernel, as `exec` does. Each check's result is written to the
   container's state file.
 - The network device has one queue pair and no segmentation offload, which
   the link's 65520-byte MTU makes up for in part: 200 MB crosses in about
   0.4 s out of the container and 0.6-0.8 s into it on the test machine.
-- The prunes take no `--filter`, such as `until=` or `label=`, `images`
-  no filter but a repository, and `list` no `before`, `since`, `publish`
-  or `expose` filter. There is no `login`: `pull` and
-  `push` use the credentials `docker login` stored. There is no
+- runwhp's own prunes take no `--filter`, such as `until=` or `label=`;
+  the API's take `label` for containers and volumes, and `dangling` for
+  images, but no `until`. runwhp's `images` takes no filter but a
+  repository, where the API's takes Docker's `reference`, `dangling`,
+  `label`, `before` and `since`; and `list` no `before`, `since`, `publish`
+  or `expose` filter. runwhp has no `login` of its own: `pull` and `push`
+  use the credentials `docker login` stored, through Docker's daemon or
+  runwhp's Engine API. There is no
   `--insecure-registry`: only registries on localhost, a loopback or a
   private address, or a `.local` name are spoken to over plain HTTP.
 - `build` boots a guest for each `COPY` and `ADD`, and two for each

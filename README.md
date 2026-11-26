@@ -25,9 +25,11 @@ changes and committed to an image, and a container paused. Images are
 built from Dockerfiles, as BuildKit builds them, each step in a guest of
 its own, and pushed to registries. `runwhp compose` runs compose.yaml
 projects as Docker Compose does, each container in a runwhp of its own,
-with Docker's labels, healthchecks and filters. Stock nerdctl runs Linux
-containers on it too, through a containerd of the user's own and runwhp's
-containerd shim, unelevated.
+with Docker's labels, healthchecks and filters. `runwhp docker-api` serves
+Docker's Engine API, so that the docker CLI runs containers, builds and
+pushes images, and manages networks and volumes through runwhp. Stock
+nerdctl runs Linux containers on it too, through a containerd of the
+user's own and runwhp's containerd shim, unelevated.
 
 See [status](docs/status.md) for details.
 
@@ -144,6 +146,13 @@ A project of several containers, from a compose.yaml:
 .\out\runwhp.exe compose logs -f web
 .\out\runwhp.exe compose exec db psql -U postgres
 .\out\runwhp.exe compose down -v
+```
+
+The docker CLI, through runwhp's Engine API; see [Docker Engine API](#docker-engine-api):
+
+```powershell
+.\out\runwhp.exe docker-api start
+docker --context runwhp run --rm -it alpine:3.20 sh
 ```
 
 A container's files:
@@ -1122,6 +1131,103 @@ Containers run on runwhp's kernel, or `RUNWHP_KERNEL`'s, never with
 `--module`, and with half this machine's memory and up to 4 vCPUs unless a
 service says otherwise, as `run`'s do.
 
+### Docker Engine API
+
+`runwhp docker-api start` serves Docker's Engine API, so that the docker
+CLI, and other clients of Docker's API, run containers through runwhp:
+
+```powershell
+.\out\runwhp.exe docker-api start
+docker --context runwhp run --rm alpine:3.20 echo hello
+docker context use runwhp
+docker run -d --name web -p 8080:80 nginx:alpine
+docker build -t mine/app:1 .
+docker compose ...   # untried; runwhp compose is the tested way
+.\out\runwhp.exe docker-api status
+.\out\runwhp.exe docker-api stop
+```
+
+**The model.** There is still no daemon that holds containers. `start`
+runs a runwhp in the background, as `run -d` runs a container's, that
+serves the API on a named pipe of runwhp's own, `\\.\pipe\runwhp_engine`,
+or for a store other than the default one, `RUNWHP_ROOT`'s, a pipe with
+the store's hash in its name. It writes a docker context for the pipe,
+named `runwhp` (or with the same hash), into the docker CLI's
+configuration, `%USERPROFILE%\.docker` or `DOCKER_CONFIG`, and leaves the
+current context as it is; `DOCKER_HOST=npipe:////./pipe/runwhp_engine` works
+as well. It never takes Docker Desktop's `docker_engine` pipe. Only the user
+and SYSTEM can connect. The server translates each request onto what
+runwhp's own commands do, on the same store: each container runs in a
+runwhp of its own, as `run -d`'s does, so the API and runwhp's commands see
+the same containers, images, networks and volumes, and containers outlive
+the server; `stop` ends it, leaving them running, and `start` serves them
+again. Its log is `docker-api\server.log` in the store; `start --debug`
+adds create requests' bodies.
+
+It answers API versions 1.40 to 1.56, those of Docker 29, with Docker's
+types (`github.com/moby/moby/api`), headers, errors and statuses. The
+docker CLI 29.9, Docker's static `docker.exe` for Windows, is what is
+tested, end to end: `run` (attached, `-d`, `-i`, `-t`, `--rm`),
+`create`, `start [-a]`, `stop`, `restart`, `kill`, `pause`, `unpause`,
+`rename`, `rm`, `wait`, `ps` with Docker's filters, `inspect`, `logs [-f]`,
+`attach` with detach keys, `exec [-i] [-t] [-d]`, `cp`, `diff`, `export`,
+`commit`, `stats`, `top` (refused), `port`, `events`, `pull`, `images`,
+`image inspect`, `history`, `tag`, `rmi`, `save`, `load`, `import`,
+`build`, `push`, `login`, `network`, `volume`, `system df`,
+`system prune`, `info` and `version`.
+
+**Creating a container.** A create request becomes what `run` would make
+of the same flags, with `run`'s checks; what runwhp cannot do as asked is
+refused before anything is made, naming the flags, and what it leaves out
+without changing what the container does is warned of, as the docker CLI
+prints a create's warnings:
+
+| | |
+| --- | --- |
+| Taken | image, command, `--entrypoint`, `-e`, `-w`, `-u`, `--hostname`, `-i`, `-t`, `-l`, `--stop-signal`, `--stop-timeout`, the `--health-*` flags, `-m`, `--cpus` (rounded up to whole vCPUs, with a warning), `--network` (Docker's `bridge` and `default` are runwhp's default network) with `--network-alias` and `--ip`, `-p` with a host port (on 127.0.0.1 unless an address is given), `--add-host`, `-v`, `--mount`, `--tmpfs`, anonymous volumes, `--restart`, `--rm`, `--log-driver local`, `json-file` (as local, warned of) or `none` with `--log-opt`, `--storage-opt size` |
+| Refused | `--privileged`, `--cap-add`, `--device`, `--gpus`, `--pid`, `--ipc`, `--uts` and `--userns` of the host, `--network host` and `container:`, `--dns*`, `--link`, `--volumes-from`, volume drivers, `--cpuset-*`, `--cpu-quota`, `--sysctl`, `--security-opt`, `--runtime` other than runwhp, `-P`, ports without a host port and UDP ports, `--group-add`, `--pids-limit`, `--mac-address`, `--domainname`, IPv6 addresses, relative bind paths, platforms other than `linux/amd64` |
+| Warned of | `--init` (runwhp's init is always there), `--shm-size`, `--oom-score-adj`, `--ulimit`, `--memory-swap`, `--cpu-shares`, `--blkio-weight`, `--cgroupns`, `--read-only` |
+
+A missing image is a 404, as Docker's daemon answers it, and the docker CLI
+pulls it and asks again, so `docker run` pulls as it does against Docker. A
+bare `-e KEY` is the client's to resolve, and one it did not is dropped.
+Containers boot runwhp's kernel, or the server's `RUNWHP_KERNEL`, never
+with `--module`. A created container's VM is already booted, as runwhp's
+`create` boots one, where Docker's created containers take nothing.
+
+**Streams.** Attaches and execs take the connection over, as Docker's do,
+and carry the container's output in Docker's multiplexed framing, which is
+the log's, unless it has a terminal; the pipe is in message mode, as
+Docker's is, so that a client's half-close ends the container's input. With
+a terminal, the detach keys, Ctrl+P Ctrl+Q unless the client says, detach,
+as Docker's daemon does. Execs live in the server: one made, started and
+inspected by the API ends with the server, as do attaches and log follows;
+the containers do not. Stats come from the container's runwhp each second,
+with `system_cpu_usage` worked out so that the CPU percentage the docker
+CLI shows is runwhp's own.
+
+**Events.** The server reports what its requests did, and watches the
+store's containers, every second, or every 250 ms while a client follows
+`/events`, so that what runwhp's own commands, compose, and restart policies
+do shows too: created, started, died, paused, unpaused, renamed, health
+changed and destroyed. It keeps the last 1024 events for `--since`.
+
+**What boots a guest.** A process runs one guest at a time, and the server
+none: a build, a save, a push, and the files of a stopped container, for
+`cp`, `diff`, `export` and `commit`, run in a `runwhp __api-job` of its own,
+which ends with the server. A running container's files are reached through
+its runwhp, in the server.
+
+**Images.** Pulls report Docker's progress, from the layers runwhp fetches
+and converts: `Pulling fs layer`, `Downloading`, `Pull complete`, or
+`Already exists`. A client's credentials, its `X-Registry-Auth`, go with its
+pull or push; `docker login` checks them against the registry, then stores
+them in Docker's `config.json`, where runwhp's own pulls and pushes find
+them too. `docker build` uses the classic builder's endpoint: the docker
+CLI sends the context, which a job extracts and builds as `runwhp build`
+does, and gets the same image ID; the static `docker.exe` has no buildx, and
+runwhp has no BuildKit session.
+
 ### nerdctl and containerd
 
 runwhp is also a containerd runtime: stock nerdctl, through a containerd of
@@ -1415,6 +1521,7 @@ bzImage.
 | [`internal/netswitch`](internal/netswitch) | User-defined networks without a switch: each guest's frames routed to the others' VMMs, ARP and names answered for them, and the links between VMMs. Builds on any OS |
 | [`internal/network`](internal/network) | User-defined networks in the store: subnets, address leases held by the runwhps running containers, what each knows of the others, and their pipes |
 | [`internal/compose`](internal/compose) | compose.yaml projects, read with compose-go: services turned into what `run` takes, refused or warned of where runwhp cannot do as they ask, and named, labelled and hashed as Docker Compose does. Builds on any OS |
+| [`internal/dockerapi`](internal/dockerapi) | The Engine API's parts that need no Windows: API versions, Docker's filters and JSON message streams, stats as Docker gives them, and the events found by comparing containers' states, with their broker. Builds on any OS; the server itself, its endpoints and jobs are `cmd/runwhp`'s `dockerapi*` files |
 | [`internal/fuse`](internal/fuse) | The FUSE protocol as virtio-fs speaks it, served from a file system interface. Builds on any OS |
 | [`internal/disk`](internal/disk) | The files behind virtual disks: overlapped I/O from many goroutines, sparse files, freeing ranges, exclusive and delete-on-close opens |
 | [`internal/ext4`](internal/ext4) | Makes empty ext4 file systems as mke2fs would, and reads back whether one was left clean. Builds on any OS |
@@ -1467,8 +1574,9 @@ container's supervisor, with no daemon.
 | Host to guest | Console ports for the main process; a virtio socket device for further connections | Done: `runwhp exec` uses vsock |
 | Bind mounts and volumes | virtio-fs, with a FUSE server in Go serving Windows files and keeping Unix metadata as WSL does, and the writeback cache for delegated mounts; volumes as journaled ext4 disk images on virtio-blk | Done; a volume is used by one container at a time |
 | Networking | User-mode network stack in the VMM (gVisor netstack); published ports are loopback listeners; on user-defined networks, frames routed from VMM to VMM over named pipes, with ARP and DNS answered by each | Done, IPv4 only, TCP ports only |
-| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | Done over runwhp's own images, plus `run`, `list`, `stats`, `stop`, `restart`, `rename`, `logs`, `attach`, `wait`, `pause`, `unpause`, `cp`, `export`, `diff`, `commit`, `images`, `rmi`, the prunes, `system df`, `tag`, `history`, `save`, `load`, `import`, `build`, `builder prune`, `push`, `network`, `compose` and `containerd`, restart policies, healthchecks, labels and filters; OCI bundles only through the shim |
+| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | Done over runwhp's own images, plus `run`, `list`, `stats`, `stop`, `restart`, `rename`, `logs`, `attach`, `wait`, `pause`, `unpause`, `cp`, `export`, `diff`, `commit`, `images`, `rmi`, the prunes, `system df`, `tag`, `history`, `save`, `load`, `import`, `build`, `builder prune`, `push`, `network`, `compose`, `containerd` and `docker-api`, restart policies, healthchecks, labels and filters; OCI bundles only through the shim |
 | containerd | A shim v2 (`containerd-shim-runwhp-v1`) that is the task's VMM, taking nerdctl's spec and containerd's LCOW layers; a snapshotter whose views have no mounts; a user containerd set up by `runwhp containerd` | Done: stock nerdctl 2.4, unelevated, `--network none` and runwhp's network |
+| Docker Engine API | `runwhp docker-api`: a runwhp in the background serving API 1.40-1.56 on a pipe of its own, with Moby's API types, translating each request onto runwhp's commands; guests booted for builds, saves, pushes and stopped containers' files in jobs of their own | Done: the docker CLI 29, end to end; Docker Compose, SDKs and IDEs untried |
 | Container files | A file server in init, reached through the container's runwhp, or for a stopped container through a guest booted with its storage; tars written and read as Docker's daemon does | Done: `cp`, `export`, `diff`, `commit` |
 | Container logs | Frames stamped with the host's time, rotated as Docker's `local` driver rotates | Done; every kept container has one |
 | Image archives | Docker 29's `docker save` format, rebuilt from each layer's tar-split metadata and its files, read in a guest booted for the purpose | Done; same IDs and blobs as Docker |
@@ -1620,6 +1728,11 @@ starts, which covers decompressing the kernel and early memory setup.
   bundles, as runc's does, is still open; and whether nerdctl should run
   Linux containers on Windows without the flags it needs today
   (`--runtime`, `--platform`, `--network none`) is nerdctl's to settle.
+- Should the Engine API start at logon, and serve Docker's own
+  `\\.\pipe\docker_engine` when nothing else does, for tools that take no
+  docker context? And should Docker Compose, through the API, take over
+  from `runwhp compose`, once it is tried, or BuildKit's session be served
+  for buildx?
 - Should `build` also run BuildKit itself, in a guest, for what its own
   builder lacks: `bind,from=` and ssh mounts, cache export and import,
   stages built at once, and steps that share one guest rather than boot

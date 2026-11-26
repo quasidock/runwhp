@@ -680,3 +680,36 @@
   `run -d`, which starts two runwhps, 15-20 ms more. compose so runs in
   runwhp-compose.exe, the same command line built with `-tags compose`,
   whose containers' runwhps are runwhp.exe; it costs compose about 25 ms.
+- **The docker CLI 29 against a pipe of runwhp's own**: Docker's static
+  `docker.exe` 29.9.3 speaks API 1.56, Moby's `github.com/moby/moby/api`
+  v1.56.1, so it negotiates nothing; Docker 29.10's daemon speaks 1.57,
+  down to 1.40. A `/_ping` answering `Builder-Version: 1` and a CLI with
+  no buildx give `docker build` the classic builder's endpoint, with a
+  deprecation warning, and the context as a tar.
+- **Hijacked streams over a named pipe need message mode.** The docker CLI
+  half-closes its end once its input ends, and at once when it gives
+  none; go-winio carries a half-close only on a message-mode pipe, as
+  dockerd serves `docker_engine`, where a byte-mode pipe would end the
+  connection. A server that took that half-close for the client leaving
+  lost every attached run's output.
+- **Docker 29's waits and names**: `wait?condition=not-running` on a
+  created container answers 0 at once, and `next-exit` waits for its next
+  run, on an exited container too; a container named with one character
+  is refused (`name must be at least 2 characters`); a missing container
+  is `No such container: NAME`, 404.
+- **Docker 29's `/system/df`** gives both the usage objects of API 1.52
+  (`ImageUsage`, `ContainerUsage`, `VolumeUsage`, `BuildCacheUsage`) and
+  the lists they replaced (`LayersSize`, `Images`, ...), whatever the
+  version asked; a build cache record's `Parents` key is spelt
+  `" Parents"`.
+- **The docker CLI's `images --filter reference=`** lists a row for each
+  name and each repository digest the daemon gives an image, so a daemon
+  must narrow both to those that match, as Docker's does.
+- **A process with no console that starts a console program makes
+  Windows give the program a console of its own**, unless it is started
+  with `CREATE_NO_WINDOW` or `DETACHED_PROCESS`: about 300 ms each on the
+  test machine. runwhp's background processes are detached, so every
+  console program they start needs one of those flags.
+- **docker.exe 29.9 takes 93-94 ms to start**, printing its version and
+  connecting to nothing, which is most of what any docker command
+  through runwhp's API costs beyond runwhp's own.
