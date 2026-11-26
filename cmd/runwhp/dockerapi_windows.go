@@ -854,6 +854,9 @@ func (s *apiServer) routes() {
 	s.containerRoutes()
 	s.execRoutes()
 	s.imageRoutes()
+	s.networkRoutes()
+	s.volumeRoutes()
+	s.handle("GET /system/df", s.getSystemDF)
 
 	for _, p := range []string{"/swarm", "/swarm/", "/services", "/services/", "/nodes", "/nodes/", "/tasks", "/tasks/",
 		"/secrets", "/secrets/", "/configs", "/configs/"} {
