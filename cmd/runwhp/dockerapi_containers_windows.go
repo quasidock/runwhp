@@ -28,6 +28,7 @@ import (
 	"github.com/quasidock/runwhp/internal/netstack"
 	"github.com/quasidock/runwhp/internal/network"
 	"github.com/quasidock/runwhp/internal/rootfs"
+	"github.com/quasidock/runwhp/internal/vmm"
 	"github.com/quasidock/runwhp/internal/volume"
 )
 
@@ -97,6 +98,11 @@ func (s *apiServer) postContainerCreate(w http.ResponseWriter, r *http.Request) 
 	}
 	spec, warnings, err := specFromCreate(req)
 	if err != nil {
+		return err
+	}
+	// The image must be here already, the client pulls it; runwhp's kernel
+	// is fetched if it has to be, as run fetches it.
+	if _, err := vmm.ResolveKernel(r.Context(), s.root, "", image.PullMissing); err != nil {
 		return err
 	}
 	var diag bytes.Buffer

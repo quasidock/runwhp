@@ -2,7 +2,6 @@ package gc
 
 import (
 	"errors"
-	"fmt"
 	"slices"
 	"sort"
 	"strings"
@@ -87,13 +86,13 @@ func (u *Usage) RemoveImages(args []string, force bool) (*Plan, []error) {
 			for _, r := range found {
 				refs = append(refs, image.Familiar(r.Ref))
 			}
-			errs = append(errs, fmt.Errorf("image %s is referenced by %s: remove them by name, or with -f", arg, strings.Join(refs, ", ")))
+			errs = append(errs, container.Refuse(ErrConflict, "image %s is referenced by %s: remove them by name, or with -f", arg, strings.Join(refs, ", ")))
 			continue
 		}
 		var refused error
 		for _, r := range found {
 			if img := u.image(r.Path); img != nil && len(img.Containers) > 0 && !force {
-				refused = fmt.Errorf("image %s is used by container %s: delete it first, or remove the image with -f", image.Familiar(r.Ref), describe(img.Containers))
+				refused = container.Refuse(ErrConflict, "image %s is used by container %s: delete it first, or remove the image with -f", image.Familiar(r.Ref), describe(img.Containers))
 				break
 			}
 		}
@@ -352,3 +351,7 @@ func (u *Usage) AndCache(p *Plan, all bool) *Plan {
 	p.Layers = u.unrootedWith(p.Records, p.Cache, nil)
 	return p
 }
+
+// ErrConflict is what a removal refuses: an image in use, or one named
+// ambiguously.
+var ErrConflict = errors.New("conflict")

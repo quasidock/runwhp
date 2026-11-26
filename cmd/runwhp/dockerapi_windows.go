@@ -853,6 +853,7 @@ func (s *apiServer) routes() {
 
 	s.containerRoutes()
 	s.execRoutes()
+	s.imageRoutes()
 
 	for _, p := range []string{"/swarm", "/swarm/", "/services", "/services/", "/nodes", "/nodes/", "/tasks", "/tasks/",
 		"/secrets", "/secrets/", "/configs", "/configs/"} {

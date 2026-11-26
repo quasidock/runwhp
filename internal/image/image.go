@@ -35,6 +35,10 @@ type Store struct {
 	// Progress receives one line per pull step. nil discards them. Layers
 	// are fetched concurrently; the store serializes its writes.
 	Progress io.Writer
+	// Events, if set, receives each step of a pull as it happens, for a
+	// client that shows progress as Docker's does. It may be called from
+	// several goroutines at once.
+	Events func(PullEvent)
 	// Remote options, for tests.
 	RemoteOptions []remote.Option
 
@@ -142,6 +146,16 @@ func ParsePolicy(s string) (Policy, error) {
 // ErrNotPresent means the image is not in the local store.
 var ErrNotPresent = errors.New("image not present locally")
 
+// notPresentError is ErrNotPresent for an image a pull was not allowed to
+// fetch.
+type notPresentError struct{ ref string }
+
+func (e *notPresentError) Error() string {
+	return fmt.Sprintf("image %s is not present locally and --pull=never was given", e.ref)
+}
+
+func (e *notPresentError) Is(target error) bool { return target == ErrNotPresent }
+
 func normalize(ref string) (name.Reference, error) {
 	r, err := name.ParseReference(ref)
 	if err != nil {
@@ -220,7 +234,7 @@ func (s *Store) Ensure(ctx context.Context, ref string, policy Policy) (*Image, 
 			return recs[0].Image, nil
 		}
 		if policy == PullNever {
-			return nil, fmt.Errorf("image %s is not present locally and --pull=never was given", ref)
+			return nil, &notPresentError{ref}
 		}
 	}
 	return s.Pull(ctx, ref)
@@ -279,6 +293,14 @@ func (s *Store) Pull(ctx context.Context, ref string) (*Image, error) {
 		firstErr error
 		sem      = make(chan struct{}, 3)
 	)
+	for i := range layers {
+		diffID := cf.RootFS.DiffIDs[i].String()
+		if s.Layers.Has(diffID) {
+			s.event(PullEvent{Layer: diffID, Phase: PullExists})
+		} else if diffID != layer.EmptyDiffID {
+			s.event(PullEvent{Layer: diffID, Phase: PullWaiting})
+		}
+	}
 	for i, l := range layers {
 		diffID := cf.RootFS.DiffIDs[i].String()
 		if diffID == layer.EmptyDiffID || s.Layers.Has(diffID) {
@@ -309,6 +331,7 @@ func (s *Store) Pull(ctx context.Context, ref string) (*Image, error) {
 	if err := s.writeRecord(r, img); err != nil {
 		return nil, err
 	}
+	s.event(PullEvent{Phase: PullDigest, Digest: img.Digest})
 	s.progressf("pulled %s (%s)", r.Name(), img.Digest)
 	return img, nil
 }
@@ -319,7 +342,26 @@ func (s *Store) fetchLayer(ctx context.Context, l v1.Layer, diffID string) error
 	}
 	size, _ := l.Size()
 	s.progressf("  %.19s  fetching %.1f MB and converting to ext4", diffID, float64(size)/1e6)
-	rc, err := l.Uncompressed()
+	if s.Events == nil {
+		rc, err := l.Uncompressed()
+		if err != nil {
+			return fmt.Errorf("layer %s: %w", diffID, err)
+		}
+		defer rc.Close()
+		_, err = s.Layers.Put(diffID, rc)
+		return err
+	}
+	// The compressed bytes are counted as they come, for the client's
+	// progress, and decompressed here.
+	compressed, err := l.Compressed()
+	if err != nil {
+		return fmt.Errorf("layer %s: %w", diffID, err)
+	}
+	defer compressed.Close()
+	counted := &progressReader{r: compressed, report: func(n int64) {
+		s.event(PullEvent{Layer: diffID, Phase: PullDownloading, Current: n, Total: size})
+	}}
+	rc, err := Decompress(counted)
 	if err != nil {
 		return fmt.Errorf("layer %s: %w", diffID, err)
 	}
@@ -327,6 +369,7 @@ func (s *Store) fetchLayer(ctx context.Context, l v1.Layer, diffID string) error
 	if _, err := s.Layers.Put(diffID, rc); err != nil {
 		return err
 	}
+	s.event(PullEvent{Layer: diffID, Phase: PullDone})
 	return nil
 }
 
@@ -355,4 +398,51 @@ func Normalize(ref string) (string, error) {
 		return "", err
 	}
 	return r.Name(), nil
+}
+
+// PullEvent is a step of a pull.
+type PullEvent struct {
+	Layer string // the layer's diffID; empty for the image's own steps
+	Phase string
+	// Current and Total are a downloading layer's compressed bytes, so
+	// far and in all.
+	Current, Total int64
+	Digest         string // PullDigest's: the image's manifest digest
+}
+
+// Pull phases: a layer already in the store, one waiting its turn, one
+// downloading, as it is decompressed and converted, and one done; and the
+// image's digest, last.
+const (
+	PullExists      = "exists"
+	PullWaiting     = "waiting"
+	PullDownloading = "downloading"
+	PullDone        = "done"
+	PullDigest      = "digest"
+)
+
+func (s *Store) event(e PullEvent) {
+	if s.Events != nil {
+		s.Events(e)
+	}
+}
+
+// progressReader reports how many bytes it has read, at most every
+// 512 KiB and at its end.
+type progressReader struct {
+	r        io.Reader
+	n, last  int64
+	report   func(int64)
+	reported bool
+}
+
+func (c *progressReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	if c.n-c.last >= 512<<10 || err != nil && !c.reported {
+		c.last = c.n
+		c.reported = err != nil
+		c.report(c.n)
+	}
+	return n, err
 }
