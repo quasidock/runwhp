@@ -47,17 +47,18 @@ func (d *dockerAPI) run(dir string, extraEnv []string, name string, args ...stri
 	return result{stdout.String(), stderr.String(), exitCode(err)}
 }
 
-// TestGoClients runs testcontainers-go and Docker's Go SDK, with Ryuk off,
-// as no pipe of the host reaches a guest.
+// TestGoClients runs testcontainers-go and Docker's Go SDK, with Ryuk on:
+// it reaches the API through Docker's socket in its container, bound to
+// the API's pipe, as testcontainers-go binds the pipe DOCKER_HOST names.
 func TestGoClients(t *testing.T) {
 	if os.Getenv("RUNWHP_E2E_CLIENTS") != "1" {
 		runwhp(t)
 		t.Skip("set RUNWHP_E2E_CLIENTS=1 to run Docker's Go clients")
 	}
-	d := clientsAPI(t, "nginx:alpine", "redis:7-alpine")
+	d := clientsAPI(t, "nginx:alpine", "redis:7-alpine", "testcontainers/ryuk:0.14.0")
 	goExe := filepath.Join(runtime.GOROOT(), "bin", "go.exe")
 	dir, _ := filepath.Abs(filepath.Join("..", "clients", "go"))
-	r := d.run(dir, []string{"RUNWHP_E2E_CLIENTS=1", "TESTCONTAINERS_RYUK_DISABLED=true", "GOFLAGS=-mod=mod"},
+	r := d.run(dir, []string{"RUNWHP_E2E_CLIENTS=1", "TESTCONTAINERS_RYUK_DISABLED=false", "GOFLAGS=-mod=mod"},
 		goExe, "test", "-count=1", "-v", "-timeout", "15m", "./...")
 	if r.code != 0 {
 		t.Errorf("go test in test/clients/go: exit %d\n%s\n%s", r.code, r.stdout, r.stderr)
@@ -74,7 +75,7 @@ func TestDockerPy(t *testing.T) {
 		runwhp(t)
 		t.Skip("set RUNWHP_E2E_PYTHON to a python with test/clients/python's requirements")
 	}
-	d := clientsAPI(t)
+	d := clientsAPI(t, "docker:cli")
 	script, _ := filepath.Abs(filepath.Join("..", "clients", "python", "test_dockerpy.py"))
 	if r := d.run(t.TempDir(), nil, python, "-I", script); r.code != 0 {
 		t.Errorf("docker-py through DOCKER_HOST: exit %d\n%s\n%s", r.code, r.stdout, r.stderr)
@@ -274,6 +275,13 @@ func TestDevcontainerCLI(t *testing.T) {
 `,
 		}
 	}
+	// docker-outside-of-docker binds Docker's socket into the container,
+	// which reaches the API: the dev container's docker, as its own user
+	// through the feature's proxy, lists it and runs another.
+	cases["docker-outside-of-docker"] = map[string]string{
+		".devcontainer/devcontainer.json": `{"image": "mcr.microsoft.com/devcontainers/base:bookworm",
+  "features": {"ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}}}`,
+	}
 	for name, files := range cases {
 		t.Run(name, func(t *testing.T) {
 			ws := buildDir(t, files)
@@ -289,8 +297,14 @@ func TestDevcontainerCLI(t *testing.T) {
 				t.Fatalf("devcontainer up: exit %d, %v\n%s\n%s", up.code, outcome, lastLines(up.stdout, 30), up.stderr)
 			}
 			folder, _ := outcome["remoteWorkspaceFolder"].(string)
+			write := "echo from-the-container > " + folder + "/written"
+			if name == "docker-outside-of-docker" {
+				// The workspace's files are the container's user's, root's,
+				// and not the remote user's, vscode's: see gaps.md.
+				write = "sudo sh -c '" + write + "'"
+			}
 			ex := d.run(ws, nil, node, js, "exec", "--workspace-folder", ws, "--docker-path", d.docker,
-				"sh", "-c", "uname -s; cat /etc/marker 2>/dev/null; echo from-the-container > "+folder+"/written")
+				"sh", "-c", "uname -s; cat /etc/marker 2>/dev/null; "+write)
 			if ex.code != 0 || !strings.Contains(ex.stdout, "Linux") {
 				t.Errorf("devcontainer exec: %+v", ex)
 			}
@@ -299,6 +313,16 @@ func TestDevcontainerCLI(t *testing.T) {
 			}
 			if b, err := os.ReadFile(filepath.Join(ws, "written")); err != nil || string(b) != "from-the-container\n" {
 				t.Errorf("the workspace as the host sees it: %q, %v", b, err)
+			}
+			if name == "docker-outside-of-docker" {
+				ex := d.run(ws, nil, node, js, "exec", "--workspace-folder", ws, "--docker-path", d.docker,
+					"sh", "-c", "id -un; docker ps --format '{{.Label \"devcontainer.local_folder\"}}'; docker run --rm "+alpine+" echo nested")
+				// The label has the folder as Dev Containers spells it, its
+				// drive letter in lower case.
+				if ex.code != 0 || !strings.Contains(ex.stdout, "vscode\n") || !strings.Contains(strings.ToLower(ex.stdout), strings.ToLower(ws)) ||
+					!strings.Contains(ex.stdout, "nested\n") {
+					t.Errorf("docker in the dev container: %+v", ex)
+				}
 			}
 		})
 	}

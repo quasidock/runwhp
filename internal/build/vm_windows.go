@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/quasidock/runwhp/internal/container"
 	"github.com/quasidock/runwhp/internal/guestspec"
 	"github.com/quasidock/runwhp/internal/image"
+	"github.com/quasidock/runwhp/internal/layer"
 	"github.com/quasidock/runwhp/internal/netstack"
 	"github.com/quasidock/runwhp/internal/rootfs"
 	"github.com/quasidock/runwhp/internal/vmm"
@@ -68,8 +70,10 @@ func (v *VM) Import(r io.Reader) (Layer, error) {
 	return Layer{DiffID: d, Empty: empty}, err
 }
 
-// config is a guest's on layers.
+// config is a guest's on layers. An empty layer, as an image's history
+// may list one, is no file in the store, and no disk in the guest.
 func (v *VM) config(layers []string) *container.Config {
+	layers = slices.DeleteFunc(slices.Clone(layers), func(d string) bool { return d == layer.EmptyDiffID })
 	return &container.Config{
 		ID: container.NewID(), Layers: layers, Hostname: Hostname,
 		Memory: v.Memory, CPUs: v.CPUs, StorageSize: v.StorageSize,

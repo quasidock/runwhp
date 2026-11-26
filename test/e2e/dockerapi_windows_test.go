@@ -178,7 +178,7 @@ func TestDockerRun(t *testing.T) {
 		{[]string{"--dns", "1.1.1.1"}, "--dns"},
 		{[]string{"-p", "53:53/udp"}, "only tcp"},
 		{[]string{"--cap-add", "NET_ADMIN"}, "--cap-add"},
-		{[]string{"-v", "/var/run/docker.sock:/var/run/docker.sock"}, "TESTCONTAINERS_RYUK_DISABLED"},
+		{[]string{"--mount", "type=npipe,source=C:\\x,target=/x"}, "not a named pipe"},
 	} {
 		r := d.docker1(append(append([]string{"run", "--rm"}, tc.args...), img, "true")...)
 		if r.code == 0 || !strings.Contains(r.stderr, tc.want) {

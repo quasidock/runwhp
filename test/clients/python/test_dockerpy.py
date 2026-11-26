@@ -79,6 +79,11 @@ def main():
         check(out == b"built\n", "the built image's file: %r" % out)
         client.images.remove("dockerpy/built:1")
 
+    # Docker's socket in a container reaches the API too.
+    out = client.containers.run("docker:cli", ["docker", "version", "--format", "{{.Server.Os}}"], remove=True,
+                                volumes={"/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "rw"}})
+    check(out == b"linux\n", "docker version through the socket: %r" % out)
+
     net = client.networks.create("pynet", labels={"py": "yes"})
     vol = client.volumes.create("pyvol")
     try:

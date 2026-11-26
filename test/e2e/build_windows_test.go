@@ -118,6 +118,22 @@ CMD ["cat", "/greeting"]
 
 // TestBuildMultiStage copies from stages and images, and builds only what
 // the target needs.
+// TestBuildOnEmptyLayer builds on an image with an empty layer, as
+// mcr.microsoft.com/devcontainers/base has: the layer is no file in the
+// store, and a step's guest boots without it.
+func TestBuildOnEmptyLayer(t *testing.T) {
+	s := newOwnStore(t)
+	base := pushImage(t, "e2e/empty-layer:1", tarLayer(t, nil), tarLayer(t, map[string]string{"etc/marker": "base\n"}))
+	dir := buildDir(t, map[string]string{
+		"Dockerfile": fmt.Sprintf("FROM %s\nCOPY f /f\nRUN cat /etc/marker /f > /both\n", base),
+		"f":          "copied\n",
+	})
+	s.ok("build", "-t", "onempty:1", dir)
+	if r := s.ok(runArgs("onempty:1", "cat", "/both")...); r.stdout != "base\ncopied\n" {
+		t.Errorf("run: %q", r.stdout)
+	}
+}
+
 func TestBuildMultiStage(t *testing.T) {
 	s := newOwnStore(t)
 	base, bb := mirrored(t, alpine), mirrored(t, busybox)

@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -278,4 +279,93 @@ func tcpBody(addr string) string {
 		}
 	}
 	return ""
+}
+
+// ryukChild is set in the process TestRyukReaps starts: it makes what
+// Ryuk should remove, then exits without cleaning up.
+const ryukChild = "RUNWHP_RYUK_CHILD"
+
+// TestRyukReaps has a process of its own leave a container, its network
+// and its volume behind and exit, as a test run killed midway would, and
+// waits for Ryuk, which reaches the API through Docker's socket in its
+// container, to remove them once the process's session has ended.
+func TestRyukReaps(t *testing.T) {
+	if tag := os.Getenv(ryukChild); tag != "" {
+		ryukLeave(t, tag)
+		return
+	}
+	ctx := need(t)
+	if os.Getenv("TESTCONTAINERS_RYUK_DISABLED") == "true" {
+		t.Skip("Ryuk is disabled")
+	}
+	tag := fmt.Sprintf("ryuk-%d", time.Now().UnixNano())
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestRyukReaps$", "-test.v")
+	cmd.Env = append(os.Environ(), ryukChild+"="+tag, "TESTCONTAINERS_RYUK_RECONNECTION_TIMEOUT=1s")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("the child: %v\n%s", err, out)
+	}
+	cli, err := client.New(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cli.Close()
+	left := func() []string {
+		var names []string
+		cs, err := cli.ContainerList(ctx, client.ContainerListOptions{All: true, Filters: make(client.Filters).Add("label", "runwhp.ryuk="+tag)})
+		if err == nil {
+			for _, c := range cs.Items {
+				names = append(names, "container "+c.ID[:12])
+			}
+		}
+		ns, err := cli.NetworkList(ctx, client.NetworkListOptions{Filters: make(client.Filters).Add("label", "runwhp.ryuk="+tag)})
+		if err == nil {
+			for _, n := range ns.Items {
+				names = append(names, "network "+n.Name)
+			}
+		}
+		if _, err := cli.VolumeInspect(ctx, tag, client.VolumeInspectOptions{}); err == nil {
+			names = append(names, "volume "+tag)
+		}
+		return names
+	}
+	if l := left(); len(l) != 3 {
+		t.Fatalf("the child left %q, want a container, a network and a volume\n%s", l, out)
+	}
+	var l []string
+	for deadline := time.Now().Add(90 * time.Second); time.Now().Before(deadline); time.Sleep(500 * time.Millisecond) {
+		if l = left(); len(l) == 0 {
+			return
+		}
+	}
+	t.Errorf("Ryuk left %q", l)
+	// Not left for the next run.
+	cs, _ := cli.ContainerList(ctx, client.ContainerListOptions{All: true, Filters: make(client.Filters).Add("label", "runwhp.ryuk="+tag)})
+	for _, c := range cs.Items {
+		cli.ContainerRemove(ctx, c.ID, client.ContainerRemoveOptions{Force: true})
+	}
+	ns, _ := cli.NetworkList(ctx, client.NetworkListOptions{Filters: make(client.Filters).Add("label", "runwhp.ryuk="+tag)})
+	for _, n := range ns.Items {
+		cli.NetworkRemove(ctx, n.ID, client.NetworkRemoveOptions{})
+	}
+	cli.VolumeRemove(ctx, tag, client.VolumeRemoveOptions{Force: true})
+}
+
+// ryukLeave makes a container on a network, with a volume, and leaves them.
+func ryukLeave(t *testing.T, tag string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	nw, err := network.New(ctx, network.WithLabels(map[string]string{"runwhp.ryuk": tag}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctr, err := testcontainers.Run(ctx, alpine,
+		testcontainers.WithCmd("sleep", "600"),
+		testcontainers.WithLabels(map[string]string{"runwhp.ryuk": tag}),
+		testcontainers.WithMounts(testcontainers.VolumeMount(tag, "/data")),
+		network.WithNetwork(nil, nw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("left container %s, network %s and volume %s", ctr.GetContainerID(), nw.Name, tag)
 }

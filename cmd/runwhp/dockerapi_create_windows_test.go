@@ -195,6 +195,12 @@ func TestSpecFromCreateSockets(t *testing.T) {
 	if _, _, err := specFromCreate(req); err == nil || !strings.Contains(err.Error(), "not a named pipe") {
 		t.Errorf("npipe of a file: %v", err)
 	}
+	// What docker-outside-of-docker asks besides: SELinux labels, which
+	// change nothing.
+	req.HostConfig.Mounts, req.HostConfig.SecurityOpt = nil, []string{"label=disable", "label:type:x"}
+	if _, _, err := specFromCreate(req); err != nil {
+		t.Errorf("label options: %v", err)
+	}
 }
 
 // A volume a mount makes gets the mount's labels, as Docker gives them:
@@ -236,6 +242,10 @@ func TestSpecFromCreateRefusals(t *testing.T) {
 			r.HostConfig.RestartPolicy = dcontainer.RestartPolicy{Name: "always"}
 		}, "--restart and --rm"},
 		{"no image", func(r *dcontainer.CreateRequest) { r.Config.Image = "" }, "no image"},
+		{"seccomp", func(r *dcontainer.CreateRequest) {
+			r.HostConfig.SecurityOpt = []string{"label=disable", "seccomp=unconfined"}
+		},
+			"--security-opt seccomp=unconfined is"},
 	} {
 		req := createRun(t)
 		tc.edit(&req)

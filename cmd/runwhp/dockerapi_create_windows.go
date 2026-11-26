@@ -195,7 +195,14 @@ func refuseUnsupported(cfg *dcontainer.Config, hc *dcontainer.HostConfig) error 
 	add(hc.CPUQuota != 0 || hc.CPUPeriod != 0, "--cpu-quota and --cpu-period")
 	add(hc.CPURealtimePeriod != 0 || hc.CPURealtimeRuntime != 0, "--cpu-rt-period and --cpu-rt-runtime")
 	add(len(hc.Sysctls) > 0, "--sysctl")
-	add(len(hc.SecurityOpt) > 0, "--security-opt")
+	for _, o := range hc.SecurityOpt {
+		// SELinux labels, as Dev Containers' docker-outside-of-docker
+		// asks label=disable: the guest has no SELinux, and Docker on a
+		// host without it takes them and does nothing.
+		if !strings.HasPrefix(o, "label=") && !strings.HasPrefix(o, "label:") {
+			add(true, "--security-opt "+o)
+		}
+	}
 	add(hc.Runtime != "" && hc.Runtime != "runwhp" && hc.Runtime != "runc", "--runtime "+hc.Runtime)
 	add(len(hc.GroupAdd) > 0, "--group-add")
 	add(hc.CgroupParent != "", "--cgroup-parent")
