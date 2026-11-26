@@ -713,3 +713,47 @@
 - **docker.exe 29.9 takes 93-94 ms to start**, printing its version and
   connecting to nothing, which is most of what any docker command
   through runwhp's API costs beyond runwhp's own.
+- **How Docker Compose 5.7 chooses its builder**: it asks the docker CLI
+  whether BuildKit is on, which it is unless `DOCKER_BUILDKIT=0`, a
+  daemon's `/_ping` says `Builder-Version: 1` *and* its OS type is
+  windows; for a Linux daemon such as runwhp's it is on. It then looks
+  for the buildx plugin, and without it warns that it falls back to the
+  classic builder, which `/build` serves; with it, it runs `buildx bake`,
+  which needs BuildKit's `/session` and `/grpc`. Its classic builds read
+  the image's ID from the stream's `aux` message.
+- **Random host ports, as each client asks**: Docker Compose (`ports:
+  ["80"]`), Testcontainers for Java and .NET, and docker-py send
+  `HostPort: ""`; testcontainers-go sends `"0"`; none sends
+  `PublishAllPorts`. testcontainers-go publishes the image's
+  `ExposedPorts` when given none, and reads the port bound from
+  `NetworkSettings.Ports`, never `HostConfig.PortBindings`, which Docker
+  29 leaves as asked. Docker 29 binds a random port on `0.0.0.0` and `::`
+  alike, at the same number.
+- **Testcontainers copies files into a created container, gzipped**:
+  `PUT /containers/{id}/archive` with a gzip-compressed tar, before
+  start, which Docker's daemon decompresses.
+- **A container's pipe cannot carry a half-close**: it is a byte-mode
+  pipe, so the end of a tar sent through it reaches init only as the
+  tar's own end marker. A tar that ended early, as a gzipped one read
+  plain does, left init waiting for the rest; the host now reads the tar
+  as it sends it.
+- **docker-py's `containers.run()` without `detach`** returns the
+  container's output only if its inspect's `HostConfig.LogConfig.Type`
+  is `json-file` or `journald`; otherwise it returns `None`, having read
+  nothing.
+- **Who finds the API how**: the docker CLI, Docker Compose, docker-py
+  7.2 and Testcontainers for .NET follow the docker CLI's current
+  context; testcontainers-go, Testcontainers for Java and Docker's Go SDK
+  read only `DOCKER_HOST`, or their own settings, else Docker's
+  `\.\pipe\docker_engine`. The Dev Containers CLI resolves the context
+  itself and passes `DOCKER_CONTEXT` to every docker command.
+- **Dev Containers' CLI** waits for its container with `docker events
+  --filter event=start`, then keeps a `docker exec -i ... /bin/sh` open
+  as a shell server; it checks `docker buildx version` and, without
+  buildx, builds features with two classic `docker build`s, the second
+  multi-stage with `ARG` before `FROM`.
+- **Docker 29's events of a stop**: `kill` with signal 15, another with 9
+  if the timeout passes, `stop`, then `die`; a restart's `die` carries
+  `restarting: true`, and `start` and `restart` follow.
+- **alpine:3.20's busybox has no `httpd`**; its `nc -lk -p PORT -e cat
+  FILE` serves a file to every connection.

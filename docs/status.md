@@ -1,5 +1,23 @@
 # Status
 
+- **Iteration 21** (2026-11-26): Docker's own tools run through runwhp's
+  Engine API, each tested end to end: Docker Compose's plugin, building
+  with the classic builder it falls back to without buildx;
+  testcontainers-go, its modules and wait strategies, with Ryuk off;
+  Docker's Go SDK; docker-py; and the Dev Containers CLI, the code VS
+  Code's extension runs, from an image, a Dockerfile with features and a
+  compose file. What they needed came to runwhp's own commands too:
+  random host ports, `-p PORT` and `-P` with `--expose`, bound at each
+  boot and kept in the container's state, which `runwhp port` shows; `top`,
+  which init lists from its own `/proc`; and names for containers made
+  without one. The API gives a stop's and a restart's events, follows
+  execs started with `-d`, takes archives compressed, reports runwhp's
+  log as `json-file`, looks images up in their registry without pulling,
+  and, with `docker-api start --docker-engine`, serves Docker's own
+  `docker_engine` pipe, where tools look when given no context. A tar
+  sent into a container that ended early no longer leaves it waiting. See
+  [Docker's tools](../README.md#dockers-tools) and
+  [Iteration 21 results](#iteration-21-results).
 - **Iteration 20** (2026-11-26): the docker CLI runs containers through
   runwhp. `runwhp docker-api start` serves Docker's Engine API, versions
   1.40 to 1.56, from a runwhp in the background, on a named pipe of
@@ -1801,3 +1819,101 @@ The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
 the WSL kernel with its vsock modules passed with `--module`; the API's
 containers boot runwhp's kernel in each. `docker run -it` and
 `docker exec -it` in a console are untried: the tests have no console.
+
+## Iteration 21 results
+
+Measured on the test machine with runwhp's kernel, from Git Bash, with
+the store on NTFS (`C:`), over four or five runs. "Iteration 20" is that
+iteration's build, run in turn with this one. "docker → runwhp" is
+Docker's static docker.exe 29.9.3, with Docker Compose 5.7.1's plugin,
+through runwhp's Engine API; Docker is Docker 29.10, with Docker Compose
+5.8.0, in WSL on the same machine.
+
+runwhp's own commands cost what they did:
+
+| Measurement | Iteration 20 | Iteration 21 |
+| --- | --- | --- |
+| `run --rm alpine:3.20 true`, `-m 512m` | 184-192 ms | 185-191 ms, and 225 ms once |
+| the same, default memory | 252-264 ms | 249-260 ms |
+| `runwhp help` | 61-63 ms, and 116 ms once | 58-65 ms |
+
+A random host port costs nothing measurable over a fixed one: the
+listener is bound as the VM boots either way, and the port it got is in
+the state written as it becomes ready. `top` asks init over the control
+port, as `stats` does:
+
+| Measurement | runwhp | docker → runwhp | Docker |
+| --- | --- | --- | --- |
+| `run -d -m 512m alpine:3.20 sleep 1d`, `-p 18321:80` | 193-201 ms | | 340-366 ms, and 623 ms once |
+| the same, `-p 80` | 200-211 ms | 237-251 ms | 318-358 ms |
+| `port` of it | 61-64 ms | 92-99 ms | 34-38 ms |
+| removing it with `-f` | 112-241 ms | 144-246 ms | 357-398 ms |
+| `top` of three processes | 62-66 ms | 94-100 ms, `aux` too | 43-53 ms |
+
+Docker's tools through the API, against runwhp's own and Docker's: a
+project of alpine services, each `sleep 1d` with `mem_limit: 512m`,
+testcontainers-go's redis module run, used and terminated, as its test in
+`test/clients/go` does, and the Dev Containers CLI bringing up a dev
+container from `alpine:3.20`:
+
+| Measurement | docker → runwhp | runwhp | Docker |
+| --- | --- | --- | --- |
+| `compose up -d`, 1 service | 431-508 ms | 319-338 ms | 433-623 ms |
+| `compose down -t 0`, 1 service | 265-365 ms | 167-273 ms | 652-680 ms |
+| `compose up -d`, 5 services | 587-602 ms | 472-504 ms | 1449-1534 ms |
+| `compose down -t 0`, 5 services | 336-430 ms | 289-310 ms | 1171-1299 ms |
+| testcontainers-go, redis | 627-632 ms, and 705 ms once | | 880-957 ms |
+| `devcontainer up`, from an image | 1479-1529 ms | | 1333-1441 ms, and 5571 ms the first time |
+| `devcontainer exec true` | 876-903 ms | | 992-1043 ms |
+
+Docker Compose through the API pays for docker.exe and its own start, about
+110-170 ms for one service beyond `runwhp compose`, and creates the
+containers of five at once as `runwhp compose` does. The Dev Containers
+CLI runs a docker command for each step, `docker version`, `inspect`,
+`events`, `run`, `exec`, each starting docker.exe, about 93 ms, which
+puts it about level with the same CLI against Docker in WSL, under Node 18
+there and 26 here.
+
+runwhp.exe is 24.1 MB, 0.1 MB more than in iteration 20, and
+runwhp-compose.exe 27.5 MB; runwhp-init 3.1 MB.
+
+The new tests cover:
+
+- **Ports:** `-p PORT`, `-p IP::PORT` and `-p 0:PORT`, `--expose` and its
+  ranges, and `-P` over the image's, `--expose`'s and the API's exposed
+  ports, UDP left out; the API's `HostPort` `""` and `"0"`, a port with no
+  bindings only exposed; the netstack reporting the port the system chose;
+  a container's published ports bound while it runs and asked for
+  otherwise; compose's `ports: ["80"]` and `expose`; nerdctl's host port 0.
+- **top:** init's reading of `/proc/PID/stat`, `status` and `cmdline`, and
+  of this machine's processes, run in a guest; the `-ef` and `aux`
+  columns, `ps` options refused; the control port's answers matched to
+  their requests.
+- **The API's fidelity:** names made up for containers given none, unique
+  in a store; distribution inspect of an image and an index in a
+  registry, pulling nothing; `json-file` taken by `run` and the API;
+  Docker's socket and named pipes refused as bind sources; a detached
+  exec's session learning how its process ended; a tar that is not one,
+  or ends early, refused rather than waited on, and one without its end
+  marker given one.
+- **Shapes:** `top`, `top aux`, distribution inspect and inspect of a
+  container with random and exposed ports, against Docker 29.10's keys.
+- **End to end, with runwhp:** random ports served, listed by `port` and
+  `state`, and bound again by a restart; `top` of a running and a paused
+  container, with users from its `/etc/passwd`, and of a stopped one.
+- **End to end, with the docker CLI:** `-p 80`, `-P` and `--expose` with
+  `docker port` and inspect; `docker top`; a stop's and a restart's
+  events; a detached exec's exit code; a made-up name; a socket bind
+  refused; `docker_engine` served with `--docker-engine`, found with no
+  `DOCKER_HOST`, refused to a second server and when something else
+  holds it, and given back by `stop`.
+- **End to end, with Docker's tools:** Docker Compose, testcontainers-go,
+  Docker's Go SDK, docker-py through `DOCKER_HOST` and through a context,
+  and the Dev Containers CLI from an image, a Dockerfile with a feature
+  and a compose file; see [Docker's tools](../README.md#dockers-tools).
+
+The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
+the WSL kernel with its vsock modules passed with `--module`, Docker's
+tools included; the API's containers boot runwhp's kernel in each.
+VS Code's "Reopen in Container", and `docker run -it` in a console, are
+still to be tried by hand.

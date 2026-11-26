@@ -27,7 +27,8 @@ its own, and pushed to registries. `runwhp compose` runs compose.yaml
 projects as Docker Compose does, each container in a runwhp of its own,
 with Docker's labels, healthchecks and filters. `runwhp docker-api` serves
 Docker's Engine API, so that the docker CLI runs containers, builds and
-pushes images, and manages networks and volumes through runwhp. Stock
+pushes images, and manages networks and volumes through runwhp, as do
+Docker Compose, Testcontainers, Docker's SDKs and Dev Containers. Stock
 nerdctl runs Linux containers on it too, through a containerd of the
 user's own and runwhp's containerd shim, unelevated.
 
@@ -172,7 +173,7 @@ A container's files:
 | `-d`, `--detach` | off | Run the container in the background and print its ID; see [Containers](#containers) |
 | `--rm` | off | Remove the container when it stops. Without it, the container is kept, with its writable layer, until `runwhp delete` |
 | `--restart` | `no` | Start the container again when its process ends: `on-failure[:N]` when it exits non-zero, at most N times, `always`, or `unless-stopped`, the same here. Not with `--rm`; see **Restarting** under [Containers](#containers) |
-| `--log-driver` | `local` | `local` keeps the container's output in its log; `none` keeps none |
+| `--log-driver` | `local` | `local` keeps the container's output in its log; `none` keeps none. `json-file` is `local` under Docker's name, which the Engine API reports |
 | `--log-opt` | `max-size=20m`, `max-file=5` | `max-size=SIZE` rotates the log as a file would grow past SIZE, `-1` never; `max-file=N` keeps N files, the one being written included; repeatable. See **Output** under [Containers](#containers) |
 | `--name` | none | Name the container, as well as its 64-digit ID. Names are case-insensitive |
 | `-l`, `--label` | the image's | `KEY=VALUE`, or `KEY` for an empty value: a label on the container, over the image's; repeatable. See **Labels and filters** under [Containers](#containers) |
@@ -194,7 +195,9 @@ A container's files:
 | `--network`, `--net` | `user` | `user` gives the container a network of its own through runwhp; `none` leaves it only loopback; a network's name puts it on that network, with the containers there, as `name=NAME,alias=ALIAS,ip=ADDRESS` does with an alias and an address; repeatable for networks of the user's. See **User-defined networks** under [Networking](#networking) |
 | `--network-alias` | | Another name for the container on its first network; repeatable |
 | `--ip` | | The container's address on its first network |
-| `-p`, `--publish` | | `[IP:]HOSTPORT:PORT[/tcp]`: listen on the host and forward to the container's TCP port; repeatable. IP defaults to `127.0.0.1` |
+| `-p`, `--publish` | | `[IP:][HOSTPORT:]PORT[/tcp]`: listen on the host and forward to the container's TCP port; repeatable. IP defaults to `127.0.0.1`; without `HOSTPORT`, or with `0`, any free port is taken, which `port` shows |
+| `-P`, `--publish-all` | | Publish every exposed TCP port, the image's `EXPOSE` and `--expose`'s, on a free host port of `127.0.0.1` |
+| `--expose` | | `PORT[-PORT][/PROTO]`: a port the container listens on, published only by `-P`; repeatable |
 | `--add-host` | | `NAME:IP` or `NAME=IP`, added to `/etc/hosts`; repeatable. `NAME:host-gateway` also lets the container reach the host's `127.0.0.1` at that name |
 | `-v`, `--volume` | | `HOSTPATH:PATH[:ro][,delegated]`: bind a host directory or file at `PATH`; a missing `HOSTPATH` is made as a directory, and `delegated` lets the guest cache writes; see [Delegated mounts](#delegated-mounts). `NAME:PATH[:ro][,nocopy]`: mount the named volume `NAME`, made if missing. `PATH` alone: an anonymous volume, removed with the container. Repeatable. See [Host files](#host-files) and [Volumes](#volumes) |
 | `--mount` | | Docker's long form of `-v` and `--tmpfs`: `type=bind,source=HOSTPATH,target=PATH[,readonly][,consistency=delegated]`, where `HOSTPATH` must exist; `type=volume[,source=NAME],target=PATH[,readonly][,volume-nocopy][,volume-opt=size=SIZE]`; `type=tmpfs,target=PATH[,tmpfs-size=SIZE][,tmpfs-mode=MODE]` |
@@ -259,8 +262,13 @@ its ID, its name, or any unique prefix of its ID.
 | `list [-q] [-f FILTER]... [--format table\|json]` | List containers, newest first, or those that match Docker's filters; see **Labels and filters** below |
 | `state CONTAINER` | Describe a container as JSON: runc's fields (`ociVersion`, `id`, `status`, `pid`, `bundle`), then runwhp's own |
 | `stats [--no-stream] [--format table\|json] [CONTAINER...]` | Show what running containers use, every second until Ctrl+C, or once with `--no-stream`; see [Memory](#memory) |
+| `top CONTAINER [-ef\|aux]` | List a running or paused container's processes, as `ps -ef` or `ps aux` shows them, with the guest's PIDs: every process in the guest but runwhp's init, from the `/proc` init holds, so an image needs no `ps` |
+| `port CONTAINER [PORT]` | List a running container's published ports as they were bound, or where one is |
 | `delete [-f] CONTAINER...` | Remove containers, with their writable layers, logs and anonymous volumes. A running one needs `-f`, which kills it first |
 | `rename CONTAINER NAME` | Rename a container |
+
+A container made without `--name` gets one, an adjective and a noun, as
+Docker's do: `brisk_heron`.
 
 States are runc's: `creating`, `created`, `running` and `stopped`, and
 runwhp's own `restarting`, for a container waiting to be started again by
@@ -467,6 +475,12 @@ connection to port 80 in the container, which sees it come from `10.0.2.2`.
 once, whether to allow it, and allowing it on public networks needs an
 administrator. A connection that arrives before anything in the container
 listens on the port is accepted and then closed, as with Docker.
+
+`-p 80`, without a host port, takes any free one, as Docker's random host
+ports do; `-P` publishes every port the image exposes, or `--expose`
+names, so. Each boot binds them anew, so a container started again may
+get other ports; `runwhp port` and the Engine API's inspect give those
+bound now.
 
 `ping` gets answers only from the gateway: runwhp carries TCP and UDP, not
 ICMP. Containers on a network of their own ping each other.
@@ -1123,8 +1137,8 @@ longer has are warned of, and `--remove-orphans` removes them.
 
 | | |
 | --- | --- |
-| Taken as `run` takes it | `image`, `build`, `command`, `entrypoint`, `environment`, `env_file`, `ports` (TCP, with a host port, on 127.0.0.1 unless an address is given, as `-p`), `extra_hosts`, `networks` with `aliases` and `ipv4_address`, `links` (as aliases), `volumes` (bind, named, anonymous, tmpfs; `consistency: delegated` for [Delegated mounts](#delegated-mounts)), `tmpfs`, `secrets` and `configs` from files (bound read-only), `restart`, `deploy.restart_policy`, `deploy.replicas`, `scale`, `mem_limit`, `cpus` and `deploy.resources.limits` (`cpus` rounded up to whole vCPUs), `healthcheck`, `depends_on`, `hostname`, `user`, `working_dir`, `tty`, `stdin_open`, `stop_signal`, `stop_grace_period`, `labels`, `logging` (`local`, `json-file` and `none`; `max-size` and `max-file`), `pull_policy`, `platform: linux/amd64`, `storage_opt: size`, `attach`, `profiles`, `extends`, `include` |
-| Refused, before anything is made | `network_mode` other than `none` or `bridge`; `devices`, `gpus`, `volumes_from`, `ipc`, `pid` and `uts` of other containers or the host; UDP ports, and ports without a host port; IPv6 and link-local addresses; network drivers other than `bridge`, `ipam`, `internal` and IPv6 networks; volume drivers and `driver_opts`; a volume two services would mount at once; secrets and configs other than from files; build `ssh`, `additional_contexts`, `cache_to`, other platforms, and git or URL contexts; lifecycle hooks, `provider`, `models` and `jobs` |
+| Taken as `run` takes it | `image`, `build`, `command`, `entrypoint`, `environment`, `env_file`, `ports` (TCP, on 127.0.0.1 unless an address is given, as `-p`, on a free host port without one), `expose`, `extra_hosts`, `networks` with `aliases` and `ipv4_address`, `links` (as aliases), `volumes` (bind, named, anonymous, tmpfs; `consistency: delegated` for [Delegated mounts](#delegated-mounts)), `tmpfs`, `secrets` and `configs` from files (bound read-only), `restart`, `deploy.restart_policy`, `deploy.replicas`, `scale`, `mem_limit`, `cpus` and `deploy.resources.limits` (`cpus` rounded up to whole vCPUs), `healthcheck`, `depends_on`, `hostname`, `user`, `working_dir`, `tty`, `stdin_open`, `stop_signal`, `stop_grace_period`, `labels`, `logging` (`local`, `json-file` and `none`; `max-size` and `max-file`), `pull_policy`, `platform: linux/amd64`, `storage_opt: size`, `attach`, `profiles`, `extends`, `include` |
+| Refused, before anything is made | `network_mode` other than `none` or `bridge`; `devices`, `gpus`, `volumes_from`, `ipc`, `pid` and `uts` of other containers or the host; UDP ports; IPv6 and link-local addresses; network drivers other than `bridge`, `ipam`, `internal` and IPv6 networks; volume drivers and `driver_opts`; a volume two services would mount at once; secrets and configs other than from files; build `ssh`, `additional_contexts`, `cache_to`, other platforms, and git or URL contexts; lifecycle hooks, `provider`, `models` and `jobs` |
 | Ignored, with a warning | `privileged`, `cap_add`, `cap_drop`, `security_opt`, `ulimits`, `sysctls`, `shm_size`, `init`, `userns_mode`, the `oom_*`, `pids_limit`, the CPU shares, sets and quotas, `blkio_config`, `mem_reservation`, `memswap_limit`, `read_only`, `dns`, `dns_search`, `dns_opt`, `domainname`, `mac_address`, `develop`, `deploy.resources.reservations`, other log drivers, build `cache_from` and `privileged` |
 
 Containers run on runwhp's kernel, or `RUNWHP_KERNEL`'s, never with
@@ -1142,7 +1156,7 @@ docker --context runwhp run --rm alpine:3.20 echo hello
 docker context use runwhp
 docker run -d --name web -p 8080:80 nginx:alpine
 docker build -t mine/app:1 .
-docker compose ...   # untried; runwhp compose is the tested way
+docker compose up -d   # with Docker Compose's plugin; see Docker's tools below
 .\out\runwhp.exe docker-api status
 .\out\runwhp.exe docker-api stop
 ```
@@ -1155,8 +1169,10 @@ the store's hash in its name. It writes a docker context for the pipe,
 named `runwhp` (or with the same hash), into the docker CLI's
 configuration, `%USERPROFILE%\.docker` or `DOCKER_CONFIG`, and leaves the
 current context as it is; `DOCKER_HOST=npipe:////./pipe/runwhp_engine` works
-as well. It never takes Docker Desktop's `docker_engine` pipe. Only the user
-and SYSTEM can connect. The server translates each request onto what
+as well. Only with `start --docker-engine` does it serve Docker's own
+pipe, `\\.\pipe\docker_engine`, too, where tools find Docker Desktop when
+given no context or `DOCKER_HOST`; it refuses to if something else serves
+it. Only the user and SYSTEM can connect. The server translates each request onto what
 runwhp's own commands do, on the same store: each container runs in a
 runwhp of its own, as `run -d`'s does, so the API and runwhp's commands see
 the same containers, images, networks and volumes, and containers outlive
@@ -1171,10 +1187,12 @@ tested, end to end: `run` (attached, `-d`, `-i`, `-t`, `--rm`),
 `create`, `start [-a]`, `stop`, `restart`, `kill`, `pause`, `unpause`,
 `rename`, `rm`, `wait`, `ps` with Docker's filters, `inspect`, `logs [-f]`,
 `attach` with detach keys, `exec [-i] [-t] [-d]`, `cp`, `diff`, `export`,
-`commit`, `stats`, `top` (refused), `port`, `events`, `pull`, `images`,
+`commit`, `stats`, `top`, `port`, `events`, `pull`, `images`,
 `image inspect`, `history`, `tag`, `rmi`, `save`, `load`, `import`,
 `build`, `push`, `login`, `network`, `volume`, `system df`,
-`system prune`, `info` and `version`.
+`system prune`, `info` and `version`. So are Docker Compose, Docker's Go
+and Python SDKs, testcontainers-go and the Dev Containers CLI: see
+[Docker's tools](#dockers-tools).
 
 **Creating a container.** A create request becomes what `run` would make
 of the same flags, with `run`'s checks; what runwhp cannot do as asked is
@@ -1184,8 +1202,8 @@ prints a create's warnings:
 
 | | |
 | --- | --- |
-| Taken | image, command, `--entrypoint`, `-e`, `-w`, `-u`, `--hostname`, `-i`, `-t`, `-l`, `--stop-signal`, `--stop-timeout`, the `--health-*` flags, `-m`, `--cpus` (rounded up to whole vCPUs, with a warning), `--network` (Docker's `bridge` and `default` are runwhp's default network) with `--network-alias` and `--ip`, `-p` with a host port (on 127.0.0.1 unless an address is given), `--add-host`, `-v`, `--mount`, `--tmpfs`, anonymous volumes, `--restart`, `--rm`, `--log-driver local`, `json-file` (as local, warned of) or `none` with `--log-opt`, `--storage-opt size` |
-| Refused | `--privileged`, `--cap-add`, `--device`, `--gpus`, `--pid`, `--ipc`, `--uts` and `--userns` of the host, `--network host` and `container:`, `--dns*`, `--link`, `--volumes-from`, volume drivers, `--cpuset-*`, `--cpu-quota`, `--sysctl`, `--security-opt`, `--runtime` other than runwhp, `-P`, ports without a host port and UDP ports, `--group-add`, `--pids-limit`, `--mac-address`, `--domainname`, IPv6 addresses, relative bind paths, platforms other than `linux/amd64` |
+| Taken | image, command, `--entrypoint`, `-e`, `-w`, `-u`, `--hostname`, `-i`, `-t`, `-l`, `--stop-signal`, `--stop-timeout`, the `--health-*` flags, `-m`, `--cpus` (rounded up to whole vCPUs, with a warning), `--network` (Docker's `bridge` and `default` are runwhp's default network) with `--network-alias` and `--ip`, `-p` (on 127.0.0.1 unless an address is given; without a host port, or with `0`, on a free one), `-P` and `--expose`, `--add-host`, `-v`, `--mount`, `--tmpfs`, anonymous volumes, `--restart`, `--rm`, `--log-driver json-file` (Docker's default, and the API's: runwhp's own log under Docker's name), `local` or `none` with `--log-opt`, `--storage-opt size` |
+| Refused | `--privileged`, `--cap-add`, `--device`, `--gpus`, `--pid`, `--ipc`, `--uts` and `--userns` of the host, `--network host` and `container:`, `--dns*`, `--link`, `--volumes-from`, volume drivers, `--cpuset-*`, `--cpu-quota`, `--sysctl`, `--security-opt`, `--runtime` other than runwhp, UDP ports, binds of Docker's socket or of a named pipe, `--group-add`, `--pids-limit`, `--mac-address`, `--domainname`, IPv6 addresses, relative bind paths, platforms other than `linux/amd64` |
 | Warned of | `--init` (runwhp's init is always there), `--shm-size`, `--oom-score-adj`, `--ulimit`, `--memory-swap`, `--cpu-shares`, `--blkio-weight`, `--cgroupns`, `--read-only` |
 
 A missing image is a 404, as Docker's daemon answers it, and the docker CLI
@@ -1202,7 +1220,9 @@ Docker's is, so that a client's half-close ends the container's input. With
 a terminal, the detach keys, Ctrl+P Ctrl+Q unless the client says, detach,
 as Docker's daemon does. Execs live in the server: one made, started and
 inspected by the API ends with the server, as do attaches and log follows;
-the containers do not. Stats come from the container's runwhp each second,
+the containers do not, nor do execs started with `-d`, whose inspect says
+when and how they ended while the server runs. An archive put into a
+container may be compressed, as Docker's daemon takes it. Stats come from the container's runwhp each second,
 with `system_cpu_usage` worked out so that the CPU percentage the docker
 CLI shows is runwhp's own.
 
@@ -1210,7 +1230,9 @@ CLI shows is runwhp's own.
 store's containers, every second, or every 250 ms while a client follows
 `/events`, so that what runwhp's own commands, compose, and restart policies
 do shows too: created, started, died, paused, unpaused, renamed, health
-changed and destroyed. It keeps the last 1024 events for `--since`.
+changed and destroyed. A stop through the API adds a kill with the stop
+signal and a stop, and a restart a restart, as Docker's daemon gives them.
+It keeps the last 1024 events for `--since`.
 
 **What boots a guest.** A process runs one guest at a time, and the server
 none: a build, a save, a push, and the files of a stopped container, for
@@ -1226,7 +1248,24 @@ them in Docker's `config.json`, where runwhp's own pulls and pushes find
 them too. `docker build` uses the classic builder's endpoint: the docker
 CLI sends the context, which a job extracts and builds as `runwhp build`
 does, and gets the same image ID; the static `docker.exe` has no buildx, and
-runwhp has no BuildKit session.
+runwhp has no BuildKit session. `GET /distribution/NAME/json`, the SDKs'
+distribution inspect, looks an image up in its registry without pulling it.
+
+#### Docker's tools
+
+These run through the API as they do against Docker, each tested end to
+end. Each finds the API through `DOCKER_HOST`, the docker CLI's current
+context, or, with `docker-api start --docker-engine`, Docker's own pipe:
+
+| Tool | Tested | What to know |
+| --- | --- | --- |
+| Docker Compose, the plugin | 5.7.1 | Put `docker-compose.exe` in `%USERPROFILE%\.docker\cli-plugins` as `docker-compose.exe`, or in `DOCKER_CONFIG`'s. Without buildx it builds with the classic builder, saying so, as runwhp serves; with buildx installed it would want BuildKit, which runwhp does not serve: set `DOCKER_BUILDKIT=0`. `ports: ["80"]` gets a free host port. A project it makes shows in `runwhp compose ps`, and the reverse |
+| testcontainers-go | 0.45.0 | Set `TESTCONTAINERS_RYUK_DISABLED=true`: its reaper mounts Docker's socket, which no container here can reach, and is refused. It reads `DOCKER_HOST`, or `tc.host` in `~/.testcontainers.properties`, or finds `docker_engine` with `--docker-engine`, not docker contexts. Its modules, wait strategies, files and networks work |
+| Docker's Go SDK, `github.com/moby/moby/client` | v0.6.2 | `client.FromEnv` reads `DOCKER_HOST`, not contexts |
+| docker-py | 7.2.0, with pywin32 | `docker.from_env()` reads `DOCKER_HOST`, or since 7.2 the current context. `containers.run` gives a run's output, as the API reports runwhp's log as `json-file` |
+| Dev Containers | the CLI 0.90.0, which VS Code's extension bundles | From an image, a Dockerfile with features, built with the classic builder, or a compose file. In VS Code, point the extension at runwhp with `docker.context`, or start the API with `--docker-engine`. A volume two dev containers mount at once is refused, as a runwhp volume is one running container's |
+
+Testcontainers for Java and .NET, and Docker's other SDKs, are untried.
 
 ### nerdctl and containerd
 
@@ -1574,9 +1613,9 @@ container's supervisor, with no daemon.
 | Host to guest | Console ports for the main process; a virtio socket device for further connections | Done: `runwhp exec` uses vsock |
 | Bind mounts and volumes | virtio-fs, with a FUSE server in Go serving Windows files and keeping Unix metadata as WSL does, and the writeback cache for delegated mounts; volumes as journaled ext4 disk images on virtio-blk | Done; a volume is used by one container at a time |
 | Networking | User-mode network stack in the VMM (gVisor netstack); published ports are loopback listeners; on user-defined networks, frames routed from VMM to VMM over named pipes, with ARP and DNS answered by each | Done, IPv4 only, TCP ports only |
-| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | Done over runwhp's own images, plus `run`, `list`, `stats`, `stop`, `restart`, `rename`, `logs`, `attach`, `wait`, `pause`, `unpause`, `cp`, `export`, `diff`, `commit`, `images`, `rmi`, the prunes, `system df`, `tag`, `history`, `save`, `load`, `import`, `build`, `builder prune`, `push`, `network`, `compose`, `containerd` and `docker-api`, restart policies, healthchecks, labels and filters; OCI bundles only through the shim |
+| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | Done over runwhp's own images, plus `run`, `list`, `stats`, `stop`, `restart`, `rename`, `logs`, `attach`, `wait`, `top`, `port`, `pause`, `unpause`, `cp`, `export`, `diff`, `commit`, `images`, `rmi`, the prunes, `system df`, `tag`, `history`, `save`, `load`, `import`, `build`, `builder prune`, `push`, `network`, `compose`, `containerd` and `docker-api`, restart policies, healthchecks, labels and filters; OCI bundles only through the shim |
 | containerd | A shim v2 (`containerd-shim-runwhp-v1`) that is the task's VMM, taking nerdctl's spec and containerd's LCOW layers; a snapshotter whose views have no mounts; a user containerd set up by `runwhp containerd` | Done: stock nerdctl 2.4, unelevated, `--network none` and runwhp's network |
-| Docker Engine API | `runwhp docker-api`: a runwhp in the background serving API 1.40-1.56 on a pipe of its own, with Moby's API types, translating each request onto runwhp's commands; guests booted for builds, saves, pushes and stopped containers' files in jobs of their own | Done: the docker CLI 29, end to end; Docker Compose, SDKs and IDEs untried |
+| Docker Engine API | `runwhp docker-api`: a runwhp in the background serving API 1.40-1.56 on a pipe of its own, with Moby's API types, translating each request onto runwhp's commands; guests booted for builds, saves, pushes and stopped containers' files in jobs of their own; Docker's `docker_engine` pipe too, when asked | Done: the docker CLI 29, Docker Compose 5.7, testcontainers-go, Docker's Go and Python SDKs and the Dev Containers CLI, end to end |
 | Container files | A file server in init, reached through the container's runwhp, or for a stopped container through a guest booted with its storage; tars written and read as Docker's daemon does | Done: `cp`, `export`, `diff`, `commit` |
 | Container logs | Frames stamped with the host's time, rotated as Docker's `local` driver rotates | Done; every kept container has one |
 | Image archives | Docker 29's `docker save` format, rebuilt from each layer's tar-split metadata and its files, read in a guest booted for the purpose | Done; same IDs and blobs as Docker |
@@ -1728,11 +1767,11 @@ starts, which covers decompressing the kernel and early memory setup.
   bundles, as runc's does, is still open; and whether nerdctl should run
   Linux containers on Windows without the flags it needs today
   (`--runtime`, `--platform`, `--network none`) is nerdctl's to settle.
-- Should the Engine API start at logon, and serve Docker's own
-  `\\.\pipe\docker_engine` when nothing else does, for tools that take no
-  docker context? And should Docker Compose, through the API, take over
-  from `runwhp compose`, once it is tried, or BuildKit's session be served
-  for buildx?
+- Should the Engine API start at logon? It serves Docker's own
+  `\\.\pipe\docker_engine` when started with `--docker-engine`. And now
+  that Docker Compose works through the API, should it take over from
+  `runwhp compose`, or BuildKit's session be served for buildx, which
+  Docker Compose and Dev Containers use when it is installed?
 - Should `build` also run BuildKit itself, in a guest, for what its own
   builder lacks: `bind,from=` and ssh mounts, cache export and import,
   stages built at once, and steps that share one guest rather than boot

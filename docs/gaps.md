@@ -67,8 +67,10 @@
   the balloon included, takes an I/O APIC line.
 - The network is IPv4 only, and carries no ICMP to the host or beyond it:
   only containers on a user-defined network ping each other. Only TCP
-  ports can be published, each with an explicit host port, and there is
-  no `-P`, `--dns` or `--dns-search`.
+  ports can be published, and there is no `--dns` or `--dns-search`. A
+  random host port, as `-p PORT` and `-P` take, listens on 127.0.0.1
+  alone, where Docker's listens on every IPv4 and IPv6 address; a
+  container started again may get another, as with Docker.
 - `network connect` and `disconnect` refuse a running container: its VM
   cannot take or give up a network device while it runs. A created
   container's VM is booted again for them.
@@ -106,9 +108,9 @@
   while it is replaced; Docker Compose makes the new one first. Anonymous
   volumes live in the container's writable layer, and go with it, where
   Docker Compose carries them over to the new container.
-- `compose` refuses UDP ports and ports without a host port, as `run`
-  does, and publishes ports on 127.0.0.1 unless an address is given, where
-  Docker publishes them on every address.
+- `compose` refuses UDP ports, as `run` does, and publishes ports on
+  127.0.0.1 unless an address is given, where Docker publishes them on
+  every address.
 - `compose build` builds one service after another, a step at a time, where
   BuildKit builds them at once. `cpus` is rounded up to whole vCPUs.
 - There is no `compose watch`, `top`, `events`, `cp`, `attach`, `stats`,
@@ -124,27 +126,45 @@
   `--timestamps` prints UTC times, where Docker Compose's are local.
 - `compose`'s containers boot runwhp's kernel, or `RUNWHP_KERNEL`'s, never
   with `--module`.
-- The Engine API is tested with the docker CLI 29 alone. Docker Compose
-  through it, the Docker SDKs, Testcontainers and VS Code's Dev Containers
-  are untried; Testcontainers' Ryuk, which mounts the API's socket into a
-  container, cannot work, as no pipe reaches a guest.
-- The API serves its own pipe, `\\.\pipe\runwhp_engine`, never Docker's
-  `docker_engine`, so tools that take no docker context or `DOCKER_HOST`
-  do not find it. It runs until `docker-api stop`, a logoff, or the end of
-  a session whose job object keeps its processes in, and nothing starts
-  it at logon.
+- The Engine API is tested with the docker CLI 29, Docker Compose 5.7,
+  testcontainers-go 0.45, Docker's Go SDK, docker-py 7.2 and the Dev
+  Containers CLI 0.90, VS Code's own code; VS Code itself only by hand.
+  Testcontainers for Java and .NET, and Docker's other SDKs, are untried.
+- No socket or pipe of the host reaches a guest, so a container cannot
+  drive the API: Testcontainers' Ryuk, and Dev Containers'
+  docker-outside-of-docker, which bind Docker's socket into a container,
+  are refused, and Testcontainers needs `TESTCONTAINERS_RYUK_DISABLED=true`.
+- The API serves its own pipe, `\\.\pipe\runwhp_engine`, and Docker's
+  `docker_engine` only when started with `--docker-engine`; without it,
+  tools that take no docker context, testcontainers-go and Docker's Go
+  SDK among them, need `DOCKER_HOST`. It runs until `docker-api stop`, a
+  logoff, or the end of a session whose job object keeps its processes
+  in, and nothing starts it at logon.
 - Execs, attaches, log follows and event streams the API serves end with
-  the server; the containers do not. An exec started with `-d` is not
-  followed: its inspect never says it ended.
-- The API has no `top`, `update` (but an empty one), image search,
+  the server; the containers do not, nor the processes of execs started
+  with `-d`, though their inspect no longer learns how they end.
+- With buildx installed, Docker Compose and Dev Containers build through
+  BuildKit, which runwhp does not serve: Docker Compose then needs
+  `DOCKER_BUILDKIT=0`, and Dev Containers cannot build an image. Without
+  it, both use the classic builder, which runwhp serves.
+- The API reports runwhp's own log as `json-file`, Docker's default, as
+  docker-py looks for it; it is not Docker's JSON-lines file, so tools
+  that read Docker's log files themselves, rather than through the API,
+  find nothing.
+- Docker Compose and `runwhp compose` hash a service's configuration
+  with compose-go versions of their own, which may hash it differently:
+  a project brought up by one may be made again by the other's `up`.
+- `top` lists the guest's processes, with the guest's PIDs, where
+  Docker's lists the host's, and takes `ps` options `-ef` and `aux`
+  alone. It runs no `ps`: init reads its `/proc`.
+- The API has no `update` (but an empty one), image search,
   `attach/ws`, checkpoints, plugins or swarm, and no BuildKit session:
   `docker build` uses the classic builder's endpoint, warning that it is
   deprecated, and `docker buildx` cannot build through runwhp. A build's
   secrets and ssh, `--cache-from`, `--output` and a git or URL context are
   refused.
-- Containers the API makes without a name go by their short ID, where
-  Docker gives each a name of two words. One-character names are refused,
-  as Docker 29 refuses them.
+- A container made without a name, before iteration 21, goes by its short
+  ID. One-character names are refused, as Docker 29 refuses them.
 - `docker stop` and `docker wait --condition` on a created container
   answer as Docker's do, but the container's VM, already booted, stays up
   until it is started or removed.
