@@ -494,7 +494,19 @@ func (c *composeCtx) createReplica(ctx context.Context, plan *upPlan, name strin
 	if events {
 		c.event("Container", cname, "Creating")
 	}
-	_, _, err := createContainer(ctx, c.root, &spec, createOptions{name: cname, policy: image.PullMissing})
+	var creds []byte
+	if plan.project.Services[name].UseAPISocket {
+		var err error
+		if creds, err = apiSocketCredentials(); err != nil {
+			return err
+		}
+		spec.env = slices.Clone(spec.env)
+		withAPISocketConfig(&spec, creds)
+	}
+	rec, _, err := createContainer(ctx, c.root, &spec, createOptions{name: cname, policy: image.PullMissing})
+	if err == nil {
+		err = putAPISocketConfig(ctx, c.root, rec, creds)
+	}
 	if err != nil {
 		if events {
 			c.event("Container", cname, "Error "+err.Error())

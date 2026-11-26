@@ -386,9 +386,16 @@ func mountFromAPI(mt mount.Mount) (mountSpec, error) {
 	}
 	m := mountSpec{target: target, readOnly: mt.ReadOnly, delegated: mt.Consistency == mount.ConsistencyDelegated}
 	switch mt.Type {
-	case mount.TypeBind:
+	case mount.TypeBind, mount.TypeNamedPipe:
 		if mt.Source == "" {
 			return mountSpec{}, fmt.Errorf("%s: source is required", what)
+		}
+		if pipe, ok := socketSource(mt.Source); ok {
+			m.kind, m.source, m.pipe, m.delegated = guestspec.MountSocket, mt.Source, pipe, false
+			break
+		}
+		if mt.Type == mount.TypeNamedPipe {
+			return mountSpec{}, fmt.Errorf("%s: source %s is not a named pipe, such as //./pipe/docker_engine", what, mt.Source)
 		}
 		m.kind = guestspec.MountBind
 		if m.source, err = hostPath(mt.Source, ""); err != nil {
@@ -405,6 +412,9 @@ func mountFromAPI(mt mount.Mount) (mountSpec, error) {
 		m.source = mt.Source
 		if o := mt.VolumeOptions; o != nil {
 			m.noCopy = o.NoCopy
+			// Given to the volume if it is made now, as Docker gives them;
+			// Testcontainers' Ryuk finds its volumes by them.
+			m.labels = o.Labels
 			if o.Subpath != "" {
 				return mountSpec{}, fmt.Errorf("%s: volume-subpath is not supported", what)
 			}
@@ -441,7 +451,7 @@ func mountFromAPI(mt mount.Mount) (mountSpec, error) {
 			return mountSpec{}, fmt.Errorf("%s: %w", what, err)
 		}
 	default:
-		return mountSpec{}, fmt.Errorf("%s: type %s is not supported; use bind, volume or tmpfs", what, mt.Type)
+		return mountSpec{}, fmt.Errorf("%s: type %s is not supported; use bind, volume, tmpfs or npipe", what, mt.Type)
 	}
 	if m.kind == guestspec.MountVolume && m.source != "" && path.IsAbs(m.source) {
 		return mountSpec{}, fmt.Errorf("%s: %q is not a volume name", what, m.source)

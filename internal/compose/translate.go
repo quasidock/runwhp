@@ -82,6 +82,9 @@ const (
 	MountTmpfs  = "tmpfs"
 )
 
+// apiSocket is Docker's socket, which use_api_socket binds.
+const apiSocket = "/var/run/docker.sock"
+
 // Mount is a bind mount, a volume or a tmpfs.
 type Mount struct {
 	Kind      string
@@ -175,9 +178,6 @@ func Translate(p *types.Project, s types.ServiceConfig, pr *Problems) Container 
 	}
 	if len(s.PreStart) > 0 || len(s.PostStart) > 0 || len(s.PreStop) > 0 {
 		refuse("lifecycle hooks", "not implemented")
-	}
-	if s.UseAPISocket {
-		refuse("use_api_socket", "runwhp has no Docker API")
 	}
 	if pl := strings.ToLower(s.Platform); pl != "" && pl != "linux/amd64" && pl != "linux/x86_64" {
 		refuse("platform "+s.Platform, "runwhp runs linux/amd64 only")
@@ -462,6 +462,11 @@ func mounts(p *types.Project, s types.ServiceConfig, c *Container, pr *Problems)
 			continue
 		}
 		c.Mounts = append(c.Mounts, m)
+	}
+	if s.UseAPISocket && !slices.ContainsFunc(c.Mounts, func(m Mount) bool { return m.Target == apiSocket }) {
+		// Docker's socket, which runwhp's run reads as its Engine API's,
+		// as Docker Compose binds the daemon's.
+		c.Mounts = append(c.Mounts, Mount{Kind: MountBind, Source: apiSocket, Target: apiSocket})
 	}
 	for _, t := range s.Tmpfs {
 		target, opts, _ := strings.Cut(t, ":")

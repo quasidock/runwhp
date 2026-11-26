@@ -33,9 +33,10 @@ type mountSpec struct {
 	// delegated is set for a bind mount whose writes the guest may cache:
 	// consistency=delegated, as Docker Desktop for Mac named it.
 	delegated bool
-	noCopy    bool   // volume: leave a new volume empty
-	size      string // volume: its size, should it be created
-	options   string // tmpfs: mount options
+	noCopy    bool              // volume: leave a new volume empty
+	size      string            // volume: its size, should it be created
+	labels    map[string]string // volume: its labels, should it be created
+	options   string            // tmpfs: mount options
 }
 
 // parseVolume reads -v SOURCE:CONTAINERPATH[:OPTIONS], where SOURCE is a
@@ -409,8 +410,9 @@ func containerPath(p string) (string, error) {
 // volumeUse is a named volume a run attaches: one disk, however many
 // targets it is mounted at.
 type volumeUse struct {
-	name string
-	size string // if it has to be created; empty means the default
+	name   string
+	size   string            // if it has to be created; empty means the default
+	labels map[string]string // if it has to be created
 }
 
 // mountPlan is what -v, --mount and --tmpfs ask for: the host directories to
@@ -522,6 +524,9 @@ func planMounts(specs []mountSpec, apiPipe string) (mountPlan, error) {
 			}
 			if plan.volumes[i].size == "" {
 				plan.volumes[i].size = m.size
+			}
+			if plan.volumes[i].labels == nil {
+				plan.volumes[i].labels = m.labels
 			}
 			gm.Volume, gm.Name = i, m.source
 		}

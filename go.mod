@@ -9,6 +9,7 @@ require (
 	github.com/containerd/containerd/api v1.12.0
 	github.com/containerd/containerd/v2 v2.4.2
 	github.com/containerd/ttrpc v1.2.10
+	github.com/docker/cli v29.9.3+incompatible
 	github.com/google/go-containerregistry v0.22.1
 	github.com/klauspost/compress v1.20.2
 	github.com/moby/buildkit v0.35.0
@@ -43,7 +44,6 @@ require (
 	github.com/containerd/plugin v1.1.0 // indirect
 	github.com/containerd/typeurl/v2 v2.3.0 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
-	github.com/docker/cli v29.9.3+incompatible // indirect
 	github.com/docker/docker-credential-helpers v0.9.9 // indirect
 	github.com/docker/go-connections v0.7.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect

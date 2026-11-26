@@ -556,9 +556,28 @@ func (c *composeCtx) cmdRun(args []string) int {
 	if cname == "" {
 		cname = compose.OneoffName(c.name, service, slugHex)
 	}
+	var creds []byte
+	if plan.project.Services[service].UseAPISocket {
+		if creds, err = apiSocketCredentials(); err != nil {
+			errorf("%v", err)
+			return 1
+		}
+		if !*detach && creds != nil {
+			// A foreground run boots its container itself, with no created
+			// container to copy them into first.
+			c.warn("service %q: use_api_socket: the docker CLI's credentials are given to detached runs only", service)
+			creds = nil
+		}
+		withAPISocketConfig(&spec, creds)
+	}
 	c.event("Container", cname, "Creating")
 	if *detach {
 		rec, code, err := createContainer(ctx, c.root, &spec, createOptions{name: cname, policy: image.PullMissing})
+		if err == nil {
+			if err = putAPISocketConfig(ctx, c.root, rec, creds); err != nil {
+				code = 1
+			}
+		}
 		if err != nil {
 			errorf("%v", err)
 			return code

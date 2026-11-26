@@ -220,7 +220,21 @@ services:
       - type: npipe
         source: \\.\pipe\openssh-ssh-agent
         target: /run/ssh.sock
+  api:
+    image: docker:cli
+    use_api_socket: true
+  own:
+    image: docker:cli
+    use_api_socket: true
+    volumes: ["//./pipe/docker_engine:/var/run/docker.sock"]
 `}, LoadOptions{})
+	for name, want := range map[string]string{"api": "/var/run/docker.sock", "own": "//./pipe/docker_engine"} {
+		var pr Problems
+		c := Translate(p, p.Services[name], &pr)
+		if err := pr.Err(); err != nil || len(c.Mounts) != 1 || c.Mounts[0].Source != want || c.Mounts[0].Target != "/var/run/docker.sock" {
+			t.Errorf("%s: mounts %+v, %v", name, c.Mounts, err)
+		}
+	}
 	var pr Problems
 	ci := Translate(p, p.Services["ci"], &pr)
 	if err := pr.Err(); err != nil {

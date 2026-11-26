@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -158,6 +159,61 @@ func TestSpecFromCreateBridgeAliases(t *testing.T) {
 	s, _, err = specFromCreate(req)
 	if err != nil || len(s.network.attach) != 1 || s.network.attach[0].name != network.User {
 		t.Fatalf("bridge with an address: %+v, %v", s.network.attach, err)
+	}
+}
+
+// Docker's socket, as Testcontainers' Ryuk, Docker Compose's
+// use_api_socket and Dev Containers' docker-outside-of-docker bind it, and
+// named pipes, are sockets.
+func TestSpecFromCreateSockets(t *testing.T) {
+	req := createRun(t)
+	req.HostConfig.Binds = []string{"//./pipe/runwhp_engine-e2e-1:/var/run/docker.sock", "/var/run/docker.sock:/run/d.sock:rw"}
+	req.HostConfig.Mounts = []mount.Mount{
+		{Type: mount.TypeBind, Source: "/var/run/docker.sock", Target: "/var/run/docker-host.sock"},
+		{Type: mount.TypeNamedPipe, Source: `\\.\pipe\openssh-ssh-agent`, Target: "/run/ssh.sock", ReadOnly: true},
+	}
+	s, _, err := specFromCreate(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, m := range s.mounts {
+		if m.kind == guestspec.MountSocket {
+			got = append(got, m.source+" "+m.pipe+" "+m.target)
+		}
+	}
+	want := []string{
+		`//./pipe/runwhp_engine-e2e-1 \\.\pipe\runwhp_engine-e2e-1 /var/run/docker.sock`,
+		`/var/run/docker.sock  /run/d.sock`,
+		`/var/run/docker.sock  /var/run/docker-host.sock`,
+		`\\.\pipe\openssh-ssh-agent \\.\pipe\openssh-ssh-agent /run/ssh.sock`,
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("sockets\n got %q\nwant %q", got, want)
+	}
+	req.HostConfig.Binds, req.HostConfig.Mounts = nil, []mount.Mount{{Type: mount.TypeNamedPipe, Source: `C:\x`, Target: "/x"}}
+	if _, _, err := specFromCreate(req); err == nil || !strings.Contains(err.Error(), "not a named pipe") {
+		t.Errorf("npipe of a file: %v", err)
+	}
+}
+
+// A volume a mount makes gets the mount's labels, as Docker gives them:
+// Testcontainers' Ryuk finds the volumes of a session by them.
+func TestSpecFromCreateVolumeLabels(t *testing.T) {
+	req := createRun(t)
+	req.HostConfig.Binds = nil
+	req.HostConfig.Mounts = []mount.Mount{{Type: mount.TypeVolume, Source: "tc-data", Target: "/data",
+		VolumeOptions: &mount.VolumeOptions{Labels: map[string]string{"org.testcontainers.sessionId": "s1"}}}}
+	s, _, err := specFromCreate(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := planMounts(s.mounts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.volumes) != 1 || plan.volumes[0].labels["org.testcontainers.sessionId"] != "s1" {
+		t.Errorf("volumes %+v", plan.volumes)
 	}
 }
 

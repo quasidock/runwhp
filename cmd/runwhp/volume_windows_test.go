@@ -5,6 +5,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -53,7 +54,7 @@ func TestParseVolume(t *testing.T) {
 		{`//?/PIPE/Runwhp_Engine-ab12:/s`, mountSpec{kind: socketKind, source: "//?/PIPE/Runwhp_Engine-ab12", pipe: `\\.\pipe\Runwhp_Engine-ab12`, target: "/s"}},
 	} {
 		got, err := parseVolume(tc.in, cwd)
-		if err != nil || got != tc.want {
+		if err != nil || !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("parseVolume(%s) = %+v, %v; want %+v", tc.in, got, err, tc.want)
 		}
 	}
@@ -110,7 +111,7 @@ func TestParseMount(t *testing.T) {
 		{`type=npipe,source=//./pipe/docker_engine,target=/var/run/docker.sock`, mountSpec{kind: socketKind, source: "//./pipe/docker_engine", pipe: `\\.\pipe\docker_engine`, target: "/var/run/docker.sock"}},
 	} {
 		got, err := parseMount(tc.in, cwd)
-		if err != nil || got != tc.want {
+		if err != nil || !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("parseMount(%s) = %+v, %v; want %+v", tc.in, got, err, tc.want)
 		}
 	}
@@ -150,7 +151,7 @@ func TestParseTmpfs(t *testing.T) {
 		"/t:size=50%,nr_inodes=10k":    {kind: tmpfsKind, target: "/t", options: "noexec,nosuid,nodev,mode=1777,size=50%,nr_inodes=10k"},
 	} {
 		got, err := parseTmpfs(in)
-		if err != nil || got != want {
+		if err != nil || !reflect.DeepEqual(got, want) {
 			t.Errorf("parseTmpfs(%s) = %+v, %v; want %+v", in, got, err, want)
 		}
 	}
@@ -186,7 +187,7 @@ func TestParseMounts(t *testing.T) {
 		t.Errorf("shares %+v", plan.shares)
 	}
 	// One disk per volume, however many targets and whatever case.
-	if len(plan.volumes) != 2 || plan.volumes[0] != (volumeUse{name: "cache"}) || plan.volumes[1] != (volumeUse{name: "db", size: "2g"}) {
+	if !reflect.DeepEqual(plan.volumes, []volumeUse{{name: "cache"}, {name: "db", size: "2g"}}) {
 		t.Errorf("volumes %+v", plan.volumes)
 	}
 	if st, err := os.Stat(missing); err != nil || !st.IsDir() {

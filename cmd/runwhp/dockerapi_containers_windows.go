@@ -100,6 +100,9 @@ func (s *apiServer) postContainerCreate(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		return err
 	}
+	// Docker's socket in the container reaches this server, on its own
+	// pipe, whatever other pipes it serves.
+	spec.apiPipe = s.pipe
 	// The image must be here already, the client pulls it; runwhp's kernel
 	// is fetched if it has to be, as run fetches it.
 	if _, err := vmm.ResolveKernel(r.Context(), s.root, "", image.PullMissing); err != nil {
@@ -369,6 +372,9 @@ func mountPointsOf(root string, c *container.Container) []dcontainer.MountPoint 
 			mp.Source = c.RW()
 		case guestspec.MountTmpfs:
 			mp.Type = mount.TypeTmpfs
+		case guestspec.MountSocket:
+			// As Docker shows a bind of its socket: the source as given.
+			mp.Type, mp.Propagation, mp.Source = mount.TypeBind, mount.PropagationRPrivate, m.Source
 		default:
 			continue
 		}
@@ -474,8 +480,11 @@ func (s *apiServer) inspectOf(c *container.Container, size bool) dcontainer.Insp
 		hc.Binds = append(hc.Binds, b)
 	}
 	for _, m := range cfg.Mounts {
-		if m.Kind == guestspec.MountVolume {
+		if m.Kind == guestspec.MountVolume || m.Kind == guestspec.MountSocket {
 			b := m.Name + ":" + m.Target
+			if m.Kind == guestspec.MountSocket {
+				b = m.Source + ":" + m.Target
+			}
 			if m.ReadOnly {
 				b += ":ro"
 			}

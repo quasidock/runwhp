@@ -547,7 +547,7 @@ func resolveSpec(ctx context.Context, root string, s *runSpec, policy image.Poli
 				return nil, err
 			}
 		}
-		v, created, err := volumes.Ensure(u.name, size)
+		v, created, err := volumes.EnsureWith(u.name, size, u.labels)
 		if err != nil {
 			return nil, err
 		}
