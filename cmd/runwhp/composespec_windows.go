@@ -23,7 +23,8 @@ func specOf(c compose.Container, labels map[string]string) (runSpec, error) {
 	s := runSpec{
 		image: c.Image, command: c.Command, entrypoint: c.Entrypoint, entrypointSet: c.EntrypointSet,
 		env: c.Env, workdir: c.WorkingDir, user: c.User, hostname: c.Hostname, interactive: c.StdinOpen, tty: c.TTY,
-		labels: withLabels(c.Labels, labels),
+		labels:    withLabels(c.Labels, labels),
+		lookupEnv: os.LookupEnv,
 	}
 	var err error
 	memory := ""

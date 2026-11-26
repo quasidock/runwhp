@@ -63,9 +63,9 @@ func pauseCommand(name, usage, op string, args []string, stdout io.Writer) int {
 // askPause asks the runwhp running c to pause or unpause it, and gives
 // its answer as Docker words it.
 func askPause(root string, c *container.Container, op string) error {
-	notRunning := fmt.Errorf("container %s is not running", c.ID)
+	notRunning := container.Refuse(container.ErrNotRunning, "container %s is not running", c.ID)
 	if op == container.OpUnpause {
-		notRunning = fmt.Errorf("Container %s is not paused", c.ID)
+		notRunning = container.Refuse(container.ErrNotPaused, "Container %s is not paused", c.ID)
 	}
 	if !c.State.Active() {
 		return notRunning
@@ -79,7 +79,7 @@ func askPause(root string, c *container.Container, op string) error {
 	case err != nil:
 		return fmt.Errorf("container %s: %w", c.Short(), err)
 	case !rep.OK:
-		return errors.New(rep.Error)
+		return container.ReplyError(rep)
 	}
 	return nil
 }

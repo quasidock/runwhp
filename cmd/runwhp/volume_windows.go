@@ -323,6 +323,11 @@ func hostPath(p, cwd string) (string, error) {
 		return filepath.Clean(p), nil
 	case p == "." || p == ".." || strings.HasPrefix(p, `.\`) || strings.HasPrefix(p, "./") ||
 		strings.HasPrefix(p, `..\`) || strings.HasPrefix(p, "../"):
+		if cwd == "" {
+			// The Engine API's, which has no working directory of the
+			// client's to resolve it against.
+			return "", fmt.Errorf("host path %s is relative: give an absolute Windows path, such as C:\\src", p)
+		}
 		return filepath.Join(cwd, p), nil
 	case len(p) >= 2 && p[0] == '/' && isLetter(p[1]) && (len(p) == 2 || p[2] == '/'):
 		return filepath.Clean(strings.ToUpper(p[1:2]) + `:\` + p[min(3, len(p)):]), nil

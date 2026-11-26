@@ -98,7 +98,7 @@ func cmdAttach(args []string) int {
 // the container then, so that none of its output is missed.
 func attachContainer(store *container.Store, c *container.Container, o attachOptions, started func() error) (int, error) {
 	const fail = 1
-	root, _ := storeRoot()
+	root := store.Root()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	conn, err := container.Dial(ctx, root, c.ID)
 	cancel()

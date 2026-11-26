@@ -95,7 +95,7 @@ func cmdList(args []string, stdout io.Writer) int {
 	case format == "json":
 		out := make([]containerState, 0, len(cs))
 		for _, c := range cs {
-			out = append(out, withNetworks(stateOf(c), c))
+			out = append(out, withNetworks(store.Root(), stateOf(c), c))
 		}
 		printJSON(stdout, out)
 	default:
@@ -132,7 +132,7 @@ func cmdState(args []string, stdout io.Writer) int {
 		errorf("%v", err)
 		return 1
 	}
-	printJSON(stdout, withNetworks(stateOf(c), c))
+	printJSON(stdout, withNetworks(store.Root(), stateOf(c), c))
 	return 0
 }
 
@@ -283,10 +283,10 @@ func deleteContainer(store *container.Store, ref string, force bool) error {
 		// A created container's process never started, so it is deleted
 		// as runc deletes one, without being forced.
 		if !force && c.State.Paused {
-			return fmt.Errorf("cannot remove container %q: container is paused and must be unpaused first", ref)
+			return container.Refuse(container.ErrPaused, "cannot remove container %q: container is paused and must be unpaused first", ref)
 		}
 		if !force && c.State.Status != container.Created {
-			return fmt.Errorf("container %s is %s: stop it first, or delete it with -f", c.Short(), c.State.Status)
+			return container.Refuse(container.ErrRunning, "container %s is %s: stop it first, or delete it with -f", c.Short(), c.State.Status)
 		}
 		if err := killAndWait(store, c); err != nil {
 			return err
@@ -298,7 +298,7 @@ func deleteContainer(store *container.Store, ref string, force bool) error {
 	}
 	err = store.Remove(c)
 	if errors.Is(err, container.ErrRunning) {
-		return fmt.Errorf("container %s is running: stop it first, or delete it with -f", c.Short())
+		return container.Refuse(container.ErrRunning, "container %s is running: stop it first, or delete it with -f", c.Short())
 	}
 	return err
 }
@@ -516,13 +516,9 @@ type networkState struct {
 }
 
 // withNetworks adds the container's networks to its state.
-func withNetworks(s containerState, c *container.Container) containerState {
+func withNetworks(root string, s containerState, c *container.Container) containerState {
 	s.NetworkMode = c.Config.Mode()
 	if len(c.Config.Networks) == 0 {
-		return s
-	}
-	root, err := storeRoot()
-	if err != nil {
 		return s
 	}
 	store := network.Open(root)

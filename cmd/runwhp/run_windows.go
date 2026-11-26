@@ -335,12 +335,15 @@ type runSpec struct {
 	// it removes it.
 	entrypoint    []string
 	entrypointSet bool
-	env           []string // KEY=VALUE, or KEY to copy from this process's environment
-	workdir       string
-	user          string
-	hostname      string // empty: the start of the container's ID
-	interactive   bool
-	tty           bool
+	env           []string // KEY=VALUE, or KEY to copy from lookupEnv
+	// lookupEnv resolves a bare KEY in env: os.LookupEnv for run's and
+	// compose's; nil, for the Engine API's, drops it.
+	lookupEnv   func(string) (string, bool)
+	workdir     string
+	user        string
+	hostname    string // empty: the start of the container's ID
+	interactive bool
+	tty         bool
 
 	memory      uint64
 	cpus        int
@@ -372,6 +375,7 @@ func parseRunOptions(o *runOptions, entrypointSet bool, args []string) (runSpec,
 		interactive: o.interactive, tty: o.tty, rm: o.rm,
 		kernel: o.kernel, init: o.init, layers: o.layers, modules: o.modules, debug: o.debug,
 		entrypointSet: entrypointSet,
+		lookupEnv:     os.LookupEnv,
 	}
 	if entrypointSet && o.entrypoint != "" {
 		s.entrypoint = []string{o.entrypoint}
@@ -456,7 +460,7 @@ func resolveSpec(ctx context.Context, root string, s *runSpec, policy image.Poli
 	// from ext4 files given with --layer.
 	overrides := image.Overrides{
 		Entrypoint: s.entrypoint, EntrypointSet: s.entrypointSet, Cmd: s.command,
-		Env: s.env, Workdir: s.workdir, User: s.user, LookupEnv: os.LookupEnv,
+		Env: s.env, Workdir: s.workdir, User: s.user, LookupEnv: s.lookupEnv,
 	}
 	var process image.Process
 	if len(s.layers) > 0 {

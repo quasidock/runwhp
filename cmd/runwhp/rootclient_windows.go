@@ -129,5 +129,5 @@ func busyOrStarted(store *container.Store, c *container.Container) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("container %s is busy: a cp, export, diff or commit is using it", c.Short())
+	return container.Refuse(container.ErrBusy, "container %s is busy: a cp, export, diff or commit is using it", c.Short())
 }

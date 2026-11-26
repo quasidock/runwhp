@@ -22,7 +22,6 @@ import (
 var (
 	ErrNotFound  = errors.New("no such container")
 	ErrAmbiguous = errors.New("more than one container matches")
-	ErrRunning   = errors.New("container is running")
 	ErrNameInUse = errors.New("name is already in use")
 )
 
@@ -44,6 +43,9 @@ type Store struct {
 }
 
 func Open(root string) *Store { return &Store{root: root} }
+
+// Root is the store's root, as Open was given it.
+func (s *Store) Root() string { return s.root }
 
 // Container is one container's record, as read from the store.
 type Container struct {

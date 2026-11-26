@@ -113,6 +113,9 @@ type createOptions struct {
 	ownIO bool
 	// progress is where pulls report; nil reports nothing.
 	progress io.Writer
+	// diag is where the kernel's last lines go when the container fails to
+	// boot; nil is vmm.Diag.
+	diag io.Writer
 }
 
 // createContainer makes a container and has a background runwhp boot it,
@@ -120,9 +123,13 @@ type createOptions struct {
 // give if it fails.
 func createContainer(ctx context.Context, root string, spec *runSpec, co createOptions) (*container.Container, int, error) {
 	const fail = guestspec.ExitRuntime
+	diag := co.diag
+	if diag == nil {
+		diag = vmm.Diag
+	}
 	logf := func(string, ...any) {}
 	if spec.debug {
-		logf = func(format string, a ...any) { fmt.Fprintf(os.Stderr, "[vmm] "+format+"\n", a...) }
+		logf = func(format string, a ...any) { fmt.Fprintf(diag, "[vmm] "+format+"\n", a...) }
 	}
 	sweepStore(root, logf)
 	// A prune waits until the container is recorded, and keeps its layers.
@@ -151,8 +158,8 @@ func createContainer(ctx context.Context, root string, spec *runSpec, co createO
 		return nil, fail, err
 	}
 	if !rep.OK {
-		printConsole(rep.Console)
-		return nil, replyCode(rep), errors.New(rep.Error)
+		printConsoleTo(diag, rep.Console)
+		return nil, replyCode(rep), container.ReplyError(rep)
 	}
 	return rec, 0, nil
 }
@@ -190,11 +197,13 @@ func replyCode(rep container.Reply) int {
 	return guestspec.ExitRuntime
 }
 
-func printConsole(lines []string) {
+func printConsole(lines []string) { printConsoleTo(os.Stderr, lines) }
+
+func printConsoleTo(w io.Writer, lines []string) {
 	if len(lines) == 0 {
 		return
 	}
-	vmm.PrintConsole(os.Stderr, lines)
+	vmm.PrintConsole(w, lines)
 }
 
 const startUsage = `Usage: runwhp start [-a [-i]] CONTAINER...
@@ -270,13 +279,13 @@ func startContainerIO(ctx context.Context, store *container.Store, ref string, o
 	if err != nil {
 		return err
 	}
-	root, _ := storeRoot()
+	root := store.Root()
 	var rep container.Reply
 	switch c.State.Status {
 	case container.Running, container.Restarting:
 		return nil // a restarting one starts again by itself
 	case container.Creating:
-		return fmt.Errorf("container %s is still being created", c.Short())
+		return container.Refuse(container.ErrBusy, "container %s is still being created", c.Short())
 	case container.Created:
 		if rep, err = container.Ask(ctx, root, c.ID, container.Request{Op: container.OpStart}); err != nil {
 			return fmt.Errorf("starting container %s: %w", c.Short(), err)
@@ -301,7 +310,7 @@ func startContainerIO(ctx context.Context, store *container.Store, ref string, o
 	}
 	if !rep.OK {
 		printConsole(rep.Console)
-		return fmt.Errorf("container %s: %s", c.Short(), rep.Error)
+		return fmt.Errorf("container %s: %w", c.Short(), container.ReplyError(rep))
 	}
 	return nil
 }
@@ -318,7 +327,7 @@ func startAttached(ctx context.Context, done func(), store *container.Store, ref
 	if err != nil {
 		return fail, err
 	}
-	root, _ := storeRoot()
+	root := store.Root()
 	start := func() error {
 		rep, err := container.Ask(context.Background(), root, c.ID, container.Request{Op: container.OpStart})
 		if err != nil {
@@ -405,8 +414,7 @@ func waitContainer(ctx context.Context, store *container.Store, ref string) (int
 	if !c.State.Active() {
 		return c.State.ExitCode, nil
 	}
-	root, _ := storeRoot()
-	rep, err := container.Ask(ctx, root, c.ID, container.Request{Op: container.OpWait})
+	rep, err := container.Ask(ctx, store.Root(), c.ID, container.Request{Op: container.OpWait})
 	if ctx.Err() != nil {
 		return 0, ctx.Err()
 	}
@@ -428,8 +436,10 @@ func waitContainer(ctx context.Context, store *container.Store, ref string) (int
 	return c.State.ExitCode, nil
 }
 
+// errFromReply is ErrRunning for a reply that refused because the
+// container is running, or held, and nil otherwise.
 func errFromReply(rep container.Reply) error {
-	if strings.Contains(rep.Error, container.ErrRunning.Error()) {
+	if err := container.ReplyError(rep); errors.Is(err, container.ErrRunning) {
 		return container.ErrRunning
 	}
 	return nil
@@ -470,30 +480,31 @@ func cmdKill(args []string) int {
 		errorf("%v", err)
 		return 1
 	}
-	if err := ask(c, container.Request{Op: container.OpKill, Signal: sig, All: all}, 10*time.Second); err != nil {
+	if err := ask(context.Background(), store, c, container.Request{Op: container.OpKill, Signal: sig, All: all}, 10*time.Second); err != nil {
 		errorf("%v", err)
 		return 1
 	}
 	return 0
 }
 
-// ask sends a request to the runwhp running c.
-func ask(c *container.Container, req container.Request, timeout time.Duration) error {
+// ask sends a request to the runwhp running c, and waits for its answer
+// until ctx ends or timeout passes.
+func ask(ctx context.Context, store *container.Store, c *container.Container, req container.Request, timeout time.Duration) error {
+	notRunning := container.Refuse(container.ErrNotRunning, "container %s is not running", c.Short())
 	if !c.State.Active() {
-		return fmt.Errorf("container %s is not running", c.Short())
+		return notRunning
 	}
-	root, _ := storeRoot()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	rep, err := container.Ask(ctx, root, c.ID, req)
+	rep, err := container.Ask(ctx, store.Root(), c.ID, req)
 	if errors.Is(err, container.ErrNoRunwhp) {
-		return fmt.Errorf("container %s is not running", c.Short())
+		return notRunning
 	}
 	if err != nil {
 		return fmt.Errorf("container %s: %w", c.Short(), err)
 	}
-	if !rep.OK {
-		return fmt.Errorf("container %s: %s", c.Short(), rep.Error)
+	if err := container.ReplyError(rep); err != nil {
+		return fmt.Errorf("container %s: %w", c.Short(), err)
 	}
 	return nil
 }
@@ -540,6 +551,12 @@ func cmdStop(args []string, stdout io.Writer) int {
 
 // stopContainer stops a container, and waits for its runwhp to let it go.
 func stopContainer(store *container.Store, ref string, timeout time.Duration) error {
+	return stopContainerWith(context.Background(), store, ref, timeout, 0)
+}
+
+// stopContainerWith is stopContainer, sending signal sig, not the
+// container's stop signal, unless sig is 0.
+func stopContainerWith(ctx context.Context, store *container.Store, ref string, timeout time.Duration, sig int) error {
 	c, err := store.Resolve(ref)
 	if err != nil {
 		return err
@@ -550,8 +567,8 @@ func stopContainer(store *container.Store, ref string, timeout time.Duration) er
 	if timeout < 0 {
 		timeout = stopTimeoutOf(c.Config)
 	}
-	err = ask(c, container.Request{Op: container.OpStop, Timeout: timeout.Seconds()}, timeout+vmm.KillGrace+30*time.Second)
-	if err != nil && !strings.Contains(err.Error(), "not running") {
+	err = ask(ctx, store, c, container.Request{Op: container.OpStop, Signal: sig, Timeout: timeout.Seconds()}, timeout+vmm.KillGrace+30*time.Second)
+	if err != nil && !errors.Is(err, container.ErrNotRunning) {
 		return err
 	}
 	return waitUnlocked(c, 10*time.Second)
@@ -728,8 +745,8 @@ func printLogs(c *container.Container, f container.LogFilter, follow bool, stdou
 // killAndWait kills a container and waits for its runwhp to let it go,
 // ending that runwhp itself if it does not.
 func killAndWait(store *container.Store, c *container.Container) error {
-	err := ask(c, container.Request{Op: container.OpKill, Signal: guestspec.SIGKILL}, 10*time.Second)
-	if err != nil && !strings.Contains(err.Error(), "not running") {
+	err := ask(context.Background(), store, c, container.Request{Op: container.OpKill, Signal: guestspec.SIGKILL}, 10*time.Second)
+	if err != nil && !errors.Is(err, container.ErrNotRunning) {
 		return err
 	}
 	if waitUnlocked(c, vmm.KillGrace+5*time.Second) == nil {

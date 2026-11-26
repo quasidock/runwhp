@@ -1080,7 +1080,7 @@ func (c *composeCtx) cmdLifecycle(cmd string, args []string) int {
 		cs = running
 		return each(func(ct *container.Container) error {
 			c.event("Container", ct.Name, "Killing")
-			if err := ask(ct, container.Request{Op: container.OpKill, Signal: sig}, 10*time.Second); err != nil {
+			if err := ask(context.Background(), c.store, ct, container.Request{Op: container.OpKill, Signal: sig}, 10*time.Second); err != nil {
 				return err
 			}
 			c.event("Container", ct.Name, "Killed")
@@ -1092,7 +1092,7 @@ func (c *composeCtx) cmdLifecycle(cmd string, args []string) int {
 			op, done = container.OpUnpause, "Unpaused"
 		}
 		return each(func(ct *container.Container) error {
-			if err := ask(ct, container.Request{Op: op}, 30*time.Second); err != nil {
+			if err := ask(context.Background(), c.store, ct, container.Request{Op: op}, 30*time.Second); err != nil {
 				return err
 			}
 			c.event("Container", ct.Name, done)
