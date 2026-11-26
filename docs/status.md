@@ -1,5 +1,21 @@
 # Status
 
+- **Iteration 19** (2026-11-26): compose. `runwhp compose` runs a
+  compose.yaml project as Docker Compose does, read with compose-go, the
+  library Docker Compose reads it with: `up` builds and pulls what is
+  missing, makes the project's networks and volumes, creates the services'
+  containers in dependency order, several at once, and starts each once what
+  it depends on is started, healthy or completed successfully, following
+  their output until they stop or Ctrl+C stops them; `down`, `ps`, `logs`,
+  `exec`, `run`, `build`, `push` and the rest work as Docker Compose's, with
+  its labels, names, progress lines and texts. Each container runs in a
+  runwhp of its own, as `run -d` runs one; what runwhp cannot do as a
+  service asks is refused or warned of before anything is made. Containers
+  get healthchecks, as Docker's daemon runs them, labels, and Docker's
+  `list` filters; `--stop-signal` and `--stop-timeout` join run's flags.
+  compose runs in `runwhp-compose.exe`, so that no other runwhp pays
+  compose-go's start-up. See [Compose](../README.md#compose) and
+  [Iteration 19 results](#iteration-19-results).
 - **Iteration 18** (2026-11-26): containers reach each other. `network
   create` makes a network as Docker's user-defined ones are, and containers
   run on it with `--network NAME` reach each other by name, alias, ID or
@@ -1599,3 +1615,84 @@ The new tests cover:
 
 The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
 the WSL kernel with its vsock modules passed with `--module`.
+
+## Iteration 19 results
+
+Measured on the test machine with runwhp's kernel, from Git Bash, with
+the store on NTFS (`C:`), over three to six runs. "Iteration 18" is that
+iteration's build, run in turn with this one; Docker is Docker 29.10 with
+Docker Compose 5.8 in WSL on the same machine.
+
+Runs cost what they did: labels, healthchecks and the typed spec add
+nothing measurable, and runwhp.exe starts as fast as before, compose-go
+being linked into `runwhp-compose.exe` alone (see [Findings](findings.md)):
+
+| Measurement | Iteration 18 | Iteration 19 |
+| --- | --- | --- |
+| `run --rm alpine:3.20 true`, `-m 512m` | 201-210 ms | 204-212 ms |
+| the same, default memory | 272-277 ms | 271-284 ms |
+| `run -d -m 512m alpine:3.20 sleep 1d` | 218-231 ms | 218-241 ms |
+| `delete -f` of it | 217-222 ms | 219-231 ms |
+| `runwhp help` | 36-41 ms | 39-42 ms |
+
+A project of alpine services, each `sleep 1d` with `mem_limit: 512m`,
+against the same containers made with `run -d` one after another, and
+against Docker Compose:
+
+| Measurement | runwhp compose | `run -d` one after another | Docker Compose |
+| --- | --- | --- | --- |
+| `up -d`, 1 service | 323-341 ms | 244-258 ms | 432-473 ms, and 872 ms once |
+| `up -d`, 3 services | 403-427 ms | 598-611 ms | 974-987 ms |
+| `up -d`, 5 services | 468-513 ms | 963-970 ms | 1473-1541 ms |
+| `down -t 0`, 1 service | 167-275 ms | | 589-676 ms |
+| `down -t 0`, 5 services | 210-320 ms | | 1174-1263 ms |
+| `up -d --wait`, a dependency healthy after 1 s | 1512-1545 ms | | 2294-2834 ms |
+
+compose creates and starts the containers of services that wait for
+nothing at once, each booting in a runwhp of its own, so 5 services come
+up in half the time 5 `run -d` take; a single one pays for loading the
+project and starting `runwhp-compose.exe`, about 80 ms.
+
+A healthcheck of `true` takes 1.8-3.4 ms in the container's runwhp, by
+its results' times, and about 18 ms of its CPU, the guest's included.
+Docker's example WordPress and MariaDB project ran unchanged: `up -d`
+took 45 s, pulling both images, and WordPress's installer answered once
+MariaDB was ready.
+
+runwhp.exe is 22.4 MB, 0.1 MB more than in iteration 18, and
+runwhp-compose.exe 25.7 MB.
+
+The new tests cover:
+
+- **The run spec:** run's flags parsed into a spec before the store is
+  touched, entrypoints as lists, networks and mounts parsed apart from
+  their planning; compose's containers and builds mapped onto the same
+  spec and request, with run's checks.
+- **Labels and filters:** `--label` and `--label-file` as Docker's client
+  reads them, over the image's; Docker's container filters, a key's values
+  alternatives and labels all required, with its texts for bad ones;
+  network and volume filters; labelled networks and volumes on NTFS and,
+  through `RUNWHP_TEST_DIR`, on ReFS.
+- **Healthchecks:** Docker 29's sequence through the start period, retries
+  and recovery, the intervals, output cut to 4096 bytes, five results kept;
+  the supervisor's loop with a fake check, paused, ended with its boot, and
+  started again; flags over an image's HEALTHCHECK, with Docker's checks.
+- **compose:** loading with profiles, `.env`, `--env-file`, several files,
+  names and Windows paths; every service key runwhp takes, refuses or
+  warns of; volumes services would share; the config hash; the prefixed
+  output.
+- **End to end:** labels, filters and commit; healthchecks healthy,
+  unhealthy, timed out, paused, restarted and from an image, and
+  `--stop-signal` and `--stop-timeout`; a project with a healthy database,
+  an app built for it and a web server reached from the host and by
+  alias, taken down with its volumes and image; recreating on a change,
+  `--force-recreate`, `--no-recreate` and orphans; scaling up and down,
+  every replica found by name; attached `up` with
+  `--abort-on-container-exit`, `--exit-code-from` and Ctrl+C;
+  `depends_on` conditions met and failed; the other commands, push to a
+  registry, and `-p` without a file; and the refusals, before anything is
+  made.
+
+The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
+the WSL kernel with its vsock modules passed with `--module`; compose's
+containers boot runwhp's kernel in each.

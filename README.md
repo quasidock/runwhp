@@ -23,9 +23,11 @@ loaded from archives Docker takes, with the same IDs. A container's files
 can be copied in and out, running or stopped, exported, listed as its
 changes and committed to an image, and a container paused. Images are
 built from Dockerfiles, as BuildKit builds them, each step in a guest of
-its own, and pushed to registries. Stock nerdctl runs Linux containers on
-it too, through a containerd of the user's own and runwhp's containerd
-shim, unelevated.
+its own, and pushed to registries. `runwhp compose` runs compose.yaml
+projects as Docker Compose does, each container in a runwhp of its own,
+with Docker's labels, healthchecks and filters. Stock nerdctl runs Linux
+containers on it too, through a containerd of the user's own and runwhp's
+containerd shim, unelevated.
 
 See [status](docs/status.md) for details.
 
@@ -69,8 +71,9 @@ from `ghcr.io/quasidock/runwhp-kernel` (about 8 MB). WSL is not needed.
 
 ## Usage
 
-Build, from the repository root in PowerShell. This produces `out\runwhp.exe`
-and the guest init `out\runwhp-init`, which must stay next to it:
+Build, from the repository root in PowerShell. This produces `out\runwhp.exe`,
+`out\runwhp-compose.exe`, which runs `runwhp compose`, and the guest init
+`out\runwhp-init`, which must stay next to them:
 
 ```powershell
 .\build.ps1
@@ -133,6 +136,16 @@ Images in and out of the store:
 .\out\runwhp.exe push registry.example.com/mine/app:1
 ```
 
+A project of several containers, from a compose.yaml:
+
+```powershell
+.\out\runwhp.exe compose up -d --wait
+.\out\runwhp.exe compose ps
+.\out\runwhp.exe compose logs -f web
+.\out\runwhp.exe compose exec db psql -U postgres
+.\out\runwhp.exe compose down -v
+```
+
 A container's files:
 
 ```powershell
@@ -153,6 +166,13 @@ A container's files:
 | `--log-driver` | `local` | `local` keeps the container's output in its log; `none` keeps none |
 | `--log-opt` | `max-size=20m`, `max-file=5` | `max-size=SIZE` rotates the log as a file would grow past SIZE, `-1` never; `max-file=N` keeps N files, the one being written included; repeatable. See **Output** under [Containers](#containers) |
 | `--name` | none | Name the container, as well as its 64-digit ID. Names are case-insensitive |
+| `-l`, `--label` | the image's | `KEY=VALUE`, or `KEY` for an empty value: a label on the container, over the image's; repeatable. See **Labels and filters** under [Containers](#containers) |
+| `--label-file` | | A file of `KEY=VALUE` lines, read as Docker's client reads one; repeatable |
+| `--health-cmd` | the image's `HEALTHCHECK` | A command `/bin/sh` runs in the container to check its health; see **Healthchecks** under [Containers](#containers) |
+| `--health-interval`, `--health-timeout`, `--health-start-period`, `--health-start-interval`, `--health-retries` | `30s`, `30s`, `0s`, `5s`, `3` | When and how long checks run, and how many failures in a row make the container unhealthy; durations such as `500ms` or `1m` |
+| `--no-healthcheck` | off | Run no healthcheck, though the image has one |
+| `--stop-signal` | the image's, else SIGTERM | The signal `stop` sends first |
+| `--stop-timeout` | `10` | Seconds `stop` and `restart` wait before SIGKILL, unless `-t` says |
 | `-i`, `--interactive` | off | Pass stdin to the container. Without it, the container reads `/dev/null`. In the background, without a file or pipe for stdin, the container's input is open to `attach` |
 | `-t`, `--tty` | off | Run the container on a pseudo-terminal of the console's size, with stderr merged into stdout. With `-i`, stdin must be a console, and keys go to the container raw. `-it` works as a shorthand |
 | `--entrypoint` | image's | Replace the entrypoint; `""` removes it. Also drops the image's command, as in Docker |
@@ -221,13 +241,13 @@ its ID, its name, or any unique prefix of its ID.
 | `start [-a [-i]] CONTAINER...` | Start a created container's process, or a stopped container again, in a new VM on the writable layer it left. A running one is left as it is. `-a` attaches to it from its first byte of output, `-i` to its input too; see **Attaching** below |
 | `attach [--no-stdin] [--sig-proxy=false] [--detach-keys KEYS] CONTAINER` | Show a running container's output as it comes, and pass it input if it takes it; exit with its exit code, or 0 on detaching |
 | `wait CONTAINER...` | Wait for containers to stop, and print their exit codes |
-| `stop [-t SECONDS] CONTAINER...` | Send the image's stop signal, SIGTERM unless it names another, then SIGKILL after the timeout, 10 s by default |
+| `stop [-t SECONDS] CONTAINER...` | Send the container's stop signal, SIGTERM unless `--stop-signal` or the image names another, then SIGKILL after the timeout: its `--stop-timeout`, or 10 s |
 | `restart [-t SECONDS] CONTAINER...` | `stop`, then `start` |
 | `pause CONTAINER...`, `unpause CONTAINER...` | Freeze every process in a running container, and thaw them; see **Pausing** below |
 | `kill [-a] CONTAINER [SIGNAL]` | Send a signal, by name or number, to the container's process, or with `-a` to every process in it. The default is SIGTERM, as with runc; Docker's `kill` sends SIGKILL. A created container ends without starting |
 | `exec [-i] [-t] [-d] [-e] [-w] [-u] CONTAINER COMMAND...` | Run another command in a running container |
 | `logs [-f] [-t] [-n N] [--since TIME] [--until TIME] CONTAINER` | Print a container's output as its log holds it: `-t` with the time each line was written, `-n` the last N lines, `--since` and `--until` the lines written in a window, given as a date and time, Unix seconds, or a duration before now such as `10m` |
-| `list [-q] [--format table\|json]` | List containers, newest first |
+| `list [-q] [-f FILTER]... [--format table\|json]` | List containers, newest first, or those that match Docker's filters; see **Labels and filters** below |
 | `state CONTAINER` | Describe a container as JSON: runc's fields (`ociVersion`, `id`, `status`, `pid`, `bundle`), then runwhp's own |
 | `stats [--no-stream] [--format table\|json] [CONTAINER...]` | Show what running containers use, every second until Ctrl+C, or once with `--no-stream`; see [Memory](#memory) |
 | `delete [-f] CONTAINER...` | Remove containers, with their writable layers, logs and anonymous volumes. A running one needs `-f`, which kills it first |
@@ -364,6 +384,46 @@ the log, its `-i` input open to `attach`. A foreground run interrupted
 with Ctrl+C, or ended with its console, is not handed over. Input from a
 file or pipe goes to the first run only.
 
+**Healthchecks.** The runwhp running a container checks its health as
+Docker's daemon does: the image's `HEALTHCHECK`, or `--health-cmd` and the
+other `--health-*` flags over it, run in the container through the same
+server `exec` uses. The first check comes an interval after the process
+starts; while the container is `starting` within its start period, checks
+come every start interval, and their failures do not count; after that,
+every interval. A check that exits 0 makes the container `healthy`; as many
+failures in a row as the retries make it `unhealthy`; a check that outruns
+its timeout is killed and fails, with Docker's "Health check exceeded
+timeout". `state` shows the check, and its health with the last five
+results, each with up to 4096 bytes of output; `list` shows
+`Up 3 minutes (healthy)`, `(unhealthy)` or `(health: starting)`, and
+filters with `-f health=`. A paused container is not checked. A container
+started again starts again as `starting`, keeping its last results, and a
+stopped one keeps its last health. Being unhealthy restarts nothing, as with
+Docker. A check costs the container's runwhp about 18 ms of CPU on the test
+machine, guest included. Like `exec`, it needs vsock in the guest's kernel,
+which runwhp's has.
+
+```powershell
+.\out\runwhp.exe run -d --name db --health-cmd 'pg_isready -U postgres' --health-interval 2s -e POSTGRES_PASSWORD=pw postgres:17
+.\out\runwhp.exe list -f health=healthy
+```
+
+**Labels and filters.** A container has its image's labels, with
+`--label-file`'s and `--label`'s over them, as Docker gives it; `state`
+shows them, and `commit` writes them into the image. `list -f` takes
+Docker's container filters: `id` (a prefix), `name` (a regular
+expression), `label` (`KEY` or `KEY=VALUE`), `status` (`created`,
+`running`, `paused`, `restarting`, `exited`), `health` (`starting`,
+`healthy`, `unhealthy`, `none`), `network`, `ancestor` (the image, by name
+or ID), `exited` (an exit code) and `volume`. A key given more than once
+matches any of its values, except `label`, which must match every one, and
+every key given must match.
+
+```powershell
+.\out\runwhp.exe run -d --label tier=back --name api mine/api:1
+.\out\runwhp.exe list -f label=tier=back -f status=running
+```
+
 **Removing.** `--rm` removes a container when it stops, however it stops,
 and such a container cannot be started again, nor given `--restart`. Other containers stay until
 `delete`; in Git Bash, `runwhp delete $(runwhp list -q)` removes every one
@@ -417,8 +477,8 @@ other, by name, alias or address, as on a Docker network:
 
 | Command | |
 | --- | --- |
-| `network create NAME` | Make a network, and print its ID. Its subnet is runwhp's to choose |
-| `network ls [-q] [--no-trunc]` | List networks: the user's, and the built-in `user` and `none` |
+| `network create [--label K=V]... NAME` | Make a network, and print its ID. Its subnet is runwhp's to choose |
+| `network ls [-q] [--no-trunc] [-f FILTER]...` | List networks: the user's, and the built-in `user` and `none`; or those that match `name`, `id`, `label`, `driver` or `type` (`custom` or `builtin`) |
 | `network inspect NETWORK...` | Describe networks as JSON, in the shape of `docker network inspect`, with the containers running on them |
 | `network rm NETWORK...` | Remove networks no container is running on |
 | `network prune [-f]` | Remove every network no container is running on; `system prune` does too |
@@ -704,7 +764,9 @@ do, whether it is running, created, paused or stopped.
 
 `-v NAME:PATH` mounts the named volume `NAME`, making it if there is none.
 `runwhp volume create NAME` makes one ahead of time, of another size than
-the default 64 GiB with `--opt size=`. A volume is a directory in the
+the default 64 GiB with `--opt size=`, labelled with `--label`, which
+`volume inspect` shows and `volume ls -f label=` filters on, as `name`,
+`driver` and `dangling` do. A volume is a directory in the
 store's `volumes` directory holding a sparse ext4 disk image, `disk.ext4`,
 which the container gets as a disk of its own.
 
@@ -962,6 +1024,103 @@ Get-Content Dockerfile | .\out\runwhp.exe build -t app:stdin -
 | --- | --- |
 | `build [flags] PATH\|-` | Build an image. `image build` too |
 | `builder prune [-a] [-f]` | Remove the build cache no image uses, or all of it and its cache mounts |
+
+### Compose
+
+`runwhp compose` runs a compose.yaml project as Docker Compose does:
+
+```powershell
+.\out\runwhp.exe compose up -d --wait
+.\out\runwhp.exe compose ps
+.\out\runwhp.exe compose logs -f
+.\out\runwhp.exe compose exec web sh
+.\out\runwhp.exe compose run --rm app npm test
+.\out\runwhp.exe compose down -v
+```
+
+```yaml
+services:
+  db:
+    image: postgres:17
+    environment: {POSTGRES_PASSWORD: pw}
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 2s
+    volumes: [pgdata:/var/lib/postgresql/data]
+  app:
+    build: ./app
+    depends_on: {db: {condition: service_healthy}}
+    environment: {DATABASE_URL: "postgres://postgres:pw@db/postgres"}
+  web:
+    image: nginx:alpine
+    ports: ["8080:80"]
+    depends_on: [app]
+volumes:
+  pgdata: {}
+```
+
+**The model.** There is no daemon. `runwhp compose` runs
+`runwhp-compose.exe`, built from the same code with compose-go, whose
+dependencies take some 8 ms to start that no other runwhp process should
+pay, as Docker's CLI runs its compose plugin. Each container runs in a
+runwhp.exe of its own in the background, as `run -d` runs one, and `compose` finds the
+project's containers, networks and volumes again by their labels, Docker
+Compose's own: `com.docker.compose.project`, `.service`,
+`.container-number`, `.config-hash` and the rest, which `list -f label=`
+and `state` show. Containers are named `PROJECT-SERVICE-N`, networks
+`PROJECT_NAME`, volumes `PROJECT_NAME`, and built images `PROJECT-SERVICE`,
+as Docker Compose names them. A service's containers join the project's
+networks with the service's name as an alias, so they reach each other by
+it, through the networks of [User-defined networks](#user-defined-networks);
+a scaled service's name resolves to every replica.
+
+compose-go, the library Docker Compose reads compose files with, reads the
+project: the compose.yaml, compose.yml, docker-compose.yaml or
+docker-compose.yml in this directory or the nearest above it, or `-f`'s or
+`COMPOSE_FILE`'s, merged; `.env` or `--env-file`; interpolation, `extends`,
+`include` and profiles (`--profile`, `COMPOSE_PROFILES`). The project's name
+is `-p`'s, `COMPOSE_PROJECT_NAME`'s, the files' `name:`, or the directory's,
+lowercased.
+
+| Command | |
+| --- | --- |
+| `up [-d] [--build] [--no-build] [--pull P] [--force-recreate] [--no-recreate] [--no-deps] [--no-start] [--remove-orphans] [--scale S=N]... [--wait] [--wait-timeout S] [--abort-on-container-exit] [--exit-code-from S] [-t S] [--no-log-prefix] [--no-color] [--timestamps] [SERVICE...]` | Build and pull what is missing, make the networks and volumes, create each service's containers in dependency order, and start them, each once what it `depends_on` is started, healthy or completed successfully. Without `-d`, follow their output, `NAME  \| line`, until they stop or Ctrl+C stops them, a second Ctrl+C killing them |
+| `down [-v] [--rmi local\|all] [--remove-orphans] [-t S]` | Stop the containers, dependents first, and remove them and the networks the project made; `-v` its volumes too, `--rmi` its images |
+| `create`, `start`, `stop [-t S]`, `restart [-t S]`, `kill [-s SIG]`, `pause`, `unpause`, `rm [-f] [-s]` | As their Docker Compose namesakes, on the services named or all |
+| `ps [-a] [-q] [--services] [--status S] [--format table\|json] [SERVICE...]` | List the project's containers, running ones without `-a` |
+| `logs [-f] [-t] [-n N] [--since T] [--until T] [--index N] [--no-color] [--no-log-prefix] [SERVICE...]` | Print their output, each line after its container's name |
+| `exec [-d] [-T] [-e] [-u] [-w] [--index N] SERVICE COMMAND...` | Run a command in a service's running container, with a terminal when stdin is a console, unless `-T` |
+| `run [--rm] [-d] [-T] [--no-deps] [--build] [--name N] [--entrypoint E] [-e] [-l] [-u] [-w] [-v] [-p] [-P] SERVICE [COMMAND...]` | Start what the service depends on, then run a one-off container of it, `PROJECT-SERVICE-run-HEX`, in the foreground, or in the background with `-d` |
+| `build [--no-cache] [--pull] [SERVICE...]` | Build the images of services with a `build:` section, one after another, as `build` builds them |
+| `pull [SERVICE...]`, `push [SERVICE...]` | Pull the services' images, four at a time; push those built for them |
+| `config [-q] [--services] [--volumes] [--networks] [--images] [--format yaml\|json]` | Print the project as compose-go reads it |
+| `images`, `port SERVICE PORT`, `ls [-a] [-q]`, `version` | As Docker Compose's |
+
+Without a compose file, `-p NAME` lets `ps`, `logs`, `start`, `stop`,
+`restart`, `kill`, `pause`, `unpause`, `rm` and `down` work on a project's
+containers by their labels. Progress goes to stderr as Docker Compose writes
+it when its output is not a console, a line each:
+` Container app-web-1  Started `.
+
+**Changes.** `up` makes again a container whose service changed, as the
+`config-hash` label tells, or whose image did, and leaves the others, as
+Docker Compose does; `--force-recreate` and `--no-recreate` say otherwise.
+A container made again is stopped first, then renamed aside, made anew and
+removed, since a runwhp volume and address are one VM's at a time; Docker
+Compose makes the new one first. Containers of services the project no
+longer has are warned of, and `--remove-orphans` removes them.
+
+**What a service may ask for.**
+
+| | |
+| --- | --- |
+| Taken as `run` takes it | `image`, `build`, `command`, `entrypoint`, `environment`, `env_file`, `ports` (TCP, with a host port, on 127.0.0.1 unless an address is given, as `-p`), `extra_hosts`, `networks` with `aliases` and `ipv4_address`, `links` (as aliases), `volumes` (bind, named, anonymous, tmpfs; `consistency: delegated` for [Delegated mounts](#delegated-mounts)), `tmpfs`, `secrets` and `configs` from files (bound read-only), `restart`, `deploy.restart_policy`, `deploy.replicas`, `scale`, `mem_limit`, `cpus` and `deploy.resources.limits` (`cpus` rounded up to whole vCPUs), `healthcheck`, `depends_on`, `hostname`, `user`, `working_dir`, `tty`, `stdin_open`, `stop_signal`, `stop_grace_period`, `labels`, `logging` (`local`, `json-file` and `none`; `max-size` and `max-file`), `pull_policy`, `platform: linux/amd64`, `storage_opt: size`, `attach`, `profiles`, `extends`, `include` |
+| Refused, before anything is made | `network_mode` other than `none` or `bridge`; `devices`, `gpus`, `volumes_from`, `ipc`, `pid` and `uts` of other containers or the host; UDP ports, and ports without a host port; IPv6 and link-local addresses; network drivers other than `bridge`, `ipam`, `internal` and IPv6 networks; volume drivers and `driver_opts`; a volume two services would mount at once; secrets and configs other than from files; build `ssh`, `additional_contexts`, `cache_to`, other platforms, and git or URL contexts; lifecycle hooks, `provider`, `models` and `jobs` |
+| Ignored, with a warning | `privileged`, `cap_add`, `cap_drop`, `security_opt`, `ulimits`, `sysctls`, `shm_size`, `init`, `userns_mode`, the `oom_*`, `pids_limit`, the CPU shares, sets and quotas, `blkio_config`, `mem_reservation`, `memswap_limit`, `read_only`, `dns`, `dns_search`, `dns_opt`, `domainname`, `mac_address`, `develop`, `deploy.resources.reservations`, other log drivers, build `cache_from` and `privileged` |
+
+Containers run on runwhp's kernel, or `RUNWHP_KERNEL`'s, never with
+`--module`, and with half this machine's memory and up to 4 vCPUs unless a
+service says otherwise, as `run`'s do.
 
 ### nerdctl and containerd
 
@@ -1244,7 +1403,7 @@ bzImage.
 
 | Path | Contents |
 | --- | --- |
-| [`cmd/runwhp`](cmd/runwhp) | Command line |
+| [`cmd/runwhp`](cmd/runwhp) | Command line; built with `-tags compose`, `runwhp-compose.exe`, which `runwhp compose` runs |
 | [`cmd/containerd-shim-runwhp-v1`](cmd/containerd-shim-runwhp-v1) | The containerd shim, and runwhp's snapshotter |
 | [`internal/ocispec`](internal/ocispec) | An OCI runtime spec, as nerdctl writes one on Windows or ctr one for Linux, turned into a container's configuration |
 | [`internal/vmm`](internal/vmm) | Running a container's VM: its devices and storage, the guest's boot, the supervisor that holds the container and serves its pipe, attached clients and pause, and the helper guests that read image layers and stopped containers' files |
@@ -1255,6 +1414,7 @@ bzImage.
 | [`internal/netstack`](internal/netstack) | The host end of the container's network: gVisor's netstack, TCP and UDP forwarding, DNS, published ports. Builds on any OS |
 | [`internal/netswitch`](internal/netswitch) | User-defined networks without a switch: each guest's frames routed to the others' VMMs, ARP and names answered for them, and the links between VMMs. Builds on any OS |
 | [`internal/network`](internal/network) | User-defined networks in the store: subnets, address leases held by the runwhps running containers, what each knows of the others, and their pipes |
+| [`internal/compose`](internal/compose) | compose.yaml projects, read with compose-go: services turned into what `run` takes, refused or warned of where runwhp cannot do as they ask, and named, labelled and hashed as Docker Compose does. Builds on any OS |
 | [`internal/fuse`](internal/fuse) | The FUSE protocol as virtio-fs speaks it, served from a file system interface. Builds on any OS |
 | [`internal/disk`](internal/disk) | The files behind virtual disks: overlapped I/O from many goroutines, sparse files, freeing ranges, exclusive and delete-on-close opens |
 | [`internal/ext4`](internal/ext4) | Makes empty ext4 file systems as mke2fs would, and reads back whether one was left clean. Builds on any OS |
@@ -1307,7 +1467,7 @@ container's supervisor, with no daemon.
 | Host to guest | Console ports for the main process; a virtio socket device for further connections | Done: `runwhp exec` uses vsock |
 | Bind mounts and volumes | virtio-fs, with a FUSE server in Go serving Windows files and keeping Unix metadata as WSL does, and the writeback cache for delegated mounts; volumes as journaled ext4 disk images on virtio-blk | Done; a volume is used by one container at a time |
 | Networking | User-mode network stack in the VMM (gVisor netstack); published ports are loopback listeners; on user-defined networks, frames routed from VMM to VMM over named pipes, with ARP and DNS answered by each | Done, IPv4 only, TCP ports only |
-| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | Done over runwhp's own images, plus `run`, `list`, `stats`, `stop`, `restart`, `rename`, `logs`, `attach`, `wait`, `pause`, `unpause`, `cp`, `export`, `diff`, `commit`, `images`, `rmi`, the prunes, `system df`, `tag`, `history`, `save`, `load`, `import`, `build`, `builder prune`, `push`, `network` and `containerd`, and restart policies; OCI bundles only through the shim |
+| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | Done over runwhp's own images, plus `run`, `list`, `stats`, `stop`, `restart`, `rename`, `logs`, `attach`, `wait`, `pause`, `unpause`, `cp`, `export`, `diff`, `commit`, `images`, `rmi`, the prunes, `system df`, `tag`, `history`, `save`, `load`, `import`, `build`, `builder prune`, `push`, `network`, `compose` and `containerd`, restart policies, healthchecks, labels and filters; OCI bundles only through the shim |
 | containerd | A shim v2 (`containerd-shim-runwhp-v1`) that is the task's VMM, taking nerdctl's spec and containerd's LCOW layers; a snapshotter whose views have no mounts; a user containerd set up by `runwhp containerd` | Done: stock nerdctl 2.4, unelevated, `--network none` and runwhp's network |
 | Container files | A file server in init, reached through the container's runwhp, or for a stopped container through a guest booted with its storage; tars written and read as Docker's daemon does | Done: `cp`, `export`, `diff`, `commit` |
 | Container logs | Frames stamped with the host's time, rotated as Docker's `local` driver rotates | Done; every kept container has one |

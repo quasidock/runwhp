@@ -620,3 +620,63 @@
   while its holder lives, and succeeds once it has gone, however it went,
   while readers that share delete can read it all along. An endpoint's
   address so goes back to the network the moment its runwhp is killed.
+- **How Docker Compose 5.8 runs a project**, recorded with Docker 29.10 in
+  WSL. Progress goes to stderr, a line each when it is not a console, with
+  a space before and after: ` Container c19-db-1 Started `. up creates
+  every container in dependency order, then starts them, printing
+  `Waiting` and `Healthy` for each `service_healthy` dependency on every
+  up. Containers are labelled with the project, the service, a container
+  number, `oneoff`, a `config-hash` of the service less its build, scale,
+  pull policy, profiles and dependencies, the image's ID, `depends_on` as
+  `name:condition:restart`, the working directory, the config files and
+  Compose's version; networks and volumes with their key, the project and
+  a hash. A service's containers are aliased by the service's name; a
+  one-off, `PROJECT-SERVICE-run-HEX`, by its own name only, with a 64-digit
+  slug label. A network or volume of that name made outside compose is
+  used, with a warning, and `down -v` skips such a volume. Attached up
+  prints `Attaching to a-1, bb-1`, each line as `NAME  | line` padded to
+  the longest name, a container's stderr to its own stderr, and
+  `\r\e[Kbb-1 exited with code 3` as each stops; Ctrl+C gives exit 130,
+  `--abort-on-container-exit` the exiting container's code, and an up of
+  services that all exit gives 0. `logs -f` keeps following after the
+  containers stop. Error texts, column layouts and project-name
+  normalisation (lowercase, other characters dropped) are in
+  `out/check19/notes.md`, which the tests follow.
+- **Docker 29's healthchecks**: failures in the start period do not count
+  while the container is starting, and checks then come every start
+  interval; one success makes it healthy, and from unhealthy too; after the
+  start period, as many failures in a row as the retries make it unhealthy,
+  and the streak keeps counting. The last five results are kept, each with
+  4096 bytes of output and `...`; a check past its timeout has exit -1 and
+  `Health check exceeded timeout (1s): ` with what it wrote. A paused
+  container is not checked, and `ps` shows `(Paused)` instead of its
+  health; a restart starts again as `starting` with the results kept, and
+  a stopped container keeps its last health.
+- **Docker's ps filters**: values of a key are alternatives, except
+  `label`, whose values must all match; `name` is a regular expression,
+  case-sensitive; there is no `label!=`. `--label-file` is an env file: a
+  key's leading spaces dropped, its value kept as written, a key alone
+  taken from the environment or left out.
+- **compose-go v2.17.0**, which Docker Compose 5.8 links, needs Go
+  1.26.11, and was 10 days old; v2.16.2 needs Go 1.24, and differs in its
+  dependencies only. It adds 2.86 MB to runwhp.exe. It reads Windows bind
+  sources as they are, absolute or made absolute against the project
+  directory, keeps `consistency: delegated` from the long syntax but drops
+  `:delegated` from the short one, reads a one-letter volume name such as
+  `v:/v` as a drive, and makes a range of ports single ones.
+- **An exec round trip costs about 5 ms beyond starting runwhp**, whose
+  start takes about 61 ms: `exec CONTAINER true` from the command line
+  took 61-78 ms, and each cost the container's runwhp about 18 ms of CPU,
+  the guest's included. A healthcheck every second so costs about 2% of
+  a core.
+- **Booting containers at once scales**: 8 `run -d` at once took 0.58-0.61 s
+  against 1.46-1.50 s one after another, 5 took 0.41 s against 0.93-0.96 s,
+  with no failures, and 8 at the default memory 0.90 s. The image store
+  takes pulls from several goroutines, the same image twice included.
+- **compose-go would slow every runwhp's start by 8 ms.** Its JSON Schema
+  library, santhosh-tekuri/jsonschema/v6, compiles five drafts'
+  metaschemas in a package init, 5.9 ms by `GODEBUG=inittrace=1`, and the
+  larger binary loads slower: `runwhp help` took 44 ms against 36, and
+  `run -d`, which starts two runwhps, 15-20 ms more. compose so runs in
+  runwhp-compose.exe, the same command line built with `-tags compose`,
+  whose containers' runwhps are runwhp.exe; it costs compose about 25 ms.

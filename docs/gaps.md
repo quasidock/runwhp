@@ -73,7 +73,7 @@
   cannot take or give up a network device while it runs. A created
   container's VM is booted again for them.
 - `network create` takes no `--subnet`, `--gateway`, `--ip-range`,
-  `--internal`, `--ipv6`, `--label` or `-o`, and no driver but `bridge`:
+  `--internal`, `--ipv6` or `-o`, and no driver but `bridge`:
   runwhp chooses each network's subnet as it is made, and a host route
   that comes later may hide part of the host's network from its
   containers. `--ip` needs no `--subnet`, where Docker's does.
@@ -95,13 +95,44 @@
   different `RUNWHP_ROOT`s do not meet.
 - A ping between containers takes about 1 ms, where Docker's takes 0.1 ms:
   each wakes two guests. For up to 2 s after a container stops, the others
-  may still find its address, and their frames for it are dropped.
-- There is no `compose`.
+  may still find its address, and their frames for it are dropped; and
+  for up to 2 s after one starts, a name or alias others already find
+  elsewhere, a scaled service's say, may be answered without it.
+- `compose` refuses a named volume two services would mount at once, or a
+  service with replicas mounts, where Docker shares it: a runwhp volume is
+  a disk only one running VM can have. Bind mounts can be shared.
+- `compose up` stops a container it makes again before making the new one,
+  as a volume or an address is one VM's at a time, so a service is down
+  while it is replaced; Docker Compose makes the new one first. Anonymous
+  volumes live in the container's writable layer, and go with it, where
+  Docker Compose carries them over to the new container.
+- `compose` refuses UDP ports and ports without a host port, as `run`
+  does, and publishes ports on 127.0.0.1 unless an address is given, where
+  Docker publishes them on every address.
+- `compose build` builds one service after another, a step at a time, where
+  BuildKit builds them at once. `cpus` is rounded up to whole vCPUs.
+- There is no `compose watch`, `top`, `events`, `cp`, `attach`, `stats`,
+  `wait`, `scale`, `export`, `commit`, `publish` or `alpha`, and no
+  animated progress: compose writes Docker Compose's plain progress lines,
+  as it does when its output is not a console. `depends_on`'s `restart:
+  true` restarts nothing.
+- `compose` reads compose files with compose-go v2.16.2; Docker Compose
+  5.8 has v2.17.0, which needs a newer Go than runwhp's.
+- Attached `compose up` shows the containers' output from when it started,
+  not their earlier logs, and follows the containers there were then.
+  `compose logs -f` follows the containers there were when it started.
+  `--timestamps` prints UTC times, where Docker Compose's are local.
+- `compose`'s containers boot runwhp's kernel, or `RUNWHP_KERNEL`'s, never
+  with `--module`.
+- A healthcheck runs through `exec`'s server, so it needs vsock in the
+  guest's kernel, as `exec` does. Each check's result is written to the
+  container's state file.
 - The network device has one queue pair and no segmentation offload, which
   the link's 65520-byte MTU makes up for in part: 200 MB crosses in about
   0.4 s out of the container and 0.6-0.8 s into it on the test machine.
-- The prunes take no `--filter`, such as `until=` or `label=`, and
-  `images` no filter but a repository. There is no `login`: `pull` and
+- The prunes take no `--filter`, such as `until=` or `label=`, `images`
+  no filter but a repository, and `list` no `before`, `since`, `publish`
+  or `expose` filter. There is no `login`: `pull` and
   `push` use the credentials `docker login` stored. There is no
   `--insecure-registry`: only registries on localhost, a loopback or a
   private address, or a `.local` name are spoken to over plain HTTP.
@@ -153,7 +184,8 @@
   and they are then not paused.
 - `commit` writes the container's configuration as go-containerregistry
   writes Docker's, with no `container_config`, no `Domainname` and no
-  attach flags, and it does not record `--label`, which runwhp lacks.
+  attach flags. A container made before iteration 19 has no labels of its
+  own, and its commit keeps its image's.
 - `save` reads layers in a guest it boots for the purpose, about 0.2 s
   before the first byte, and needs vsock in its kernel: runwhp's has it,
   and `save` boots runwhp's, or `RUNWHP_KERNEL`, never `--module`. Layers
