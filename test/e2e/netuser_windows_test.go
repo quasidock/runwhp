@@ -361,3 +361,20 @@ func TestUserNetworkThroughput(t *testing.T) {
 		t.Errorf("200 MB took %.2f s", e-s)
 	}
 }
+
+func TestUserNetworkSystemPrune(t *testing.T) {
+	s := newOwnStore(t)
+	s.ok("network", "create", "kept")
+	s.ok("network", "create", "gone")
+	s.ok(append([]string{"run", "-d", "--name", "busy", "--network", "kept"}, withFlags([]string{alpine, "sleep", "300"})...)...)
+	r := s.ok("system", "prune", "-f")
+	if !strings.Contains(r.stdout, "Deleted Networks:\ngone\n\n") || strings.Contains(r.stdout, "kept") {
+		t.Errorf("system prune:\n%s", r.stdout)
+	}
+	if r := s.cli("", "system", "prune"); !strings.Contains(r.stderr, "  - all networks not used by at least one container\n") {
+		t.Errorf("warning: %q", r.stderr)
+	}
+	if ls := s.ok("network", "ls", "-q").stdout; strings.Count(ls, "\n") != 3 {
+		t.Errorf("left:\n%s", ls)
+	}
+}

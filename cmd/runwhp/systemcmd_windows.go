@@ -12,18 +12,20 @@ import (
 
 	"github.com/quasidock/runwhp/internal/gc"
 	"github.com/quasidock/runwhp/internal/image"
+	"github.com/quasidock/runwhp/internal/network"
 )
 
 const systemUsage = `Usage:
   runwhp system df [-v] [--format table|json]     show the space the store takes, and what a prune would free
   runwhp system prune [-a] [--volumes] [-f]       remove what nothing uses
 
-system prune removes stopped and created containers, dangling images (with
--a, every image no container uses), kernels this runwhp does not boot, and
-temporary files, and build cache no image uses (with -a, all of it).
-With --volumes it also removes every volume no container
-uses, and the data in it: runwhp's anonymous volumes go with their
-containers, so it removes named ones, unlike docker system prune --volumes.
+system prune removes stopped and created containers, networks no container
+is running on, dangling images (with -a, every image no container uses),
+kernels this runwhp does not boot, temporary files, and build cache no
+image uses (with -a, all of it). With --volumes it also removes every
+volume no container uses, and the data in it: runwhp's anonymous volumes go
+with their containers, so it removes named ones, unlike docker system
+prune --volumes.
 `
 
 // cmdSystem runs runwhp system. It returns 1 when a command fails and 2 for
@@ -288,7 +290,7 @@ func cmdSystemPrune(args []string, stdin io.Reader, stdout io.Writer) int {
 	if fs.Parse(args) != nil || fs.NArg() > 0 {
 		return 2
 	}
-	warning := []string{"This will remove:", "  - all stopped containers, and created ones, stopping their VMs"}
+	warning := []string{"This will remove:", "  - all stopped containers, and created ones, stopping their VMs", "  - all networks not used by at least one container"}
 	if all {
 		warning = append(warning, "  - all images without at least one container associated to them")
 	} else {
@@ -321,6 +323,10 @@ func cmdSystemPrune(args []string, stdin io.Reader, stdout io.Writer) int {
 
 	// Containers first, so that what they used can go too.
 	ids, freed, errs := pruneContainers(root)
+	nets, nerr := pruneNetworks(network.Open(root))
+	if nerr != nil {
+		errs = append(errs, nerr)
+	}
 	_, u, ok := loadStore()
 	if !ok {
 		return 1
@@ -338,6 +344,7 @@ func cmdSystemPrune(args []string, stdin io.Reader, stdout io.Writer) int {
 	sweepStore(root, func(string, ...any) {})
 
 	printSection(stdout, "Deleted Containers:", ids)
+	printSection(stdout, "Deleted Networks:", nets)
 	printSection(stdout, "Deleted Images:", imageLines(r))
 	printSection(stdout, "Deleted Kernels:", r.Kernels)
 	printSection(stdout, "Deleted Volumes:", r.Volumes)
