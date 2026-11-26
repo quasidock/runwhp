@@ -9,6 +9,7 @@
 package rootfs
 
 import (
+	"archive/tar"
 	"bufio"
 	"bytes"
 	"context"
@@ -17,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"time"
 
 	"github.com/quasidock/runwhp/internal/guestspec"
 )
@@ -156,9 +158,70 @@ func (c *Client) Put(ctx context.Context, dir string, content io.Reader, o PutOp
 	defer conn.Close()
 	// Init reads the tar to its end, then answers, or answers sooner with
 	// an error. Either way its answer settles it, and closing the
-	// connection ends the copy.
-	go io.Copy(conn, content)
-	return c.readReply(r, dir, nil)
+	// connection ends the copy. The connection cannot be half-closed,
+	// through a container's pipe, so init knows the tar has ended only by
+	// its end marker: a tar that ends early would leave it waiting for the
+	// rest. The tar is read as it goes, so that one that is not a tar, or
+	// ends early, is refused, and an end marker follows one that ended
+	// without its own.
+	bad := make(chan error, 1)
+	go func() { bad <- sendTar(conn, content) }()
+	err = c.readReply(r, dir, nil)
+	wait := time.Duration(0)
+	if err != nil {
+		// The answer may have failed for want of a tar: say so.
+		wait = time.Second
+	}
+	select {
+	case berr := <-bad:
+		if berr != nil {
+			return berr
+		}
+	case <-time.After(wait):
+	}
+	return err
+}
+
+// sendTar copies a tar to w, which reads it, and returns an error, having
+// closed w, if it is not one or ends before its last file does.
+func sendTar(w io.WriteCloser, content io.Reader) error {
+	ww := &errWriter{w: w}
+	tr := tar.NewReader(io.TeeReader(content, ww))
+	var err error
+	for {
+		if _, err = tr.Next(); err != nil {
+			break
+		}
+		if _, err = io.Copy(io.Discard, tr); err != nil {
+			break
+		}
+	}
+	switch {
+	case ww.err != nil:
+		// Init stopped reading, and its answer says why.
+		return nil
+	case errors.Is(err, io.EOF):
+		io.Copy(ww, content)
+		ww.Write(make([]byte, 2*512))
+		return nil
+	}
+	w.Close()
+	return fmt.Errorf("the content is not a tar, or ends early: %w", err)
+}
+
+// errWriter writes to w until a write fails, and keeps the error.
+type errWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (e *errWriter) Write(p []byte) (int, error) {
+	if e.err != nil {
+		return 0, e.err
+	}
+	n, err := e.w.Write(p)
+	e.err = err
+	return n, err
 }
 
 // Tar asks for a tar the file server makes: guestspec.RootExport or

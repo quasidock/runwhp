@@ -68,11 +68,20 @@ func newDockerAPI(t *testing.T) *dockerAPI {
 
 func (d *dockerAPI) cmd(stdin io.Reader, args ...string) *exec.Cmd {
 	cmd := exec.Command(d.docker, args...)
-	cmd.Env = append(os.Environ(), "DOCKER_HOST=npipe://"+strings.ReplaceAll(d.pipe, `\`, "/"), "DOCKER_CONFIG="+d.config,
-		"RUNWHP_ROOT="+d.root, "DOCKER_CLI_HINTS=false")
+	cmd.Env = d.env()
 	cmd.Stdin = stdin
 	return cmd
 }
+
+// env is the environment of a client of the test's API: DOCKER_HOST, a
+// docker configuration of the test's own, and its store.
+func (d *dockerAPI) env() []string {
+	return append(os.Environ(), "DOCKER_HOST="+d.host(), "DOCKER_CONFIG="+d.config,
+		"RUNWHP_ROOT="+d.root, "DOCKER_CLI_HINTS=false")
+}
+
+// host is DOCKER_HOST for the test's API.
+func (d *dockerAPI) host() string { return "npipe://" + strings.ReplaceAll(d.pipe, `\`, "/") }
 
 // docker1 runs the docker CLI with args, and gives what it printed.
 func (d *dockerAPI) docker1(args ...string) result { return d.dockerIn(nil, args...) }

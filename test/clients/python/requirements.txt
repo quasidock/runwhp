@@ -1,0 +1,4 @@
+docker==7.2.0
+pywin32==312
+requests==2.34.2
+urllib3==2.8.0

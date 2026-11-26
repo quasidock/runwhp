@@ -1269,7 +1269,14 @@ func (s *apiServer) putContainerArchive(w http.ResponseWriter, r *http.Request) 
 	}
 	a.NoOverwriteDirNonDir = boolParam(r, "noOverwriteDirNonDir")
 	a.CopyUIDGID = boolParam(r, "copyUIDGID")
-	if _, err := s.fileJob(r.Context(), "archive-put", a, r.Body, nil, nil); err != nil {
+	// Docker's daemon takes the tar compressed too, as Testcontainers
+	// sends it, gzipped.
+	body, err := image.Decompress(r.Body)
+	if err != nil {
+		return badRequest("%v", err)
+	}
+	defer body.Close()
+	if _, err := s.fileJob(r.Context(), "archive-put", a, body, nil, nil); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusOK)
