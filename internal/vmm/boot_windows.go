@@ -22,7 +22,6 @@ import (
 	"github.com/quasidock/runwhp/internal/guestspec"
 	"github.com/quasidock/runwhp/internal/hostfs"
 	"github.com/quasidock/runwhp/internal/image"
-	"github.com/quasidock/runwhp/internal/netstack"
 	"github.com/quasidock/runwhp/internal/virtio"
 	"github.com/quasidock/runwhp/internal/vm"
 	"github.com/quasidock/runwhp/internal/volume"
@@ -75,7 +74,7 @@ type bootHooks struct {
 // through while it runs.
 type vmHandles struct {
 	vsock   *virtio.Vsock
-	nic     *virtio.Net // nil without a network
+	network *guestNetwork
 	blks    []*virtio.Blk
 	probe   *vm.Probe
 	guest   *guestStats
@@ -176,10 +175,17 @@ func bootContainer(ctx context.Context, root string, cfg *container.Config, laye
 		logf("%4d ms  writable layer ready: %d GiB, kept %v, opened in %d ms", time.Since(start).Milliseconds(), layerSize>>30, keep, lr.took.Milliseconds())
 	}
 
+	network, err := openNetwork(cfg, !opts.noNIC, logf)
+	if err != nil {
+		return fail, err
+	}
+	defer network.close(logf)
+
 	spec := guestspec.Spec{
 		Args: cfg.Args, Env: cfg.Env, Cwd: cfg.Cwd, User: cfg.User,
 		Hostname: cfg.Hostname, Hosts: cfg.Hosts, Layers: len(storage.layers), Scratch: lr.file != nil, KeepLayer: keep,
-		Volumes: len(storage.volumes), Debug: cfg.Debug, Stdin: cfg.Stdin, TTY: cfg.TTY, Network: GuestNetwork(cfg.Network),
+		Volumes: len(storage.volumes), Debug: cfg.Debug, Stdin: cfg.Stdin, TTY: cfg.TTY,
+		Networks: network.specs, Resolv: network.resolv, HostnameAddrs: network.hostnameAddrs,
 		Mounts: cfg.Mounts, WaitStart: hooks.waitStart, Serve: opts.serve, HideMountPoints: cfg.HideMountPoints,
 	}
 	if opts.serve == "" {
@@ -238,28 +244,8 @@ func bootContainer(ctx context.Context, root string, cfg *container.Config, laye
 	if !opts.noBalloon {
 		devices = append(devices, &virtio.Balloon{})
 	}
-	if cfg.Network && !opts.noNIC {
-		nic := &virtio.Net{MAC: netstack.GuestMAC, MTU: netstack.MTU}
-		handles.nic = nic
-		stack, err := netstack.New(netstack.Config{
-			Output:         nic.Deliver,
-			GuestChecksums: nic.GuestChecksums,
-			HostGateway:    cfg.HostGateway,
-			Publish:        cfg.Publish,
-			Logf:           logf,
-		})
-		if err != nil {
-			return fail, err
-		}
-		defer func() {
-			logf("%s", stack.Stats())
-			stack.Close()
-		}()
-		// The stack checks no checksums, so a frame's offload means nothing
-		// to it.
-		nic.Recv = func(frame []byte, _ virtio.Offload) { stack.Inject(frame) }
-		devices = append(devices, nic)
-	}
+	handles.network = network
+	devices = append(devices, network.devices()...)
 	if lr.file != nil {
 		// A kept layer offers FLUSH, so fsync in the container reaches the
 		// host's disk, as it would under Docker. A scratch disk does not:

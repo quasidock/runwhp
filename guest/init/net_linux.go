@@ -15,39 +15,66 @@ import (
 	"github.com/quasidock/runwhp/internal/guestspec"
 )
 
-// configureNetwork gives the interface with the spec's MAC address its
-// address, MTU and default route, and brings it up. The container runs in
-// init's network namespace, so this is the container's network.
-func configureNetwork(n *guestspec.Network) error {
-	mac, err := net.ParseMAC(n.MAC)
-	if err != nil {
-		return fmt.Errorf("network spec: %w", err)
+// configureNetworks gives each interface the spec names, by its MAC
+// address, its address and MTU, brings it up, and adds the default route
+// through the one with a gateway. The kernel adds the route to each
+// interface's own subnet. The container runs in init's network namespace,
+// so this is the container's network.
+func configureNetworks(ns []guestspec.Network) error {
+	macs := make([]string, len(ns))
+	for i, n := range ns {
+		mac, err := net.ParseMAC(n.MAC)
+		if err != nil {
+			return fmt.Errorf("network spec: %w", err)
+		}
+		macs[i] = mac.String()
 	}
+	// virtio_net is built into the kernel, so the interfaces normally exist
+	// before init starts; wait a little in case they do not.
+	ifaces := make([]net.Interface, len(ns))
+	found := poll(5*time.Second, func() bool {
+		all, _ := net.Interfaces()
+		clear(ifaces)
+		missing := len(ns)
+		for i, mac := range macs {
+			for _, iface := range all {
+				if iface.HardwareAddr.String() == mac {
+					ifaces[i] = iface
+					missing--
+					break
+				}
+			}
+		}
+		return missing == 0
+	})
+	if !found {
+		for i, iface := range ifaces {
+			if iface.Name == "" {
+				return fmt.Errorf("no network interface with address %s appeared; "+
+					"if the kernel lacks virtio_net, pass --network none", ns[i].MAC)
+			}
+		}
+	}
+	for i, n := range ns {
+		if err := configureInterface(ifaces[i], n); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// configureInterface gives one interface its address, MTU and, if n has a
+// gateway, the default route, and brings it up.
+func configureInterface(iface net.Interface, n guestspec.Network) error {
 	prefix, err := netip.ParsePrefix(n.Address)
 	if err != nil || !prefix.Addr().Is4() {
 		return fmt.Errorf("network spec: bad address %q", n.Address)
 	}
-	gateway, err := netip.ParseAddr(n.Gateway)
-	if err != nil || !gateway.Is4() {
-		return fmt.Errorf("network spec: bad gateway %q", n.Gateway)
-	}
-
-	// virtio_net is built into the kernel, so the interface normally exists
-	// before init starts; wait a little in case it does not.
-	var iface net.Interface
-	found := poll(5*time.Second, func() bool {
-		ifaces, _ := net.Interfaces()
-		for _, i := range ifaces {
-			if i.HardwareAddr.String() == mac.String() {
-				iface = i
-				return true
-			}
+	var gateway netip.Addr
+	if n.Gateway != "" {
+		if gateway, err = netip.ParseAddr(n.Gateway); err != nil || !gateway.Is4() {
+			return fmt.Errorf("network spec: bad gateway %q", n.Gateway)
 		}
-		return false
-	})
-	if !found {
-		return fmt.Errorf("no network interface with address %s appeared; "+
-			"if the kernel lacks virtio_net, pass --network none", n.MAC)
 	}
 
 	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
@@ -81,10 +108,12 @@ func configureNetwork(n *guestspec.Network) error {
 	if err := linkUp(fd, iface.Name); err != nil {
 		return fmt.Errorf("bringing up %s: %w", iface.Name, err)
 	}
-	if err := addDefaultRoute(gateway.As4(), uint32(iface.Index)); err != nil {
-		return fmt.Errorf("adding the default route via %s: %w", gateway, err)
+	if gateway.IsValid() {
+		if err := addDefaultRoute(gateway.As4(), uint32(iface.Index)); err != nil {
+			return fmt.Errorf("adding the default route via %s: %w", gateway, err)
+		}
 	}
-	debugf("network: %s is %s via %s, mtu %d", iface.Name, prefix, gateway, n.MTU)
+	debugf("network: %s is %s, gateway %s, mtu %d", iface.Name, prefix, n.Gateway, n.MTU)
 	return nil
 }
 

@@ -32,7 +32,7 @@ func TestInitLayer(t *testing.T) {
 	when := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
 	os.Chtimes(etc, when, when)
 
-	spec := &guestspec.Spec{Hostname: "h", Network: &guestspec.Network{}}
+	spec := &guestspec.Spec{Hostname: "h", Resolv: &guestspec.Resolv{}}
 	plan, err := planInitLayer(spec)
 	if err != nil {
 		t.Fatal(err)

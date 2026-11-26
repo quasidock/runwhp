@@ -242,31 +242,56 @@ func prepareRoot(spec *guestspec.Spec) error {
 		writeEtc("hostname", spec.Hostname+"\n")
 	}
 	if spec.Hostname != "" || len(spec.Hosts) > 0 {
-		var hosts strings.Builder
-		hosts.WriteString("127.0.0.1\tlocalhost " + spec.Hostname + "\n::1\tlocalhost ip6-localhost ip6-loopback\n")
-		for _, h := range spec.Hosts {
-			hosts.WriteString(h + "\n")
-		}
-		writeEtc("hosts", hosts.String())
+		writeEtc("hosts", hostsFile(spec))
 	}
 	if err := loopbackUp(); err != nil {
 		logf("bringing up lo: %v", err)
 	}
-	if n := spec.Network; n != nil {
-		// A guest serving a stopped container's files has no network
-		// device, but shows the container its /etc/resolv.conf.
-		if spec.Serve == "" {
-			if err := configureNetwork(n); err != nil {
-				return err
-			}
+	// A guest serving a stopped container's files has no network devices,
+	// but shows the container its /etc/resolv.conf.
+	if len(spec.Networks) > 0 && spec.Serve == "" {
+		if err := configureNetworks(spec.Networks); err != nil {
+			return err
 		}
-		var resolv strings.Builder
-		for _, server := range n.DNS {
-			fmt.Fprintf(&resolv, "nameserver %s\n", server)
-		}
-		writeEtc("resolv.conf", resolv.String())
+	}
+	if r := spec.Resolv; r != nil {
+		writeEtc("resolv.conf", resolvFile(r))
 	}
 	return nil
+}
+
+// hostsFile is the container's /etc/hosts: on a user-defined network,
+// Docker's, which names the container at its addresses; otherwise runwhp's
+// own, which names it at 127.0.0.1.
+func hostsFile(spec *guestspec.Spec) string {
+	var b strings.Builder
+	if len(spec.HostnameAddrs) == 0 {
+		b.WriteString("127.0.0.1\tlocalhost " + spec.Hostname + "\n::1\tlocalhost ip6-localhost ip6-loopback\n")
+	} else {
+		b.WriteString("127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n" +
+			"fe00::\tip6-localnet\nff00::\tip6-mcastprefix\nff02::1\tip6-allnodes\nff02::2\tip6-allrouters\n")
+	}
+	for _, h := range spec.Hosts {
+		b.WriteString(h + "\n")
+	}
+	if spec.Hostname != "" {
+		for _, a := range spec.HostnameAddrs {
+			b.WriteString(a + "\t" + spec.Hostname + "\n")
+		}
+	}
+	return b.String()
+}
+
+// resolvFile is the container's /etc/resolv.conf.
+func resolvFile(r *guestspec.Resolv) string {
+	var b strings.Builder
+	for _, server := range r.Nameservers {
+		fmt.Fprintf(&b, "nameserver %s\n", server)
+	}
+	if len(r.Options) > 0 {
+		fmt.Fprintf(&b, "options %s\n", strings.Join(r.Options, " "))
+	}
+	return b.String()
 }
 
 // etcDir holds, in the initramfs, the files bindEtc binds over the

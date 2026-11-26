@@ -694,9 +694,7 @@ func (s *Supervisor) stats() container.Reply {
 			st.HostWorkingSet = pm.WorkingSet
 		}
 	}
-	if h.nic != nil {
-		st.NetRx, st.NetTx = h.nic.RxBytes.Load(), h.nic.TxBytes.Load()
-	}
+	st.NetRx, st.NetTx = h.network.traffic()
 	for _, b := range h.blks {
 		st.BlockRead += b.BytesRead.Load()
 		st.BlockWrite += b.BytesWritten.Load()

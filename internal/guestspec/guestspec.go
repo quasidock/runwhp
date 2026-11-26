@@ -4,9 +4,9 @@
 // The host writes a Spec into the initramfs at SpecPath. The guest gets a
 // multiport virtio console with the ports named below; then a virtio socket
 // device, which gives the guest the context ID GuestCID; then a virtio
-// memory balloon, which only takes free page reporting; then, when
-// Spec.Network is set, a virtio network device with Network.MAC; then, when
-// any Mount binds a share, a virtio-fs device tagged FSTag, and when any
+// memory balloon, which only takes free page reporting; then one virtio
+// network device for each of Spec.Networks, with its MAC, in order; then,
+// when any Mount binds a share, a virtio-fs device tagged FSTag, and when any
 // binds a delegated share, one tagged FSTagDelegated; then one
 // read-only virtio block device per image layer, bottom layer first, each
 // with the serial LayerSerial(i); then, when Spec.Scratch is set, the
@@ -32,7 +32,7 @@
 // before mounting anything, as Docker does, and freezes each volume's file
 // system before resetting the machine, which leaves it clean.
 //
-// Init makes /etc/hostname, /etc/hosts and, with a network,
+// Init makes /etc/hostname, /etc/hosts and, with Spec.Resolv,
 // /etc/resolv.conf, and binds them over the image's after the other mounts,
 // unless one of those mounts is at that path or binds host files above it.
 //
@@ -118,9 +118,16 @@ type Spec struct {
 	ClockSync bool `json:"clockSync,omitempty"`
 	// Volumes is how many volume disks there are.
 	Volumes int `json:"volumes,omitempty"`
-	// Network configures the network interface. nil means the guest has
-	// none beyond loopback.
-	Network *Network `json:"network,omitempty"`
+	// Networks configures the network interfaces, one for each network
+	// device, in the devices' order, which is the order the kernel names
+	// them eth0, eth1 and so on. None means the guest has only loopback.
+	Networks []Network `json:"networks,omitempty"`
+	// Resolv is the container's /etc/resolv.conf. nil leaves the image's.
+	Resolv *Resolv `json:"resolv,omitempty"`
+	// HostnameAddrs, if set, are the container's addresses, which
+	// /etc/hosts gives its hostname after Hosts, as Docker's does on a
+	// user-defined network. Without them the hostname is 127.0.0.1's.
+	HostnameAddrs []string `json:"hostnameAddrs,omitempty"`
 	// Mounts are the bind mounts, volumes and tmpfs mounts, in the order to
 	// mount them: parents before what is mounted inside them.
 	Mounts []Mount `json:"mounts,omitempty"`
@@ -159,13 +166,20 @@ type Reclaim struct {
 	IntervalSeconds int `json:"intervalSeconds,omitempty"`
 }
 
-// Network is the static configuration of the guest's one network interface.
+// Network is the static configuration of one of the guest's network
+// interfaces.
 type Network struct {
-	MAC     string   `json:"mac"`     // identifies the interface, as in 02:00:00:00:00:0f
-	Address string   `json:"address"` // the guest's address and prefix, as in 10.0.2.15/24
-	Gateway string   `json:"gateway"` // the default route
-	DNS     []string `json:"dns,omitempty"`
-	MTU     int      `json:"mtu,omitempty"`
+	MAC     string `json:"mac"`     // identifies the interface, as in 02:00:00:00:00:0f
+	Address string `json:"address"` // the guest's address and prefix, as in 10.0.2.15/24
+	// Gateway, if set, is the default route's; one interface has it.
+	Gateway string `json:"gateway,omitempty"`
+	MTU     int    `json:"mtu,omitempty"`
+}
+
+// Resolv is what /etc/resolv.conf says.
+type Resolv struct {
+	Nameservers []string `json:"nameservers,omitempty"`
+	Options     []string `json:"options,omitempty"`
 }
 
 // Mount kinds.

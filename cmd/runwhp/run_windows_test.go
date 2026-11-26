@@ -111,12 +111,8 @@ func TestParseNetworkFlags(t *testing.T) {
 	if err != nil || !n.enabled || !n.hostGateway || len(n.publish) != 1 || len(n.hosts) != 2 {
 		t.Fatalf("user: %+v, %v", n, err)
 	}
-	if s := n.spec(); s == nil || s.MAC != "02:00:00:00:00:0f" || s.Address != "10.0.2.15/24" ||
-		s.Gateway != "10.0.2.2" || len(s.DNS) != 1 || s.DNS[0] != "10.0.2.3" || s.MTU != 65520 {
-		t.Errorf("spec = %+v", s)
-	}
 	n, err = parseNetworkFlags("none", nil, []string{"x:1.2.3.4"})
-	if err != nil || n.enabled || n.spec() != nil || len(n.hosts) != 1 {
+	if err != nil || n.enabled || len(n.hosts) != 1 {
 		t.Errorf("none: %+v, %v", n, err)
 	}
 	for _, c := range []struct {

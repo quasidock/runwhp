@@ -101,7 +101,7 @@ func initEtcFiles(spec *guestspec.Spec) []string {
 		case "hosts":
 			written = spec.Hostname != "" || len(spec.Hosts) > 0
 		case "resolv.conf":
-			written = spec.Network != nil
+			written = spec.Resolv != nil
 		}
 		if written && !mountedOver(spec, "/etc/"+name) {
 			names = append(names, name)

@@ -8,9 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/quasidock/runwhp/internal/guestspec"
 	"github.com/quasidock/runwhp/internal/netstack"
-	"github.com/quasidock/runwhp/internal/vmm"
 )
 
 // networkOptions is what the network flags ask for.
@@ -51,9 +49,6 @@ func parseNetworkFlags(mode string, publish, addHosts []string) (networkOptions,
 	}
 	return n, nil
 }
-
-// spec is the guest's side of the network, or nil without one.
-func (n networkOptions) spec() *guestspec.Network { return vmm.GuestNetwork(n.enabled) }
 
 // parsePublish reads -p [IP:]HOSTPORT:CONTAINERPORT[/tcp]. Without an IP
 // the port listens on 127.0.0.1 only.
