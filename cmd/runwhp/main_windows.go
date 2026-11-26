@@ -53,6 +53,7 @@ const usage = `Usage:
   runwhp system df [-v]                         show the space the store takes
   runwhp system prune [-a] [--volumes] [-f]     remove what nothing uses
   runwhp containerd [--address PIPE]            run a containerd of your own for nerdctl, through runwhp
+  runwhp docker-api start|stop|status           serve Docker's Engine API, for the docker CLI and its kin
 
 Run 'runwhp run -h' for the run flags, and 'runwhp image', 'runwhp volume'
 or 'runwhp network' for their commands. A container is named by its ID, a
@@ -151,6 +152,10 @@ func realMain(args []string) int {
 		return cmdUnpause(args[1:], os.Stdout)
 	case "__supervise":
 		return cmdSupervise(args[1:])
+	case "docker-api":
+		return cmdDockerAPI(args[1:])
+	case "__api-job":
+		return cmdAPIJob(args[1:])
 	case "help", "-h", "-help", "--help":
 		fmt.Print(usage)
 		return 0

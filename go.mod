@@ -14,6 +14,7 @@ require (
 	github.com/moby/buildkit v0.35.0
 	github.com/moby/docker-image-spec v1.3.1
 	github.com/moby/go-archive v0.3.3
+	github.com/moby/moby/api v1.56.1
 	github.com/moby/patternmatcher v0.6.1
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
@@ -21,6 +22,7 @@ require (
 	github.com/sirupsen/logrus v1.10.2
 	github.com/vbatts/tar-split v0.12.3
 	golang.org/x/net v0.62.0
+	golang.org/x/sync v0.24.0
 	golang.org/x/sys v0.50.0
 	golang.org/x/term v0.47.0
 	google.golang.org/grpc v1.85.0
@@ -70,7 +72,6 @@ require (
 	go.opentelemetry.io/otel/trace v1.47.0 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.4 // indirect
 	golang.org/x/exp v0.0.0-20260908205506-85c1c2202aba // indirect
-	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20261012220534-4341edf3f941 // indirect
