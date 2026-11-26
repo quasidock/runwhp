@@ -192,6 +192,9 @@ func bootContainer(ctx context.Context, root string, cfg *container.Config, laye
 	if opts.serve == "" {
 		spec.Reclaim = reclaimPolicy(logf)
 		spec.ClockSync = clockPeriod(logf) > 0
+		if hasSockets(cfg.Mounts) {
+			spec.SocketToken = socketToken()
+		}
 	}
 	if cfg.TTY {
 		if bio.Terminal {
@@ -239,6 +242,16 @@ func bootContainer(ctx context.Context, root string, cfg *container.Config, laye
 	// The vsock device carries runwhp exec's connections to init.
 	vsock := &virtio.Vsock{CID: guestspec.GuestCID, Logf: logf}
 	defer func() { logf("%s", vsock.Stats()) }()
+	if spec.SocketToken != "" {
+		// Sockets in the container reach the host's pipes through it too,
+		// in connections init opens.
+		if err := newPipeForwarder(spec.SocketToken, spec.Mounts, logf).listen(vsock); err != nil {
+			return fail, err
+		}
+		// The machine drains its devices as it stops; this ends the
+		// listener too if it never ran.
+		defer vsock.Drain(context.Background())
+	}
 	handles := &vmHandles{vsock: vsock, probe: &vm.Probe{}, guest: guest, top: top, freezer: freezer}
 	// The balloon gives back to Windows the memory the guest reports free.
 	devices := []virtio.Device{console, vsock}

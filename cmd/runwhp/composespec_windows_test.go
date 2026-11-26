@@ -59,7 +59,7 @@ func TestSpecOf(t *testing.T) {
 	if !reflect.DeepEqual(s.mounts[:3], want) || s.mounts[3].kind != guestspec.MountTmpfs || !strings.Contains(s.mounts[3].options, "size=1048576") {
 		t.Errorf("mounts %+v", s.mounts)
 	}
-	if _, err := planMounts(s.mounts); err != nil {
+	if _, err := planMounts(s.mounts, ""); err != nil {
 		t.Errorf("planning the mounts: %v", err)
 	}
 

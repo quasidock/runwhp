@@ -6,6 +6,7 @@ import (
 	"encoding/csv"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -21,8 +22,11 @@ import (
 
 // mountSpec is one mount from -v, --mount or --tmpfs.
 type mountSpec struct {
-	kind     string // guestspec.MountBind, MountVolume (anonymous when source is empty) or MountTmpfs
-	source   string // bind: absolute host path; volume: its name
+	kind   string // guestspec.MountBind, MountVolume (anonymous when source is empty), MountTmpfs or MountSocket
+	source string // bind: absolute host path; volume: its name; socket: as given
+	// pipe is a socket's named pipe on the host; empty, for Docker's
+	// socket, the Engine API's, which planMounts is given.
+	pipe     string
 	target   string // clean absolute container path
 	readOnly bool
 	create   bool // bind: create a missing source directory, as -v does
@@ -58,7 +62,9 @@ func parseVolume(s, cwd string) (mountSpec, error) {
 	dst, opts, _ := strings.Cut(rest, ":")
 	m := mountSpec{kind: guestspec.MountBind, create: true}
 	var err error
-	if isVolumeName(src) {
+	if pipe, ok := socketSource(src); ok {
+		m = mountSpec{kind: guestspec.MountSocket, source: src, pipe: pipe}
+	} else if isVolumeName(src) {
 		if err := volume.CheckName(src); err != nil {
 			return mountSpec{}, fmt.Errorf("-v %s: %w", s, err)
 		}
@@ -200,9 +206,16 @@ func parseMount(s, cwd string) (mountSpec, error) {
 		return bad("%v", err)
 	}
 	switch typ {
-	case "bind":
+	case "bind", "npipe":
 		if src == "" {
 			return bad("source is required")
+		}
+		if pipe, ok := socketSource(src); ok {
+			m.kind, m.source, m.pipe = guestspec.MountSocket, src, pipe
+			break
+		}
+		if typ == "npipe" {
+			return bad("source %s is not a named pipe, such as //./pipe/docker_engine", src)
 		}
 		m.kind = guestspec.MountBind
 		if m.source, err = hostPath(src, cwd); err != nil {
@@ -227,7 +240,7 @@ func parseMount(s, cwd string) (mountSpec, error) {
 	case "":
 		return bad("type is required: bind, volume or tmpfs")
 	default:
-		return bad("type=%s is not supported; use bind, volume or tmpfs", typ)
+		return bad("type=%s is not supported; use bind, volume, tmpfs or npipe", typ)
 	}
 	return m, nil
 }
@@ -318,9 +331,6 @@ func hostPath(p, cwd string) (string, error) {
 	switch {
 	case p == "":
 		return "", errors.New("the host path is empty")
-	case isAPISocket(p):
-		return "", fmt.Errorf("%s cannot be mounted into a container: no socket or pipe of the host reaches a guest yet, "+
-			"so containers cannot drive Docker's API; for Testcontainers, set TESTCONTAINERS_RYUK_DISABLED=true", p)
 	case len(p) >= 3 && isLetter(p[0]) && p[1] == ':' && (p[2] == '\\' || p[2] == '/'),
 		strings.HasPrefix(p, `\\`), strings.HasPrefix(p, "//"):
 		return filepath.Clean(p), nil
@@ -338,13 +348,48 @@ func hostPath(p, cwd string) (string, error) {
 	return "", fmt.Errorf("host path %s is not an absolute Windows path, such as C:\\src", p)
 }
 
-// isAPISocket reports whether a bind's source is Docker's socket, as
-// Testcontainers' Ryuk and docker-outside-of-docker mount it, or a named
-// pipe, such as Docker's or runwhp's API's.
-func isAPISocket(p string) bool {
-	low := strings.ToLower(strings.ReplaceAll(p, `\`, "/"))
-	return low == "/var/run/docker.sock" || low == "/run/docker.sock" ||
-		strings.HasPrefix(low, "//./pipe/") || strings.HasPrefix(low, "//?/pipe/")
+// socketSource reads a bind's source as a socket's: a named pipe, as in
+// //./pipe/docker_engine or \\.\pipe\docker_engine, which it gives as
+// \\.\pipe\NAME, or Docker's own socket, as Testcontainers' Ryuk and
+// docker-outside-of-docker mount it, and as Docker Desktop's Windows
+// spelling //var/run/docker.sock has it, which means runwhp's Engine API
+// and gives an empty pipe. ok is false for any other source.
+func socketSource(p string) (pipe string, ok bool) {
+	slashed := strings.ReplaceAll(p, `\`, "/")
+	switch low := strings.ToLower(slashed); {
+	case low == "/var/run/docker.sock", low == "//var/run/docker.sock", low == "/run/docker.sock", low == "//run/docker.sock":
+		return "", true
+	case strings.HasPrefix(low, "//./pipe/"), strings.HasPrefix(low, "//?/pipe/"):
+		name := strings.Trim(slashed[len("//./pipe/"):], "/")
+		if name == "" {
+			return "", false
+		}
+		return `\\.\pipe\` + strings.ReplaceAll(name, "/", `\`), true
+	}
+	return "", false
+}
+
+// pipeExists reports whether something serves pipe now. Unlike
+// pipeServed, it does not connect: Stat tells a pipe that exists, busy or
+// not, from one that does not without taking an instance.
+func pipeExists(pipe string) bool {
+	_, err := os.Stat(pipe)
+	return !os.IsNotExist(err)
+}
+
+// warnUnservedPipes warns of sockets whose pipe nothing serves yet: the
+// container is made all the same, and its connections fail until it is.
+func warnUnservedPipes(w io.Writer, mounts []guestspec.Mount) {
+	for _, m := range mounts {
+		if m.Kind != guestspec.MountSocket || pipeExists(m.Pipe) {
+			continue
+		}
+		hint := ""
+		if strings.HasPrefix(m.Pipe, `\\.\pipe\runwhp_engine`) {
+			hint = ": start runwhp's Engine API with runwhp docker-api start"
+		}
+		fmt.Fprintf(w, "runwhp: warning: %s is not served yet, so connections to %s in the container fail until it is%s\n", m.Pipe, m.Target, hint)
+	}
 }
 
 // containerPath checks a mount point inside the container.
@@ -377,13 +422,14 @@ type mountPlan struct {
 }
 
 // parseMounts turns -v, --mount and --tmpfs into a mountPlan, with parents
-// mounted before what is mounted inside them.
-func parseMounts(volumes, mounts, tmpfs []string) (mountPlan, error) {
+// mounted before what is mounted inside them, Docker's socket reaching
+// apiPipe.
+func parseMounts(volumes, mounts, tmpfs []string, apiPipe string) (mountPlan, error) {
 	specs, err := parseMountFlags(volumes, mounts, tmpfs)
 	if err != nil {
 		return mountPlan{}, err
 	}
-	return planMounts(specs)
+	return planMounts(specs, apiPipe)
 }
 
 // parseMountFlags reads -v, --mount and --tmpfs, resolving relative host
@@ -420,7 +466,8 @@ func parseMountFlags(volumes, mounts, tmpfs []string) ([]mountSpec, error) {
 
 // planMounts turns mounts into a mountPlan, with parents mounted before
 // what is mounted inside them, making missing bind sources it may make.
-func planMounts(specs []mountSpec) (mountPlan, error) {
+// Docker's socket reaches apiPipe, the Engine API's.
+func planMounts(specs []mountSpec, apiPipe string) (mountPlan, error) {
 	var plan mountPlan
 	seen := map[string]bool{}
 	disks := map[string]int{} // volume name, lower case -> its disk
@@ -431,6 +478,13 @@ func planMounts(specs []mountSpec) (mountPlan, error) {
 		seen[m.target] = true
 		gm := guestspec.Mount{Kind: m.kind, Target: m.target, ReadOnly: m.readOnly, NoCopy: m.noCopy, Options: m.options}
 		switch {
+		case m.kind == guestspec.MountSocket:
+			// A socket is connected to, never written: read-only changes
+			// nothing but what inspect says.
+			gm.File, gm.Pipe, gm.Source = true, m.pipe, m.source
+			if gm.Pipe == "" {
+				gm.Pipe = apiPipe
+			}
 		case m.kind == guestspec.MountBind:
 			st, err := os.Stat(m.source)
 			if os.IsNotExist(err) && m.create {

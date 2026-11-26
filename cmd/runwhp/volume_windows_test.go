@@ -18,6 +18,7 @@ const (
 	bindKind   = guestspec.MountBind
 	volumeKind = guestspec.MountVolume
 	tmpfsKind  = guestspec.MountTmpfs
+	socketKind = guestspec.MountSocket
 )
 
 func TestParseVolume(t *testing.T) {
@@ -42,6 +43,14 @@ func TestParseVolume(t *testing.T) {
 		{`C:\out:/out:delegated`, mountSpec{kind: bindKind, source: `C:\out`, target: "/out", create: true, delegated: true}},
 		{`C:\out:/out:ro,delegated`, mountSpec{kind: bindKind, source: `C:\out`, target: "/out", readOnly: true, create: true, delegated: true}},
 		{`C:\out:/out:consistent`, mountSpec{kind: bindKind, source: `C:\out`, target: "/out", create: true}},
+		// Docker's socket, in each spelling, is the Engine API's; a named
+		// pipe is itself.
+		{`/var/run/docker.sock:/var/run/docker.sock`, mountSpec{kind: socketKind, source: "/var/run/docker.sock", target: "/var/run/docker.sock"}},
+		{`//var/run/docker.sock:/var/run/docker.sock`, mountSpec{kind: socketKind, source: "//var/run/docker.sock", target: "/var/run/docker.sock"}},
+		{`/run/docker.sock:/run/docker.sock:ro`, mountSpec{kind: socketKind, source: "/run/docker.sock", target: "/run/docker.sock", readOnly: true}},
+		{`//./pipe/docker_engine:/var/run/docker.sock`, mountSpec{kind: socketKind, source: "//./pipe/docker_engine", pipe: `\\.\pipe\docker_engine`, target: "/var/run/docker.sock"}},
+		{`\\.\pipe\openssh-ssh-agent:/run/ssh.sock`, mountSpec{kind: socketKind, source: `\\.\pipe\openssh-ssh-agent`, pipe: `\\.\pipe\openssh-ssh-agent`, target: "/run/ssh.sock"}},
+		{`//?/PIPE/Runwhp_Engine-ab12:/s`, mountSpec{kind: socketKind, source: "//?/PIPE/Runwhp_Engine-ab12", pipe: `\\.\pipe\Runwhp_Engine-ab12`, target: "/s"}},
 	} {
 		got, err := parseVolume(tc.in, cwd)
 		if err != nil || got != tc.want {
@@ -49,18 +58,16 @@ func TestParseVolume(t *testing.T) {
 		}
 	}
 	for in, want := range map[string]string{
-		`C:\src`:           "want HOSTPATH:CONTAINERPATH",
-		`data`:             "want HOSTPATH:CONTAINERPATH",
-		`C:\src:app`:       "not absolute",
-		`C:\src:/`:         "cannot be mounted over",
-		`C:\src:/proc`:     "cannot be mounted over",
-		`C:\src:/sys/x`:    "cannot be mounted over",
-		`C:\src:/x:shared`: "not supported",
-		`C:\src:/x:nocopy`: "not supported",
-		`C:src:/x`:         "not an absolute Windows path",
-		`/etc:/x`:          "not an absolute Windows path",
-		`/var/run/docker.sock:/var/run/docker.sock`:   "TESTCONTAINERS_RYUK_DISABLED",
-		`//./pipe/docker_engine:/var/run/docker.sock`: "no socket or pipe of the host reaches a guest",
+		`C:\src`:              "want HOSTPATH:CONTAINERPATH",
+		`data`:                "want HOSTPATH:CONTAINERPATH",
+		`C:\src:app`:          "not absolute",
+		`C:\src:/`:            "cannot be mounted over",
+		`C:\src:/proc`:        "cannot be mounted over",
+		`C:\src:/sys/x`:       "cannot be mounted over",
+		`C:\src:/x:shared`:    "not supported",
+		`C:\src:/x:nocopy`:    "not supported",
+		`C:src:/x`:            "not an absolute Windows path",
+		`/etc:/x`:             "not an absolute Windows path",
 		`:/x`:                 "empty",
 		`a:/x`:                "want HOSTPATH:CONTAINERPATH", // drive A:
 		`_x:/x`:               "invalid volume name",
@@ -98,6 +105,9 @@ func TestParseMount(t *testing.T) {
 		{`type=bind,source=C:\o,target=/o,consistency=default`, mountSpec{kind: bindKind, source: `C:\o`, target: "/o"}},
 		{`type=tmpfs,target=/t`, mountSpec{kind: tmpfsKind, target: "/t", options: "noexec,nosuid,nodev,mode=1777"}},
 		{`type=tmpfs,dst=/t,tmpfs-size=1m,tmpfs-mode=700,readonly`, mountSpec{kind: tmpfsKind, target: "/t", readOnly: true, options: "noexec,nosuid,nodev,ro,mode=700,size=1048576"}},
+		{`type=bind,source=\\.\pipe\runwhp_engine,target=/var/run/docker.sock`, mountSpec{kind: socketKind, source: `\\.\pipe\runwhp_engine`, pipe: `\\.\pipe\runwhp_engine`, target: "/var/run/docker.sock"}},
+		{`type=bind,src=/var/run/docker.sock,dst=/var/run/docker-host.sock`, mountSpec{kind: socketKind, source: "/var/run/docker.sock", target: "/var/run/docker-host.sock"}},
+		{`type=npipe,source=//./pipe/docker_engine,target=/var/run/docker.sock`, mountSpec{kind: socketKind, source: "//./pipe/docker_engine", pipe: `\\.\pipe\docker_engine`, target: "/var/run/docker.sock"}},
 	} {
 		got, err := parseMount(tc.in, cwd)
 		if err != nil || got != tc.want {
@@ -105,25 +115,25 @@ func TestParseMount(t *testing.T) {
 		}
 	}
 	for in, want := range map[string]string{
-		`source=C:\s,target=/s`:           "type is required",
-		`type=npipe,source=x,target=/s`:   "not supported",
-		`type=bind,target=/s`:             "source is required",
-		`type=bind,source=C:\s`:           "target is required",
-		`type=bind,source=data,target=/s`: "not an absolute Windows path",
-		`type=bind,source=\\.\pipe\runwhp_engine,target=/var/run/docker.sock`: "cannot be mounted into a container",
-		`type=bind,source=C:\s,target=/s,ro=what`:                             "not a boolean",
-		`type=bind,source=C:\s,target=/s,size=1`:                              "unknown option",
-		`type=bind,source=C:\s,target=/s,bind-propagation=shared`:             "not supported",
-		`type=bind,source=C:\s,target=/s,volume-nocopy`:                       "only to type=volume",
-		`type=volume,source=v1,target=/s,tmpfs-size=1m`:                       "only to type=tmpfs",
-		`type=volume,source=x,target=/s`:                                      "invalid volume name",
-		`type=volume,source=v1,target=/s,volume-opt=type=nfs`:                 "volume-opt=type=nfs",
-		`type=volume,source=v1,target=/s,volume-opt=size=1m`:                  "out of range",
-		`type=volume,source=v1,target=/s,volume-driver=nfs`:                   "not supported",
-		`type=tmpfs,source=x,target=/t`:                                       "no source",
-		`type=tmpfs,target=/t,tmpfs-mode=999`:                                 "octal",
-		`type=tmpfs,target=/t,tmpfs-size=lots`:                                "invalid size",
-		`type=bind,source=C:\s,target=/s,consistency=eventual`:                "consistency=eventual is not supported",
+		`source=C:\s,target=/s`:                                   "type is required",
+		`type=npipe,source=C:\x,target=/s`:                        "not a named pipe",
+		`type=nfs,source=x,target=/s`:                             "not supported",
+		`type=bind,target=/s`:                                     "source is required",
+		`type=bind,source=C:\s`:                                   "target is required",
+		`type=bind,source=data,target=/s`:                         "not an absolute Windows path",
+		`type=bind,source=C:\s,target=/s,ro=what`:                 "not a boolean",
+		`type=bind,source=C:\s,target=/s,size=1`:                  "unknown option",
+		`type=bind,source=C:\s,target=/s,bind-propagation=shared`: "not supported",
+		`type=bind,source=C:\s,target=/s,volume-nocopy`:           "only to type=volume",
+		`type=volume,source=v1,target=/s,tmpfs-size=1m`:           "only to type=tmpfs",
+		`type=volume,source=x,target=/s`:                          "invalid volume name",
+		`type=volume,source=v1,target=/s,volume-opt=type=nfs`:     "volume-opt=type=nfs",
+		`type=volume,source=v1,target=/s,volume-opt=size=1m`:      "out of range",
+		`type=volume,source=v1,target=/s,volume-driver=nfs`:       "not supported",
+		`type=tmpfs,source=x,target=/t`:                           "no source",
+		`type=tmpfs,target=/t,tmpfs-mode=999`:                     "octal",
+		`type=tmpfs,target=/t,tmpfs-size=lots`:                    "invalid size",
+		`type=bind,source=C:\s,target=/s,consistency=eventual`:    "consistency=eventual is not supported",
 	} {
 		if _, err := parseMount(in, cwd); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("parseMount(%s) = %v, want an error about %q", in, err, want)
@@ -168,7 +178,7 @@ func TestParseMounts(t *testing.T) {
 	plan, err := parseMounts(
 		[]string{dir + ":/a/b/c", "cache:/root/.cache", missing + ":/a:ro", "/a/b/c/node_modules", "Cache:/x/again:ro"},
 		[]string{"type=bind,source=" + file + ",target=/etc/app.toml", "type=volume,source=db,target=/var/db,volume-opt=size=2g"},
-		[]string{"/run:exec"})
+		[]string{"/run:exec"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,16 +212,45 @@ func TestParseMounts(t *testing.T) {
 		t.Errorf("mount order %s", got)
 	}
 
-	if _, err := parseMounts(nil, []string{"type=bind,source=" + filepath.Join(dir, "nope") + ",target=/x"}, nil); err == nil ||
+	if _, err := parseMounts(nil, []string{"type=bind,source=" + filepath.Join(dir, "nope") + ",target=/x"}, nil, ""); err == nil ||
 		!strings.Contains(err.Error(), "does not exist") {
 		t.Errorf("--mount with a missing source: %v", err)
 	}
-	if _, err := parseMounts([]string{dir + ":/x", "v1:/x/"}, nil, nil); err == nil ||
+	if _, err := parseMounts([]string{dir + ":/x", "v1:/x/"}, nil, nil, ""); err == nil ||
 		!strings.Contains(err.Error(), "more than once") {
 		t.Errorf("a target mounted twice: %v", err)
 	}
-	if _, err := parseMounts(nil, nil, []string{"/t", "/t"}); err == nil || !strings.Contains(err.Error(), "more than once") {
+	if _, err := parseMounts(nil, nil, []string{"/t", "/t"}, ""); err == nil || !strings.Contains(err.Error(), "more than once") {
 		t.Errorf("a tmpfs mounted twice: %v", err)
+	}
+}
+
+// Sockets need no share and no disk: Docker's reaches the Engine API's
+// pipe, a pipe named reaches itself.
+func TestParseMountsSockets(t *testing.T) {
+	dir := t.TempDir()
+	plan, err := parseMounts([]string{"/var/run/docker.sock:/var/run/docker.sock", `\\.\pipe\agent:/run/agent.sock:ro`, dir + ":/var/run"},
+		nil, nil, `\\.\pipe\runwhp_engine-1234`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.shares) != 1 || len(plan.volumes) != 0 {
+		t.Errorf("shares %+v, volumes %+v", plan.shares, plan.volumes)
+	}
+	want := map[string]guestspec.Mount{
+		"/var/run/docker.sock": {Kind: socketKind, Target: "/var/run/docker.sock", File: true, Pipe: `\\.\pipe\runwhp_engine-1234`, Source: "/var/run/docker.sock"},
+		"/run/agent.sock":      {Kind: socketKind, Target: "/run/agent.sock", File: true, ReadOnly: true, Pipe: `\\.\pipe\agent`, Source: `\\.\pipe\agent`},
+	}
+	var order []string
+	for _, m := range plan.mounts {
+		order = append(order, m.Target)
+		if w, ok := want[m.Target]; ok && m != w {
+			t.Errorf("mount %+v, want %+v", m, w)
+		}
+	}
+	// The socket goes after the bind mount of its directory.
+	if got := strings.Join(order, " "); got != "/run/agent.sock /var/run /var/run/docker.sock" {
+		t.Errorf("mount order %s", got)
 	}
 }
 
@@ -220,7 +259,7 @@ func TestParseMounts(t *testing.T) {
 func TestParseMountsDelegated(t *testing.T) {
 	a, b, c, d := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
 	plan, err := parseMounts([]string{a + ":/a", b + ":/b:delegated", c + ":/c:ro,delegated"},
-		[]string{"type=bind,source=" + d + ",target=/d,consistency=delegated"}, nil)
+		[]string{"type=bind,source=" + d + ",target=/d,consistency=delegated"}, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}

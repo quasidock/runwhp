@@ -425,6 +425,10 @@ func mounts(p *types.Project, s types.ServiceConfig, c *Container, pr *Problems)
 				}
 			}
 			m.Delegated = v.Consistency == "delegated"
+		case types.VolumeTypeNamedPipe:
+			// A named pipe, as runwhp's run takes it: a socket in the
+			// container reaching it.
+			m.Kind, m.Source = MountBind, v.Source
 		case types.VolumeTypeVolume:
 			m.Kind = MountVolume
 			if v.Source != "" {

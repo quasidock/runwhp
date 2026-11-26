@@ -355,10 +355,14 @@ type runSpec struct {
 	interactive bool
 	tty         bool
 
-	memory      uint64
-	cpus        int
-	network     networkRequest
-	mounts      []mountSpec
+	memory  uint64
+	cpus    int
+	network networkRequest
+	mounts  []mountSpec
+	// apiPipe is the Engine API's pipe, which Docker's socket in mounts
+	// reaches: the server's own, for the API's containers; empty, the
+	// store's, for run's and compose's.
+	apiPipe     string
 	storageSize int64
 	logs        logConfig
 	restart     container.RestartPolicy
@@ -452,9 +456,16 @@ func resolveSpec(ctx context.Context, root string, s *runSpec, policy image.Poli
 	if err != nil {
 		return nil, err
 	}
-	plan, err := planMounts(s.mounts)
+	pipe := s.apiPipe
+	if pipe == "" {
+		pipe = apiPipe(root)
+	}
+	plan, err := planMounts(s.mounts, pipe)
 	if err != nil {
 		return nil, err
+	}
+	if s.apiPipe == "" {
+		warnUnservedPipes(out, plan.mounts)
 	}
 	cfg := &container.Config{
 		Version: container.ConfigVersion, ID: container.NewID(), Created: time.Now().UTC(),

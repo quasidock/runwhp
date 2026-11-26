@@ -133,6 +133,9 @@ func mountOf(m compose.Mount) (mountSpec, error) {
 	}
 	switch m.Kind {
 	case compose.MountBind:
+		if pipe, ok := socketSource(m.Source); ok {
+			return mountSpec{kind: guestspec.MountSocket, source: m.Source, pipe: pipe, target: target, readOnly: m.ReadOnly}, nil
+		}
 		return mountSpec{kind: guestspec.MountBind, source: m.Source, target: target, readOnly: m.ReadOnly, create: m.Create, delegated: m.Delegated}, nil
 	case compose.MountVolume:
 		return mountSpec{kind: guestspec.MountVolume, source: m.Source, target: target, readOnly: m.ReadOnly, noCopy: m.NoCopy}, nil

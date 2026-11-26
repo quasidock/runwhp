@@ -25,8 +25,9 @@ const (
 )
 
 // mountAll makes the container's mounts: binds of the host's shares, named
-// and anonymous volumes, and tmpfs mounts. Host files without an owner of
-// their own belong to the container's user.
+// and anonymous volumes, tmpfs mounts, and sockets reaching the host's
+// pipes. Host files without an owner of their own belong to the
+// container's user.
 //
 // Volumes are filled from the image first, before anything is mounted over
 // it, so a volume under a bind mount gets what the image has there, not
@@ -56,6 +57,10 @@ func mountAll(spec *guestspec.Spec, user passwd.User) error {
 		return err
 	}
 	for i, m := range spec.Mounts {
+		if m.Kind == guestspec.MountSocket && spec.Serve != "" {
+			// A stopped container's files have no host side to reach.
+			continue
+		}
 		target, err := resolveIn(m.Target)
 		if err != nil {
 			return fmt.Errorf("mount point %s: %w", m.Target, err)
@@ -81,6 +86,13 @@ func mountAll(spec *guestspec.Spec, user passwd.User) error {
 			}
 			debugf("mounted a tmpfs on %s (%s)", m.Target, m.Options)
 			continue
+		case guestspec.MountSocket:
+			p, err := listenSocket(spec, i)
+			if err != nil {
+				return fmt.Errorf("socket %s: %w", m.Target, err)
+			}
+			source, what = p, "a socket for "+m.Pipe
+			m.ReadOnly = false // a socket is connected to, not written
 		default:
 			return fmt.Errorf("mount %s: unknown kind %q", m.Target, m.Kind)
 		}

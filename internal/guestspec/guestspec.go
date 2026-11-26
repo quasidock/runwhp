@@ -147,6 +147,11 @@ type Spec struct {
 	Reclaim Reclaim `json:"reclaim,omitzero"`
 	// Debug makes init describe what it does on the kernel console.
 	Debug bool `json:"debug,omitempty"`
+	// SocketToken, made anew for each boot, opens each of init's
+	// connections to PipePort, so that the host takes them from init alone
+	// and not from the container's own processes, which cannot read the
+	// spec.
+	SocketToken string `json:"socketToken,omitempty"`
 	// Serve, when not empty, boots the guest for runwhp itself rather than
 	// for a container: with ServeLayers, init mounts the Layers disks
 	// read-only, each on its own, serves their files on ArchivePort, sends
@@ -191,6 +196,10 @@ const (
 	MountVolume = "volume" // the _data directory of volume disk Volume
 	MountAnon   = "anon"   // an anonymous volume: a directory of this run's own
 	MountTmpfs  = "tmpfs"  // a new tmpfs, mounted with Options
+	// MountSocket is a Unix socket, at a File mount point, whose
+	// connections reach the host's named pipe Pipe: init listens on it and
+	// carries each connection to the host over vsock; see PipePort.
+	MountSocket = "socket"
 )
 
 // Mount is one mount in the container, at Target.
@@ -220,6 +229,11 @@ type Mount struct {
 	// Init, if set, gives a volume's _data directory this owner and mode
 	// when init makes it, as a new RUN --mount=type=cache volume's.
 	Init *MountInit `json:"init,omitempty"`
+	// Pipe is a socket's named pipe on the host, as in
+	// \\.\pipe\runwhp_engine, for the host's side; Source is what the
+	// mount was asked for with, as in /var/run/docker.sock, for inspect.
+	Pipe   string `json:"pipe,omitempty"`
+	Source string `json:"source,omitempty"`
 }
 
 // MountInit is the owner and mode of a new volume's _data directory.
@@ -374,6 +388,22 @@ const (
 // When the container's process exits, init kills every process left,
 // those of runwhp exec included.
 const ExecPort = 1024
+
+// PipePort is the host's vsock port for MountSocket mounts. For each
+// connection made to a socket, init connects to it and sends a
+// SocketHello line; the host answers with one byte, SocketOK once it has
+// connected to the mount's pipe, anything else if it could not, and then
+// carries bytes both ways, each side's half-close included.
+const PipePort = 1027
+
+// SocketHello opens a connection to PipePort.
+type SocketHello struct {
+	Token string `json:"token"`
+	Mount int    `json:"mount"` // the socket's index in Spec.Mounts
+}
+
+// SocketOK is the host's answer to a SocketHello it has connected.
+const SocketOK = 0
 
 // Exec describes a process for runwhp exec.
 type Exec struct {

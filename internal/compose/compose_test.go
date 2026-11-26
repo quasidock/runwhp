@@ -207,6 +207,39 @@ func TestTranslate(t *testing.T) {
 
 func ptr[T any](v T) *T { return &v }
 
+// Docker's socket and named pipes reach runwhp's run with their sources as
+// written, for it to read as sockets.
+func TestSocketMounts(t *testing.T) {
+	p, _ := project(t, map[string]string{"compose.yaml": `
+services:
+  ci:
+    image: docker:cli
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - //./pipe/docker_engine:/var/run/desktop.sock
+      - type: npipe
+        source: \\.\pipe\openssh-ssh-agent
+        target: /run/ssh.sock
+`}, LoadOptions{})
+	var pr Problems
+	ci := Translate(p, p.Services["ci"], &pr)
+	if err := pr.Err(); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, m := range ci.Mounts {
+		got = append(got, m.Kind+" "+m.Source+" "+m.Target)
+	}
+	want := []string{
+		`bind /var/run/docker.sock /var/run/docker.sock`,
+		`bind //./pipe/docker_engine /var/run/desktop.sock`,
+		`bind \\.\pipe\openssh-ssh-agent /run/ssh.sock`,
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("mounts\n got %q\nwant %q", got, want)
+	}
+}
+
 func TestRefused(t *testing.T) {
 	p, _ := project(t, map[string]string{"compose.yaml": `
 services:
