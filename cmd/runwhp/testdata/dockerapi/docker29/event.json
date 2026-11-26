@@ -1,0 +1,1 @@
+{"Type":"container","Action":"create","Actor":{"ID":"3a10d66af748088cd5bb72f1ae8fbc525fe8d339f617c2e6becee4f94ffd3e1f","Attributes":{"image":"alpine:3.20","name":"shape-exit"}},"scope":"local","time":1795690138,"timeNano":1795690138875624431}

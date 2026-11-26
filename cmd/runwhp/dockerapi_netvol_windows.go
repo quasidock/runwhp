@@ -451,7 +451,17 @@ func (s *apiServer) getSystemDF(w http.ResponseWriter, r *http.Request) error {
 		want[t] = true
 	}
 	all := len(want) == 0
-	var resp system.DiskUsage
+	// The usage objects, and, for clients older than API 1.52, the lists
+	// they replaced, as Docker 29 gives both.
+	var resp struct {
+		LayersSize int64
+		Images     []dimage.Summary
+		Containers []dcontainer.Summary
+		Volumes    []dvolume.Volume
+		BuildCache []build.CacheRecord
+		system.DiskUsage
+	}
+	resp.LayersSize = row("Images").Size
 	if all || want["image"] {
 		ir := row("Images")
 		du := &dimage.DiskUsage{TotalCount: int64(ir.Total), ActiveCount: int64(ir.Active), TotalSize: ir.Size, Reclaimable: ir.Reclaimable, Items: []dimage.Summary{}}
@@ -459,6 +469,7 @@ func (s *apiServer) getSystemDF(w http.ResponseWriter, r *http.Request) error {
 			du.Items = append(du.Items, g.summary())
 		}
 		resp.ImageUsage = du
+		resp.Images = du.Items
 	}
 	if all || want["container"] {
 		cr := row("Containers")
@@ -466,9 +477,17 @@ func (s *apiServer) getSystemDF(w http.ResponseWriter, r *http.Request) error {
 		for _, c := range u.Containers {
 			sum := s.summaryOf(c.Container, false)
 			sum.SizeRw = c.Size
+			sum.SizeRootFs = c.Size
+			for _, img := range u.Images {
+				if img.ID() == c.Config.ImageID {
+					sum.SizeRootFs += img.Size
+					break
+				}
+			}
 			du.Items = append(du.Items, sum)
 		}
 		resp.ContainerUsage = du
+		resp.Containers = du.Items
 	}
 	if all || want["volume"] {
 		vr := row("Local Volumes")
@@ -479,12 +498,13 @@ func (s *apiServer) getSystemDF(w http.ResponseWriter, r *http.Request) error {
 			du.Items = append(du.Items, dv)
 		}
 		resp.VolumeUsage = du
+		resp.Volumes = du.Items
 	}
 	if all || want["build-cache"] {
 		br := row("Build Cache")
 		du := &build.DiskUsage{TotalCount: int64(br.Total), ActiveCount: int64(br.Active), TotalSize: br.Size, Reclaimable: br.Reclaimable, Items: []build.CacheRecord{}}
 		for _, e := range u.Cache {
-			rec := build.CacheRecord{ID: e.Key, Type: "regular", Description: e.CreatedBy, InUse: !e.Dangling(), CreatedAt: e.Created}
+			rec := build.CacheRecord{ID: e.Key, Type: "regular", Description: e.CreatedBy, InUse: !e.Dangling(), CreatedAt: e.Created, LastUsedAt: &e.Used, UsageCount: 1}
 			if e.Layer != nil {
 				rec.Size = e.Layer.Size
 			}
@@ -492,6 +512,7 @@ func (s *apiServer) getSystemDF(w http.ResponseWriter, r *http.Request) error {
 		}
 		sort.Slice(du.Items, func(i, j int) bool { return du.Items[i].ID < du.Items[j].ID })
 		resp.BuildCacheUsage = du
+		resp.BuildCache = du.Items
 	}
 	writeJSON(w, resp)
 	return nil

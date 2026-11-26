@@ -30,6 +30,7 @@ func (s *apiServer) getVersion(w http.ResponseWriter, _ *http.Request) error {
 		Arch:          "amd64",
 		GitCommit:     gitCommit(),
 		GoVersion:     runtime.Version(),
+		BuildTime:     buildTime(),
 		KernelVersion: kernel.Default.Tag,
 		Components: []system.ComponentVersion{{
 			Name: "Engine", Version: versionString(),
@@ -67,6 +68,7 @@ func (s *apiServer) getInfo(w http.ResponseWriter, _ *http.Request) error {
 		SystemTime:         time.Now().Format(time.RFC3339Nano),
 		LoggingDriver:      "local",
 		CgroupDriver:       "none",
+		CgroupVersion:      "2",
 		NEventsListener:    s.eventListeners(),
 		KernelVersion:      kernel.Default.Tag,
 		OperatingSystem:    "runwhp on " + windowsVersion(),

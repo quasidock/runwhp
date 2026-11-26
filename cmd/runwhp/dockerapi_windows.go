@@ -906,3 +906,16 @@ func (s *apiServer) ping(w http.ResponseWriter, r *http.Request) error {
 	io.WriteString(w, "OK")
 	return nil
 }
+
+// buildTime is when the commit runwhp was built from was made, if the
+// build recorded it.
+func buildTime() string {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, s := range info.Settings {
+			if s.Key == "vcs.time" {
+				return s.Value
+			}
+		}
+	}
+	return ""
+}

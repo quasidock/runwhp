@@ -395,15 +395,31 @@ func (s *apiServer) getImages(w http.ResponseWriter, r *http.Request) error {
 			continue
 		}
 		if refs := m["reference"]; len(refs) > 0 {
-			ok := false
-			for _, pat := range refs {
-				for _, tag := range sum.RepoTags {
-					ok = ok || matchReference(pat, tag)
+			// Only the names that match, as Docker lists them.
+			var kept []string
+			for _, tag := range sum.RepoTags {
+				for _, pat := range refs {
+					if matchReference(pat, tag) {
+						kept = append(kept, tag)
+						break
+					}
 				}
 			}
-			if !ok {
+			if len(kept) == 0 {
 				continue
 			}
+			sum.RepoTags = kept
+			var digests []string
+			for _, rd := range sum.RepoDigests {
+				repo, _, _ := strings.Cut(rd, "@")
+				for _, pat := range refs {
+					if matchReference(pat, repo) {
+						digests = append(digests, rd)
+						break
+					}
+				}
+			}
+			sum.RepoDigests = append([]string{}, digests...)
 		}
 		out = append(out, sum)
 	}
