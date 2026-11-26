@@ -62,11 +62,41 @@
   builds are not signed.
 - An image can have at most 54 non-empty layers, one more with
   `--network none`, one fewer with bind mounts, one fewer again with
-  delegated ones, and one fewer for each volume: each device, the writable
-  layer, the vsock device and the balloon included, takes an I/O APIC line.
-- The network is IPv4 only and carries no ICMP. Only TCP ports can be
-  published, each with an explicit host port, and there is no `-P`, `--dns`
-  or `--dns-search`.
+  delegated ones, one fewer for each volume, and one fewer for each network
+  beyond the first: each device, the writable layer, the vsock device and
+  the balloon included, takes an I/O APIC line.
+- The network is IPv4 only, and carries no ICMP to the host or beyond it:
+  only containers on a user-defined network ping each other. Only TCP
+  ports can be published, each with an explicit host port, and there is
+  no `-P`, `--dns` or `--dns-search`.
+- `network connect` and `disconnect` refuse a running container: its VM
+  cannot take or give up a network device while it runs. A created
+  container's VM is booted again for them.
+- `network create` takes no `--subnet`, `--gateway`, `--ip-range`,
+  `--internal`, `--ipv6`, `--label` or `-o`, and no driver but `bridge`:
+  runwhp chooses each network's subnet as it is made, and a host route
+  that comes later may hide part of the host's network from its
+  containers. `--ip` needs no `--subnet`, where Docker's does.
+- There is no `--network host`, `container:NAME`, `--link`,
+  `--mac-address` or `gw-priority`, and a container on runwhp's default
+  network cannot join another, as one on Docker's `bridge` can. MAC
+  addresses come from the containers' addresses, where Docker 29's are
+  random, and the interface that sorts first by its network's name is
+  always `eth0`.
+- nerdctl's containers, and build steps, cannot join a user-defined
+  network.
+- DNS on a user-defined network is answered at its gateway, not at
+  `127.0.0.11` as Docker's is, so a program told to ask `127.0.0.11`, as
+  nginx often is, gets no answer. Answers live 60 s, not 600. A name no
+  container has goes to Windows's resolver, which takes about 2.7 s to give
+  up on a single-label one.
+- Network names are case-insensitive, as container names are, where
+  Docker's are not. Networks belong to a store: containers run with
+  different `RUNWHP_ROOT`s do not meet.
+- A ping between containers takes about 1 ms, where Docker's takes 0.1 ms:
+  each wakes two guests. For up to 2 s after a container stops, the others
+  may still find its address, and their frames for it are dropped.
+- There is no `compose`.
 - The network device has one queue pair and no segmentation offload, which
   the link's 65520-byte MTU makes up for in part: 200 MB crosses in about
   0.4 s out of the container and 0.6-0.8 s into it on the test machine.

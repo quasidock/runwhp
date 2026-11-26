@@ -576,3 +576,47 @@
 - **klauspost's gzip at its default level** compresses an 81 MB layer of
   python:3.12-slim to 39.3% at 113 MB/s, against compress/gzip's 38.0%
   at 40 MB/s, about as fast as save rebuilds a layer; push uses it.
+- **How Docker 29's user-defined networks behave**, recorded in WSL:
+  subnets from 172.18.0.0/16 on, past those in use; addresses handed out
+  lowest free first as containers start, and given back as they stop;
+  random MAC addresses. Only running containers keep a network from being
+  removed, and one whose network is gone fails its start with "network ID
+  not found". The embedded DNS at 127.0.0.11 answers a container's name in
+  any case, its aliases, its 12-digit ID, its hostname and NAME.NETWORK,
+  every holder of a shared alias, and PTR as NAME.NETWORK., with a TTL of
+  600; resolv.conf has `options ndots:0`, and /etc/hosts names the
+  container at each of its addresses. A container on two networks routes
+  through the one whose name sorts first, though which is `eth0` varies.
+  `network connect` works on a created container, and twice is no error;
+  `--ip` outside the subnet and on `bridge`, aliases on `bridge`, `bridge`
+  or `none` with a network of the user's, and connecting a `none`
+  container are refused, with the texts runwhp now gives. Broadcasts reach
+  the other containers, and a ping between two takes 0.1 ms.
+- **Named pipes carry frames between processes at GB/s when writes are
+  batched.** Between two Go processes with go-winio, frames of 1514 bytes
+  went at 2.9-4.0 GB/s through a 256 KiB buffered writer and 0.6 GB/s a
+  write each, 66-byte ones at 7-9 million a second and 0.6 million; 64 KiB
+  frames at 3.5-5.7 GB/s and 1.5-2.4 GB/s. Message mode was no faster
+  than byte mode, and 1 MiB pipe buffers helped only unbatched large
+  frames. A 100-byte round trip took 30-40 µs. Go's monotonic clock on
+  Windows ticks every 0.5 ms, so times shorter than that are measured over
+  many rounds.
+- **Linux names virtio-mmio network devices in the order they are
+  given**, eth0 first, on runwhp's kernel and WSL's alike, and three of
+  them cost nothing measurable at boot: init configures each by its MAC.
+- **virtio-net's header must travel with a frame between guests.** A
+  Linux guest that takes `VIRTIO_NET_F_CSUM` leaves TCP and UDP checksums
+  partial, the pseudo-header's sum in the field, with `NEEDS_CSUM` and
+  where to finish it in the header; runwhp dropped the header, which the
+  host's stack never needed. A frame for another guest goes with the
+  header's flags, to a guest that takes `GUEST_CSUM` as they are, and to
+  one that does not finished by the device.
+- **WSL's vEthernet sits in 172.20.48.0/20 on the test machine**, and the
+  Wi-Fi in 192.168.2.0/24: the pools those overlap, 172.20.0.0/16 and
+  192.168.0.0/20, are skipped, as a subnet over the host's would hide its
+  network from the containers.
+- **A file held open without FILE_SHARE_DELETE is a lease that dies with
+  its process.** Opening it for DELETE fails with a sharing violation
+  while its holder lives, and succeeds once it has gone, however it went,
+  while readers that share delete can read it all along. An endpoint's
+  address so goes back to the network the moment its runwhp is killed.

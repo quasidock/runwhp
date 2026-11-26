@@ -9,7 +9,9 @@ HCS, and no administrator rights at run time.
 
 `runwhp` is experimental. It runs Linux containers from registry images,
 interactively or not, with a network, the host's files and volumes of their
-own, on a kernel of its own and on several processors. Containers are kept
+own, on a kernel of its own and on several processors. Containers on a
+network of the user's reach each other by name, as on Docker's user-defined
+networks, with no daemon between them. Containers are kept
 after they stop, can run in the background, and can be started again,
 stopped, signalled, attached to and run more commands in, and started
 again by Docker's restart policies; their logs carry the time of each
@@ -160,7 +162,9 @@ A container's files:
 | `-m`, `--memory` | half this machine's memory | Guest RAM, from `128m` up to this machine's memory. A guest takes only the memory it touches; see [Memory](#memory) |
 | `--cpus` | the host's, up to 4 | vCPUs, a whole number up to the host's logical processors, at most 64. Unlike Docker's `--cpus`, it counts processors rather than setting a quota, so `1.5` is refused |
 | `--hostname` | the ID's first 12 digits | Hostname, also in `/etc/hostname` and `/etc/hosts` |
-| `--network`, `--net` | `user` | `user` gives the container a network through runwhp; `none` leaves it only loopback |
+| `--network`, `--net` | `user` | `user` gives the container a network of its own through runwhp; `none` leaves it only loopback; a network's name puts it on that network, with the containers there, as `name=NAME,alias=ALIAS,ip=ADDRESS` does with an alias and an address; repeatable for networks of the user's. See **User-defined networks** under [Networking](#networking) |
+| `--network-alias` | | Another name for the container on its first network; repeatable |
+| `--ip` | | The container's address on its first network |
 | `-p`, `--publish` | | `[IP:]HOSTPORT:PORT[/tcp]`: listen on the host and forward to the container's TCP port; repeatable. IP defaults to `127.0.0.1` |
 | `--add-host` | | `NAME:IP` or `NAME=IP`, added to `/etc/hosts`; repeatable. `NAME:host-gateway` also lets the container reach the host's `127.0.0.1` at that name |
 | `-v`, `--volume` | | `HOSTPATH:PATH[:ro][,delegated]`: bind a host directory or file at `PATH`; a missing `HOSTPATH` is made as a directory, and `delegated` lets the guest cache writes; see [Delegated mounts](#delegated-mounts). `NAME:PATH[:ro][,nocopy]`: mount the named volume `NAME`, made if missing. `PATH` alone: an anonymous volume, removed with the container. Repeatable. See [Host files](#host-files) and [Volumes](#volumes) |
@@ -396,7 +400,79 @@ administrator. A connection that arrives before anything in the container
 listens on the port is accepted and then closed, as with Docker.
 
 `ping` gets answers only from the gateway: runwhp carries TCP and UDP, not
-ICMP.
+ICMP. Containers on a network of their own ping each other.
+
+#### User-defined networks
+
+The default network keeps every container alone, at the same address.
+Containers on a network made with `runwhp network create` reach each
+other, by name, alias or address, as on a Docker network:
+
+```powershell
+.\out\runwhp.exe network create app
+.\out\runwhp.exe run -d --name db --network app -e POSTGRES_PASSWORD=pw postgres:17
+.\out\runwhp.exe run -d --name web --network app --network-alias api -p 8080:8080 mine/web:1
+.\out\runwhp.exe run --rm --network app alpine:3.20 sh -c 'nc -z db 5432 && wget -qO- http://api:8080/'
+```
+
+| Command | |
+| --- | --- |
+| `network create NAME` | Make a network, and print its ID. Its subnet is runwhp's to choose |
+| `network ls [-q] [--no-trunc]` | List networks: the user's, and the built-in `user` and `none` |
+| `network inspect NETWORK...` | Describe networks as JSON, in the shape of `docker network inspect`, with the containers running on them |
+| `network rm NETWORK...` | Remove networks no container is running on |
+| `network prune [-f]` | Remove every network no container is running on; `system prune` does too |
+| `network connect [--alias NAME]... [--ip ADDRESS] NETWORK CONTAINER` | Put a container that is not running on a network |
+| `network disconnect NETWORK CONTAINER` | Take a container that is not running off a network |
+
+`run` and `create` take `--network NAME` more than once, Docker's long
+form `--network name=NAME,alias=ALIAS,ip=ADDRESS`, and `--network-alias`
+and `--ip`, which go with the first network named. `bridge` and `default`
+are other names for `user`; a container is on `user` or `none`, or on
+networks of the user's, not both.
+
+**Addresses.** A network gets a subnet from Docker's pools as it is made:
+`172.18.0.0/16`, then `172.19.0.0/16` and on to `172.31.0.0/16`, then
+`192.168.0.0/16` in `/20`s, past any the host's interfaces or other
+networks are on. Its gateway is the subnet's first address. A container
+leases the lowest free address after it as its VM boots, and gives it
+back as it stops, as Docker hands addresses out, unless `--ip` asked for
+one; its MAC address is `02:42` and its address, as Docker's were. A
+container on more than one network has an interface on each, `eth0` for
+the network whose name sorts first, with the default route, as Docker
+routes through that network, and the others after it.
+
+**Names.** Each container's runwhp answers DNS at the gateway: the
+names, aliases, 12-digit IDs and hostnames of the containers running on
+its networks, in any case, alone or followed by a dot and the network's
+name, then everything else through Windows's resolver, as on the default
+network. Addresses resolve back to `NAME.NETWORK`. `/etc/resolv.conf`
+names the gateway with `options ndots:0`, and `/etc/hosts` gives the
+container's hostname its addresses, as Docker's do. The host is
+`host-gateway`, `10.0.2.2`, on every network.
+
+**How frames move.** A network has no switch. Each container's runwhp
+routes its guest's frames for the others on the network straight to their
+runwhps, over a named pipe each boot listens on, for this user only, and
+answers its guest's ARP requests for them itself; broadcasts and
+multicasts go to every container on the network. Frames for the gateway,
+DNS and everything outside go to the container's own network stack, as on
+the default network, and so leave through the host's sockets. A container
+finds the others through the store: its lease is a file under the
+network, which its runwhp holds open as long as the VM runs, so a runwhp
+that is killed leaves an address that the next container to boot takes.
+TCP, UDP, ICMP and any other IPv4 protocol pass between containers, from
+their own addresses. 200 MB crosses in about 0.45 s, and a ping takes
+about 1 ms, the time to wake two guests rather than one; see
+[Iteration 18 results](docs/status.md#iteration-18-results).
+
+**Connecting.** A VM cannot take a new network device while it runs, so
+`network connect` and `disconnect` refuse a running container. A stopped
+one is changed for its next start; a created one, whose VM already waits
+to start, is booted again at once, in about 0.4 s; one waiting to start
+again under its restart policy starts so. Off its last network, a
+container has loopback alone, as with Docker. A container keeps the names
+of its networks: one that was removed fails its start, as with Docker.
 
 ### Host files
 
@@ -1177,6 +1253,8 @@ bzImage.
 | [`internal/boot`](internal/boot) | Kernel loader, page tables, ACPI tables, initramfs builder. Builds on any OS |
 | [`internal/virtio`](internal/virtio) | virtio-mmio transport, block device, multiport console, network device, file system device, socket device, memory balloon. Builds on any OS |
 | [`internal/netstack`](internal/netstack) | The host end of the container's network: gVisor's netstack, TCP and UDP forwarding, DNS, published ports. Builds on any OS |
+| [`internal/netswitch`](internal/netswitch) | User-defined networks without a switch: each guest's frames routed to the others' VMMs, ARP and names answered for them, and the links between VMMs. Builds on any OS |
+| [`internal/network`](internal/network) | User-defined networks in the store: subnets, address leases held by the runwhps running containers, what each knows of the others, and their pipes |
 | [`internal/fuse`](internal/fuse) | The FUSE protocol as virtio-fs speaks it, served from a file system interface. Builds on any OS |
 | [`internal/disk`](internal/disk) | The files behind virtual disks: overlapped I/O from many goroutines, sparse files, freeing ranges, exclusive and delete-on-close opens |
 | [`internal/ext4`](internal/ext4) | Makes empty ext4 file systems as mke2fs would, and reads back whether one was left clean. Builds on any OS |
@@ -1228,8 +1306,8 @@ container's supervisor, with no daemon.
 | Guest agent | Tiny init as PID 1 that mounts the overlay and execs the process, instead of hcsshim's GCS plus runc | Done (`runwhp-init`), with an exec server |
 | Host to guest | Console ports for the main process; a virtio socket device for further connections | Done: `runwhp exec` uses vsock |
 | Bind mounts and volumes | virtio-fs, with a FUSE server in Go serving Windows files and keeping Unix metadata as WSL does, and the writeback cache for delegated mounts; volumes as journaled ext4 disk images on virtio-blk | Done; a volume is used by one container at a time |
-| Networking | User-mode network stack in the VMM (gVisor netstack); published ports are loopback listeners | Done, IPv4 only, TCP ports only |
-| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | Done over runwhp's own images, plus `run`, `list`, `stats`, `stop`, `restart`, `rename`, `logs`, `attach`, `wait`, `pause`, `unpause`, `cp`, `export`, `diff`, `commit`, `images`, `rmi`, the prunes, `system df`, `tag`, `history`, `save`, `load`, `import`, `build`, `builder prune`, `push` and `containerd`, and restart policies; OCI bundles only through the shim |
+| Networking | User-mode network stack in the VMM (gVisor netstack); published ports are loopback listeners; on user-defined networks, frames routed from VMM to VMM over named pipes, with ARP and DNS answered by each | Done, IPv4 only, TCP ports only |
+| Command line | runc-compatible `create`, `start`, `state`, `kill`, `delete`, `exec` | Done over runwhp's own images, plus `run`, `list`, `stats`, `stop`, `restart`, `rename`, `logs`, `attach`, `wait`, `pause`, `unpause`, `cp`, `export`, `diff`, `commit`, `images`, `rmi`, the prunes, `system df`, `tag`, `history`, `save`, `load`, `import`, `build`, `builder prune`, `push`, `network` and `containerd`, and restart policies; OCI bundles only through the shim |
 | containerd | A shim v2 (`containerd-shim-runwhp-v1`) that is the task's VMM, taking nerdctl's spec and containerd's LCOW layers; a snapshotter whose views have no mounts; a user containerd set up by `runwhp containerd` | Done: stock nerdctl 2.4, unelevated, `--network none` and runwhp's network |
 | Container files | A file server in init, reached through the container's runwhp, or for a stopped container through a guest booted with its storage; tars written and read as Docker's daemon does | Done: `cp`, `export`, `diff`, `commit` |
 | Container logs | Frames stamped with the host's time, rotated as Docker's `local` driver rotates | Done; every kept container has one |

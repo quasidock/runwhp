@@ -1,5 +1,21 @@
 # Status
 
+- **Iteration 18** (2026-11-26): containers reach each other. `network
+  create` makes a network as Docker's user-defined ones are, and containers
+  run on it with `--network NAME` reach each other by name, alias, ID or
+  address, over TCP, UDP, ICMP or any IPv4 protocol, from their own
+  addresses, and resolve each other's names through DNS at the gateway, as
+  Docker's embedded DNS answers them. There is no switch and no daemon:
+  each container's runwhp routes its guest's frames for the others straight
+  to their runwhps, over named pipes, and answers its guest's ARP for them.
+  A container on several networks has an interface on each. Addresses are
+  leased as VMs boot, through files their runwhps hold open, so a killed
+  runwhp's address is free at once. `network ls`, `inspect`, `rm`,
+  `prune`, `connect` and `disconnect`, `--network-alias` and `--ip` work as
+  Docker's do, but a running container cannot be connected, as its VM cannot
+  take a new device. See
+  [User-defined networks](../README.md#user-defined-networks) and
+  [Iteration 18 results](#iteration-18-results).
 - **Iteration 17** (2026-11-25): images are built and pushed. `build`
   builds an image from a Dockerfile as Docker 29's BuildKit does: its
   own parser, the same stages, arguments, configuration and history,
@@ -1498,3 +1514,88 @@ The new tests cover:
 The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
 the WSL kernel with its vsock modules passed with `--module`; build's
 guests boot runwhp's kernel in each.
+
+## Iteration 18 results
+
+Measured on the test machine with runwhp's kernel, from Git Bash, with
+the store on NTFS (`C:`), over three to seven runs. "Iteration 17" is that
+iteration's build, run in turn with this one; Docker is Docker 29.10 in WSL
+on the same machine. Transfers and pings are timed inside the guests,
+with busybox's `nc` and `ping`.
+
+Runs cost the same on the default network, and about 10 ms more on a
+user-defined one, for the lease, the pipe and the router:
+
+| Measurement | Iteration 17 | Iteration 18 | Iteration 18, on a network |
+| --- | --- | --- | --- |
+| `run --rm alpine:3.20 true`, `-m 512m` | 187-202 ms, and 247 ms once | 191-199 ms | 195-211 ms |
+| the same, default memory | 248-283 ms | 252-262 ms | 260-270 ms |
+| the same, `-m 512m`, on three networks | | | 216-246 ms |
+
+Between containers on a network, against the way containers met before,
+through a published port reached at host-gateway, and against Docker's
+bridge:
+
+| Measurement | runwhp | Docker |
+| --- | --- | --- |
+| 200 MB to another container | 0.44-0.48 s, and 0.79 s once | 1.40-1.52 s |
+| 200 MB from another container | 0.41-0.54 s | 1.41-1.45 s |
+| 200 MB through a published port and host-gateway | 0.57-0.76 s | |
+| ping between containers, average of 50 | 0.93-0.96 ms | 0.14-0.16 ms |
+| ping to the gateway, average of 50 | 0.43-0.59 ms | |
+| `network connect` of a created container, booted again | 448-463 ms | |
+
+Frames between containers go from one guest's virtio-net device to the
+other's through the two runwhps and a named pipe, with nothing but a copy
+in each; the link's 65520-byte MTU, where Docker's bridge has 1500, makes
+bulk transfers fast. Pings are slow: each wakes two halted guests, each
+costing WHP a few hundred microseconds, where the gateway's wakes one.
+
+Named pipes are not what limits them: between two processes, frames of
+1514 bytes went at 2.9-4.0 GB/s batched into few writes, and a 100-byte
+round trip took 30-40 µs; see [Findings](findings.md).
+
+runwhp.exe is 22.3 MB, 0.3 MB more than in iteration 17.
+
+The new tests cover:
+
+- **virtio-net:** a frame's partial checksum passed on with it from a
+  header split across buffers, written into a guest's header that takes
+  it and finished for one that does not, frames asking for segmentation
+  dropped, and offsets past a frame refused.
+- **netstack:** a stack on a network of its own, with DNS at its gateway,
+  the host through either gateway, its subnet and other networks' kept
+  from the host, and a published port reaching the guest's own address.
+- **The router:** ARP for a peer answered with its MAC from a goroutine,
+  never from the vCPU's call; ARP for the gateway, and frames for it, to
+  the stack; unknown addresses looked for; broadcasts and multicasts
+  flooded to peers; spoofed MACs dropped; frames from peers refused from
+  another's MAC, for another guest, or with offsets past them.
+- **Links:** records at the size limits; a refused hello; a thousand
+  queued frames in a few writes; a stalled peer's frames dropped, never
+  waited for; and a link dialed again after its peer went.
+- **Two gVisor stacks as guests,** joined only by routers and links: 20 MB
+  each way, UDP, and DNS for the peer's name, alias and address.
+- **Networks in the store,** on NTFS and, through `RUNWHP_TEST_DIR`, on
+  ReFS: subnets past the host's and other networks', names, prefixes and
+  built-in networks; leases, lowest free first, from 32 goroutines and 4
+  processes at once, all or none, a taken or foreign `--ip`, a killed
+  holder's lease free at once and an exited one's reclaimed; removal
+  refused while a container runs on a network; and what a container knows
+  of the others, refreshed as it misses and as it goes stale.
+- **init:** `/etc/hosts` and `/etc/resolv.conf` on the default network
+  and on user-defined ones.
+- **The CLI:** `--network`, its long form, `--network-alias` and `--ip`,
+  with Docker's refusals; connecting and disconnecting configurations; the
+  device budget with several networks.
+- **End to end:** the network commands, their output and refusals;
+  containers by name, alias, ID, hostname, `NAME.NETWORK` and address,
+  ping, a 20 MB checksum, UDP and a closed port; isolation between
+  networks, with outbound traffic and host-gateway kept; `--ip`;
+  `connect` and `disconnect` of created, stopped and running containers;
+  a restarted container found again; a killed runwhp's address taken by
+  the next; a published port on two networks; `network prune` and `system
+  prune`; and 200 MB between containers.
+
+The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
+the WSL kernel with its vsock modules passed with `--module`.
