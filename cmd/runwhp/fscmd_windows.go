@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"strings"
 	"time"
@@ -281,6 +282,11 @@ func commitOf(is *image.Store, c *container.Container, changes []string, author,
 	k := &commit.Config
 	k.Hostname, k.User, k.Env, k.WorkingDir, k.Image = cfg.Hostname, cfg.User, cfg.Env, cfg.Cwd, cfg.Image
 	k.Tty, k.OpenStdin, k.StdinOnce = cfg.TTY, cfg.Stdin, cfg.StdinOnce
+	// A container keeps its image's labels with its own over them; one
+	// made before iteration 19 kept none, and its image's stand.
+	if cfg.Labels != nil {
+		k.Labels = maps.Clone(cfg.Labels)
+	}
 	cmd := cfg.Cmd
 	if cfg.Entrypoint != nil || cfg.Cmd != nil {
 		k.Entrypoint, k.Cmd = cfg.Entrypoint, cfg.Cmd

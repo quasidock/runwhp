@@ -42,6 +42,8 @@ type Network struct {
 	Driver  string       `json:"driver"`
 	Subnet  netip.Prefix `json:"subnet"`
 	Gateway netip.Addr   `json:"gateway"`
+	// Labels are network create --label's, as Docker keeps them.
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // The built-in networks, which no store records: the default network every

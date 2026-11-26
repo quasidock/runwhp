@@ -61,6 +61,10 @@ type Config struct {
 	StdinOnce bool `json:"stdinOnce,omitempty"`
 	TTY       bool `json:"tty,omitempty"`
 
+	// Labels are the image's labels, with --label-file's and --label's over
+	// them, as Docker keeps a container's.
+	Labels map[string]string `json:"labels,omitempty"`
+
 	Hostname string `json:"hostname"`
 	// Hosts are extra /etc/hosts lines, "ADDRESS NAME".
 	Hosts []string `json:"hosts,omitempty"`

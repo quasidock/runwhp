@@ -413,3 +413,21 @@ func TestDirectory(t *testing.T) {
 		t.Errorf("DNS after a restart: %v", got)
 	}
 }
+
+func TestLabels(t *testing.T) {
+	s := testStore(t)
+	n, err := s.CreateWith("labelled", map[string]string{"com.docker.compose.project": "p", "b": ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ref := range []string{n.ID, "labelled"} {
+		got, err := s.Resolve(ref)
+		if err != nil || got.Labels["com.docker.compose.project"] != "p" || len(got.Labels) != 2 {
+			t.Errorf("%s: %+v, %v", ref, got, err)
+		}
+	}
+	plain, _ := s.Create("plain")
+	if got, _ := s.Resolve("plain"); got.Labels != nil || plain.Labels != nil {
+		t.Errorf("plain network has labels %v", got.Labels)
+	}
+}

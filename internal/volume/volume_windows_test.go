@@ -159,3 +159,22 @@ func TestRemove(t *testing.T) {
 		t.Errorf("removing it again: %v", err)
 	}
 }
+
+func TestLabels(t *testing.T) {
+	s := Open(testRoot(t))
+	if _, err := s.CreateWith("labelled", 64<<20, map[string]string{"com.docker.compose.volume": "data"}); err != nil {
+		t.Fatal(err)
+	}
+	v, made, err := s.EnsureWith("ensured", 64<<20, map[string]string{"a": "1"})
+	if err != nil || !made || v.Labels["a"] != "1" {
+		t.Fatalf("EnsureWith: %+v, %v, %v", v, made, err)
+	}
+	// An existing volume keeps its labels.
+	if v, made, _ := s.EnsureWith("ensured", 64<<20, map[string]string{"a": "2"}); made || v.Labels["a"] != "1" {
+		t.Errorf("EnsureWith again: %+v, %v", v, made)
+	}
+	list, _ := s.List()
+	if len(list) != 2 || list[1].Labels["com.docker.compose.volume"] != "data" {
+		t.Errorf("listed %+v", list)
+	}
+}

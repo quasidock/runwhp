@@ -61,6 +61,8 @@ type runOptions struct {
 	name        string
 	rm          bool
 	detach      bool
+	labels      listFlag
+	labelFiles  listFlag
 
 	// Development flags, left out of the usage text.
 	init    string
@@ -112,6 +114,9 @@ func runFlags(o *runOptions) *flag.FlagSet {
 	fs.BoolVar(&o.rm, "rm", false, "")
 	fs.BoolVar(&o.detach, "d", false, "")
 	fs.BoolVar(&o.detach, "detach", false, "")
+	fs.Var(&o.labels, "l", "")
+	fs.Var(&o.labels, "label", "")
+	fs.Var(&o.labelFiles, "label-file", "")
 	fs.StringVar(&o.init, "init", "", "")
 	fs.Var(&o.layers, "layer", "")
 	fs.Var(&o.modules, "module", "")
@@ -135,6 +140,8 @@ Flags:
       --restart POLICY   start the container again when its process ends: no (default),
                          on-failure[:N] (when it fails, at most N times), always or
                          unless-stopped (the same here), unless stopped or killed
+  -l, --label KEY[=VALUE]  set a label on the container, over the image's (repeatable)
+      --label-file FILE  read labels from a file of KEY=VALUE lines (repeatable)
       --hostname NAME    container hostname (default: the start of its ID)
       --network NETWORK  user (default: outbound access through this machine, alone), none,
                          or a network made with runwhp network create, whose containers reach
@@ -318,6 +325,7 @@ type runSpec struct {
 	logs        logConfig
 	restart     container.RestartPolicy
 	rm          bool
+	labels      map[string]string // over the image's
 
 	// Development flags: the kernel, init and kernel modules to use, and
 	// ext4 layers instead of an image.
@@ -373,6 +381,9 @@ func parseRunOptions(o *runOptions, entrypointSet bool, args []string) (runSpec,
 	if s.restart.IsSet() && o.rm {
 		return s, errors.New("conflicting options: cannot specify both --restart and --rm")
 	}
+	if s.labels, err = parseLabels(o.labels, o.labelFiles); err != nil {
+		return s, err
+	}
 	return s, nil
 }
 
@@ -411,6 +422,7 @@ func resolveSpec(ctx context.Context, root string, s *runSpec, policy image.Poli
 		if process, err = image.BuildProcess(v1.Config{}, overrides); err != nil {
 			return nil, err
 		}
+		cfg.Labels = withLabels(nil, s.labels)
 		for _, p := range s.layers {
 			if cfg.LayerFiles, err = appendAbs(cfg.LayerFiles, p); err != nil {
 				return nil, err
@@ -435,6 +447,7 @@ func resolveSpec(ctx context.Context, root string, s *runSpec, policy image.Poli
 		}
 		cfg.Image, cfg.ImageName, cfg.ImageDigest, cfg.ImageID = s.image, img.Ref, img.Digest, img.ID()
 		cfg.StopSignal = cf.Config.StopSignal
+		cfg.Labels = withLabels(cf.Config.Labels, s.labels)
 	}
 	cfg.Args, cfg.Env, cfg.Cwd, cfg.User = process.Args, process.Env, process.Cwd, process.User
 	cfg.Entrypoint, cfg.Cmd = process.Entrypoint, process.Cmd

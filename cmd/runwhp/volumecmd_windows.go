@@ -20,8 +20,10 @@ import (
 )
 
 const volumeUsage = `Usage:
-  runwhp volume create [--opt size=SIZE] [NAME]   make a volume (default size 64g, a limit, not what it takes)
-  runwhp volume ls [-q]                           list volumes
+  runwhp volume create [--opt size=SIZE] [--label K=V]... [NAME]
+                                                  make a volume (default size 64g, a limit, not what it takes)
+  runwhp volume ls [-q] [-f FILTER]...            list volumes, or those that match name, label,
+                                                  driver or dangling (true: no container uses it)
   runwhp volume inspect NAME...                   describe volumes as JSON
   runwhp volume rm NAME...                        remove volumes and everything in them
   runwhp volume prune [-a] [-f]                   remove volumes no container uses
@@ -48,9 +50,10 @@ func cmdVolume(args []string, stdin io.Reader, stdout io.Writer) int {
 	fs.Usage = func() { fmt.Fprint(fs.Output(), volumeUsage) }
 	switch sub {
 	case "create":
-		var opts listFlag
+		var opts, labelArgs listFlag
 		fs.Var(&opts, "opt", "")
 		fs.Var(&opts, "o", "")
+		fs.Var(&labelArgs, "label", "")
 		if fs.Parse(args) != nil || fs.NArg() > 1 {
 			return 2
 		}
@@ -72,7 +75,12 @@ func cmdVolume(args []string, stdin io.Reader, stdout io.Writer) int {
 			rand.Read(b[:])
 			name = hex.EncodeToString(b[:])
 		}
-		v, err := store.Create(name, size)
+		labels, err := parseLabels(labelArgs, nil)
+		if err != nil {
+			errorf("volume create: %v", err)
+			return 2
+		}
+		v, err := store.CreateWith(name, size, labels)
 		if err != nil {
 			errorf("%v", err)
 			return 1
@@ -80,15 +88,29 @@ func cmdVolume(args []string, stdin io.Reader, stdout io.Writer) int {
 		fmt.Fprintln(stdout, v.Name)
 	case "ls", "list":
 		var quiet bool
+		var filterArgs listFlag
 		fs.BoolVar(&quiet, "q", false, "")
 		fs.BoolVar(&quiet, "quiet", false, "")
+		fs.Var(&filterArgs, "f", "")
+		fs.Var(&filterArgs, "filter", "")
 		if fs.Parse(args) != nil || fs.NArg() > 0 {
 			return 2
 		}
-		vs, err := store.List()
+		f, err := parseFilters(filterArgs, "name", "label", "driver", "dangling")
+		if err != nil {
+			errorf("%v", err)
+			return 2
+		}
+		all, err := store.List()
 		if err != nil {
 			errorf("%v", err)
 			return 1
+		}
+		var vs []*volume.Volume
+		for _, v := range all {
+			if f.matchVolume(v, len(f["dangling"]) > 0 && volumeUsers(root, v.Name) != "") {
+				vs = append(vs, v)
+			}
 		}
 		if quiet {
 			for _, v := range vs {
@@ -115,6 +137,7 @@ func cmdVolume(args []string, stdin io.Reader, stdout io.Writer) int {
 			Size       int64
 			OnDisk     int64
 			InUse      bool
+			Labels     map[string]string
 		}
 		var out []info
 		code := 0
@@ -127,7 +150,7 @@ func cmdVolume(args []string, stdin io.Reader, stdout io.Writer) int {
 			}
 			onDisk, _ := v.OnDisk()
 			busy, _ := v.InUse()
-			out = append(out, info{v.Name, v.CreatedAt, v.Disk(), v.Size, onDisk, busy})
+			out = append(out, info{v.Name, v.CreatedAt, v.Disk(), v.Size, onDisk, busy, withLabels(map[string]string{}, v.Labels)})
 		}
 		data, _ := json.MarshalIndent(out, "", "    ")
 		fmt.Fprintln(stdout, string(data))

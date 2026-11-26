@@ -22,8 +22,10 @@ import (
 )
 
 const networkUsage = `Usage:
-  runwhp network create NAME                        make a network
-  runwhp network ls [-q] [--no-trunc]               list networks
+  runwhp network create [--label K=V]... NAME       make a network
+  runwhp network ls [-q] [--no-trunc] [-f FILTER]...
+                                                    list networks, or those that match name,
+                                                    id, label, driver or type (custom|builtin)
   runwhp network inspect NETWORK...                 describe networks as JSON, with the containers on them
   runwhp network rm NETWORK...                      remove networks no container is running on
   runwhp network prune [-f]                         remove every network no container is running on
@@ -59,16 +61,30 @@ func cmdNetwork(args []string, stdin io.Reader, stdout io.Writer) int {
 		return networkCreate(store, fs, args, stdout)
 	case "ls", "list":
 		var quiet, noTrunc bool
+		var filterArgs listFlag
 		fs.BoolVar(&quiet, "q", false, "")
 		fs.BoolVar(&quiet, "quiet", false, "")
 		fs.BoolVar(&noTrunc, "no-trunc", false, "")
+		fs.Var(&filterArgs, "f", "")
+		fs.Var(&filterArgs, "filter", "")
 		if fs.Parse(args) != nil || fs.NArg() > 0 {
 			return 2
 		}
-		nets, err := store.List()
+		f, err := parseFilters(filterArgs, "name", "id", "label", "driver", "type")
+		if err != nil {
+			errorf("%v", err)
+			return 2
+		}
+		all, err := store.List()
 		if err != nil {
 			errorf("%v", err)
 			return 1
+		}
+		var nets []*network.Network
+		for _, n := range all {
+			if f.matchNetwork(n) {
+				nets = append(nets, n)
+			}
 		}
 		id := func(n *network.Network) string {
 			if noTrunc {
@@ -174,13 +190,14 @@ func cmdNetwork(args []string, stdin io.Reader, stdout io.Writer) int {
 func networkCreate(store *network.Store, fs *flag.FlagSet, args []string, stdout io.Writer) int {
 	var driver string
 	var attachable, internal, ipv6 bool
-	var unsupported listFlag
+	var unsupported, labelArgs listFlag
 	fs.StringVar(&driver, "d", "bridge", "")
 	fs.StringVar(&driver, "driver", "bridge", "")
 	fs.BoolVar(&attachable, "attachable", false, "")
 	fs.BoolVar(&internal, "internal", false, "")
 	fs.BoolVar(&ipv6, "ipv6", false, "")
-	for _, f := range []string{"subnet", "gateway", "ip-range", "label", "o", "opt", "ipam-driver", "ipam-opt", "aux-address", "scope", "config-from"} {
+	fs.Var(&labelArgs, "label", "")
+	for _, f := range []string{"subnet", "gateway", "ip-range", "o", "opt", "ipam-driver", "ipam-opt", "aux-address", "scope", "config-from"} {
 		f := f
 		fs.Func(f, "", func(string) error { unsupported = append(unsupported, "--"+f); return nil })
 	}
@@ -199,7 +216,12 @@ func networkCreate(store *network.Store, fs *flag.FlagSet, args []string, stdout
 		errorf("%s not supported: runwhp chooses each network's subnet itself", strings.Join(unsupported, ", "))
 		return 1
 	}
-	n, err := store.Create(fs.Arg(0))
+	labels, err := parseLabels(labelArgs, nil)
+	if err != nil {
+		errorf("%v", err)
+		return 1
+	}
+	n, err := store.CreateWith(fs.Arg(0), labels)
 	if err != nil {
 		errorf("%v", err)
 		return 1
@@ -288,7 +310,7 @@ func inspectNetwork(root string, store *network.Store, n *network.Network) netwo
 	j := networkJSON{
 		Name: n.Name, ID: n.ID, Created: n.Created, Scope: "local", Driver: n.Driver, EnableIPv4: n.Driver != "null",
 		IPAM:       ipamJSON{Driver: "default", Options: map[string]string{}, Config: []ipamConfig{}},
-		Containers: map[string]networkEndpoint{}, Options: map[string]string{}, Labels: map[string]string{},
+		Containers: map[string]networkEndpoint{}, Options: map[string]string{}, Labels: withLabels(map[string]string{}, n.Labels),
 	}
 	if n.Subnet.IsValid() {
 		j.IPAM.Config = append(j.IPAM.Config, ipamConfig{Subnet: n.Subnet.String(), Gateway: n.Gateway.String()})

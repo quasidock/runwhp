@@ -39,11 +39,14 @@ func newFlags(name, usage string) *flag.FlagSet {
 	return fs
 }
 
-const listUsage = `Usage: runwhp list [-q] [--format table|json]
+const listUsage = `Usage: runwhp list [-q] [-f FILTER]... [--format table|json]
 
 List containers, newest first, running or not.
 
   -q, --quiet        print only their IDs
+  -f, --filter K=V   list only containers that match, as docker ps filters them
+                     (repeatable): id, name, label, status, network, ancestor,
+                     exited, volume
       --format FMT   table (the default), or json: what runwhp state prints, for each
 `
 
@@ -51,8 +54,11 @@ func cmdList(args []string, stdout io.Writer) int {
 	fs := newFlags("list", listUsage)
 	var quiet bool
 	var format string
+	var filterArgs listFlag
 	fs.BoolVar(&quiet, "q", false, "")
 	fs.BoolVar(&quiet, "quiet", false, "")
+	fs.Var(&filterArgs, "f", "")
+	fs.Var(&filterArgs, "filter", "")
 	fs.StringVar(&format, "format", "table", "")
 	if fs.Parse(args) != nil || fs.NArg() > 0 {
 		return 2
@@ -61,14 +67,25 @@ func cmdList(args []string, stdout io.Writer) int {
 		errorf("list: unknown format %q; use table or json", format)
 		return 2
 	}
+	f, err := parseContainerFilters(filterArgs)
+	if err != nil {
+		errorf("%v", err)
+		return 2
+	}
 	store, ok := openContainers()
 	if !ok {
 		return 1
 	}
-	cs, err := store.List()
+	all, err := store.List()
 	if err != nil {
 		errorf("%v", err)
 		return 1
+	}
+	var cs []*container.Container
+	for _, c := range all {
+		if f.matchContainer(c) {
+			cs = append(cs, c)
+		}
 	}
 	switch {
 	case quiet:
@@ -152,7 +169,8 @@ func cmdDelete(args []string, stdout io.Writer) int {
 }
 
 const containerUsage = `Usage:
-  runwhp container ls [-q] [--format table|json]   list containers (also: runwhp list)
+  runwhp container ls [-q] [-f FILTER]... [--format table|json]
+                                                    list containers (also: runwhp list)
   runwhp container rm [-f] CONTAINER...             remove containers (also: runwhp delete)
   runwhp container prune [-f]                       remove stopped and created containers
   runwhp container pause CONTAINER...               freeze containers (also: runwhp pause)
@@ -344,6 +362,7 @@ type containerState struct {
 	Networks    map[string]networkState `json:"networks,omitempty"`
 	Ports       []string                `json:"ports,omitempty"`
 	Volumes     []string                `json:"volumes,omitempty"`
+	Labels      map[string]string       `json:"labels,omitempty"`
 	// Containerd is the containerd task the container runs, for one a
 	// containerd shim runs.
 	Containerd *container.ContainerdTask `json:"containerd,omitempty"`
@@ -356,6 +375,7 @@ func stateOf(c *container.Container) containerState {
 		Created: c.Config.Created, StartedAt: c.State.StartedAt, FinishedAt: c.State.FinishedAt,
 		Error: c.State.Error, GuestPid: c.State.GuestPid, AutoRemove: c.Config.AutoRemove, Output: c.State.Output,
 		Memory: c.Config.Memory, RestartCount: c.State.RestartCount, Containerd: c.Config.Containerd,
+		Labels: c.Config.Labels,
 	}
 	if c.State.Status == container.Running && c.State.Paused {
 		s.Status = container.Paused

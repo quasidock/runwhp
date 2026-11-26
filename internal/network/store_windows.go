@@ -79,6 +79,11 @@ func (s *Store) lock() (func(), error) {
 
 // Create makes a network called name, with the first free subnet.
 func (s *Store) Create(name string) (*Network, error) {
+	return s.CreateWith(name, nil)
+}
+
+// CreateWith is Create, the network labelled with labels.
+func (s *Store) CreateWith(name string, labels map[string]string) (*Network, error) {
 	if err := predefinedError(name); err != nil {
 		return nil, err
 	}
@@ -111,7 +116,7 @@ func (s *Store) Create(name string) (*Network, error) {
 	if err != nil {
 		return nil, err
 	}
-	n := &Network{ID: container.NewID(), Name: name, Created: time.Now(), Driver: "bridge", Subnet: subnet, Gateway: subnet.Addr().Next()}
+	n := &Network{ID: container.NewID(), Name: name, Created: time.Now(), Driver: "bridge", Subnet: subnet, Gateway: subnet.Addr().Next(), Labels: labels}
 
 	// Made aside and moved into place whole, then named.
 	tmp, err := os.MkdirTemp(s.dir(), "tmp-")

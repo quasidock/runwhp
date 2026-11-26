@@ -37,6 +37,8 @@ type Volume struct {
 	Name      string    `json:"name"`
 	CreatedAt time.Time `json:"createdAt"`
 	Size      int64     `json:"size"` // the file system's size; the disk takes only what is written
+	// Labels are volume create --label's, as Docker keeps them.
+	Labels map[string]string `json:"labels,omitempty"`
 
 	dir string
 }
@@ -116,6 +118,11 @@ func (s *Store) Get(name string) (*Volume, error) {
 // is made in the store's tmp directory and moved into place whole, so a
 // volume is either there and complete or not there at all.
 func (s *Store) Create(name string, size int64) (*Volume, error) {
+	return s.CreateWith(name, size, nil)
+}
+
+// CreateWith is Create, the volume labelled with labels.
+func (s *Store) CreateWith(name string, size int64, labels map[string]string) (*Volume, error) {
 	if err := CheckName(name); err != nil {
 		return nil, err
 	}
@@ -134,7 +141,7 @@ func (s *Store) Create(name string, size int64) (*Volume, error) {
 		return nil, err
 	}
 	defer os.RemoveAll(work)
-	v := &Volume{Name: name, CreatedAt: time.Now().UTC().Truncate(time.Second), Size: size, dir: work}
+	v := &Volume{Name: name, CreatedAt: time.Now().UTC().Truncate(time.Second), Size: size, Labels: labels, dir: work}
 	f, err := disk.Create(v.Disk(), size, disk.Exclusive)
 	if err != nil {
 		return nil, fmt.Errorf("creating volume %s: %w", name, err)
@@ -168,11 +175,16 @@ func (s *Store) Create(name string, size int64) (*Volume, error) {
 // Ensure returns the volume called name, creating it with a file system of
 // size bytes if there is none, and reports whether it did.
 func (s *Store) Ensure(name string, size int64) (*Volume, bool, error) {
+	return s.EnsureWith(name, size, nil)
+}
+
+// EnsureWith is Ensure, a volume it makes labelled with labels.
+func (s *Store) EnsureWith(name string, size int64, labels map[string]string) (*Volume, bool, error) {
 	v, err := s.Get(name)
 	if err == nil || !errors.Is(err, ErrNotFound) {
 		return v, false, err
 	}
-	v, err = s.Create(name, size)
+	v, err = s.CreateWith(name, size, labels)
 	if errors.Is(err, ErrExists) {
 		// Another runwhp made it first.
 		v, err = s.Get(name)
