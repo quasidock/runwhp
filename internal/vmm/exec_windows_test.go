@@ -141,6 +141,7 @@ func TestExecSessionDetach(t *testing.T) {
 	f.serve = func(ctl *json.Encoder, _ *bufio.Reader, _ map[string]net.Conn) {
 		ctl.Encode(guestspec.ExecEvent{ID: "1"})
 		ctl.Encode(guestspec.ExecEvent{Started: true, Pid: 9})
+		ctl.Encode(guestspec.ExecEvent{Exited: true, Exit: 5})
 	}
 	sess, err := StartExec(context.Background(), f.dial, &guestspec.Exec{Args: []string{"sleep", "9"}, Detach: true}, ExecStreams{})
 	if err != nil {
@@ -149,7 +150,8 @@ func TestExecSessionDetach(t *testing.T) {
 	if pid, err := sess.Started(); pid != 9 || err != nil {
 		t.Errorf("started: pid %d, %v", pid, err)
 	}
-	if code, err := sess.Wait(); code != 0 || err != nil {
+	// Whoever keeps the session open learns how the process ended.
+	if code, err := sess.Wait(); code != 5 || err != nil {
 		t.Errorf("a detached exec ended with %d, %v", code, err)
 	}
 }

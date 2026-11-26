@@ -66,7 +66,7 @@ func (s *apiServer) getInfo(w http.ResponseWriter, _ *http.Request) error {
 		NFd:                0,
 		NGoroutines:        runtime.NumGoroutine(),
 		SystemTime:         time.Now().Format(time.RFC3339Nano),
-		LoggingDriver:      "local",
+		LoggingDriver:      container.LogDriverJSONFile,
 		CgroupDriver:       "none",
 		CgroupVersion:      "2",
 		NEventsListener:    s.eventListeners(),

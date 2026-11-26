@@ -156,10 +156,12 @@ func (s *Store) CreateWith(cfg *Config, name string, st State) (*Container, erro
 	if !isID(cfg.ID) {
 		return nil, fmt.Errorf("invalid container ID %q", cfg.ID)
 	}
-	if name != "" {
-		if err := CheckName(name); err != nil {
-			return nil, err
-		}
+	// A container given no name gets one, as Docker's do.
+	generated := name == ""
+	if generated {
+		name = NewName(0)
+	} else if err := CheckName(name); err != nil {
+		return nil, err
 	}
 	for _, d := range []string{"tmp", "containers", "names"} {
 		if err := os.MkdirAll(filepath.Join(s.root, d), 0o755); err != nil {
@@ -183,25 +185,31 @@ func (s *Store) CreateWith(cfg *Config, name string, st State) (*Container, erro
 	if err := writeJSON(filepath.Join(work, "state.json"), c.State); err != nil {
 		return nil, err
 	}
-	if name != "" {
-		if err := os.WriteFile(filepath.Join(work, "name"), []byte(name), 0o644); err != nil {
-			return nil, err
-		}
+	if err := os.WriteFile(filepath.Join(work, "name"), []byte(name), 0o644); err != nil {
+		return nil, err
 	}
 	c.dir = s.dir(cfg.ID)
 	if err := os.Rename(work, c.dir); err != nil {
 		return nil, fmt.Errorf("recording container %s: %w", c.Short(), err)
 	}
 	// The name is reserved once the record is in place, so that a name
-	// whose container is not there was left by one that is gone.
-	if name != "" {
-		if err := s.reserve(name, cfg.ID); err != nil {
-			c.Name = ""
-			s.Remove(c)
-			return nil, err
+	// whose container is not there was left by one that is gone. A name
+	// made up that another container has is made up again.
+	for try := 1; ; try++ {
+		err := s.reserve(c.Name, cfg.ID)
+		if err == nil {
+			return c, nil
 		}
+		if generated && errors.Is(err, ErrNameInUse) && try < 10 {
+			c.Name = NewName(try)
+			if err = os.WriteFile(filepath.Join(c.dir, "name"), []byte(c.Name), 0o644); err == nil {
+				continue
+			}
+		}
+		c.Name = ""
+		s.Remove(c)
+		return nil, err
 	}
-	return c, nil
 }
 
 // reserve makes names\<name> hold id, unless another container has the

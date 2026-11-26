@@ -251,7 +251,10 @@ func (s *execServer) run(ctl *os.File, ex *guestspec.Exec) {
 	}
 	e.send(guestspec.ExecEvent{Started: true, Pid: pid})
 	if ex.Detach {
-		go func() { <-done }()
+		// Whoever started it may still be listening, as the Engine API
+		// does to report how it ended; runwhp exec -d has gone already,
+		// and the process goes on without it.
+		e.send(guestspec.ExecEvent{Exited: true, Exit: exitCode(<-done)})
 		return
 	}
 	go e.control(pid, streams.master)

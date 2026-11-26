@@ -26,13 +26,18 @@ func parseLogOptions(driver string, opts []string) (logConfig, error) {
 	var lc logConfig
 	switch strings.ToLower(driver) {
 	case "", container.LogDriverLocal:
+	case container.LogDriverJSONFile:
+		// runwhp's own log, read back as json-file's is, under the name
+		// Docker's clients look for: docker-py reads the output of a run
+		// only from a json-file or journald log.
+		lc.driver = container.LogDriverJSONFile
 	case container.LogDriverNone:
 		lc.driver = container.LogDriverNone
 		if len(opts) > 0 {
 			return lc, fmt.Errorf("--log-opt %s: the none log driver takes no options", opts[0])
 		}
 		return lc, nil
-	case "json-file", "journald", "syslog", "fluentd", "gelf", "awslogs", "splunk", "etwlogs", "gcplogs":
+	case "journald", "syslog", "fluentd", "gelf", "awslogs", "splunk", "etwlogs", "gcplogs":
 		return lc, fmt.Errorf("--log-driver %s: runwhp keeps its own log format; use local (the default) or none", driver)
 	default:
 		return lc, fmt.Errorf("--log-driver %s: unknown log driver; use local (the default) or none", driver)

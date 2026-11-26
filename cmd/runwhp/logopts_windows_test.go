@@ -28,7 +28,8 @@ func TestParseLogOptions(t *testing.T) {
 		{"", []string{"labels=a"}, logConfig{}, "unknown option"},
 		{"none", nil, logConfig{driver: "none"}, ""},
 		{"none", []string{"max-file=2"}, logConfig{}, "takes no options"},
-		{"json-file", nil, logConfig{}, "own log format"},
+		{"json-file", []string{"max-size=10m"}, logConfig{driver: "json-file", maxSize: 10 << 20}, ""},
+		{"journald", nil, logConfig{}, "own log format"},
 		{"bogus", nil, logConfig{}, "unknown log driver"},
 	} {
 		got, err := parseLogOptions(c.driver, c.opts)

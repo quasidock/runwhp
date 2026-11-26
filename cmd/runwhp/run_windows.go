@@ -196,7 +196,7 @@ Flags:
       --tmpfs PATH[:OPTIONS]  mount a tmpfs, by default noexec,nosuid,nodev (repeatable)
       --storage-opt size=SIZE  how large the container's writable layer may grow (default 64g)
       --log-driver local|none  keep the container's output in its log (local, the default)
-                         or not
+                         or not; json-file is local, under Docker's name
       --log-opt max-size=SIZE|max-file=N  rotate the log as it reaches SIZE (default 20m;
                          -1 never), keeping N files (default 5) (repeatable)
       --pull POLICY      when to pull the image: missing, always or never (default missing);
@@ -511,7 +511,7 @@ func resolveSpec(ctx context.Context, root string, s *runSpec, policy image.Poli
 	cfg.Expose = exposedPorts(imageExposed, s.network.expose, cfg.Publish)
 	if s.network.publishAll && cfg.Network {
 		more, skipped := publishAll(cfg.Expose, cfg.Publish)
-		cfg.Publish = append(cfg.Publish, more...)
+		cfg.Publish, cfg.PublishAll = append(cfg.Publish, more...), true
 		if len(skipped) > 0 && out != nil {
 			fmt.Fprintf(out, "WARNING: -P publishes TCP ports only; not %s\n", strings.Join(skipped, ", "))
 		}

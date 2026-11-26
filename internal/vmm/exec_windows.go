@@ -123,12 +123,10 @@ func (s *ExecSession) read() {
 			return
 		}
 		if ev.Started {
+			// A detached process's session goes on too, until init says
+			// how it ended, for whoever keeps it open to learn that.
 			s.pid = ev.Pid
 			s.markStarted()
-			if s.detach {
-				s.end(guestspec.ExecEvent{Exited: true})
-				return
-			}
 		}
 		if ev.Exited {
 			s.end(ev)

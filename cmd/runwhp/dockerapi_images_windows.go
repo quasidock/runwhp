@@ -21,11 +21,14 @@ import (
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	dockerspec "github.com/moby/docker-image-spec/specs-go/v1"
 	"github.com/moby/moby/api/types/events"
 	dimage "github.com/moby/moby/api/types/image"
 	"github.com/moby/moby/api/types/jsonstream"
 	"github.com/moby/moby/api/types/registry"
+	godigest "github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/quasidock/runwhp/internal/container"
 	"github.com/quasidock/runwhp/internal/dockerapi"
@@ -1038,5 +1041,37 @@ func (s *apiServer) postAuth(w http.ResponseWriter, r *http.Request) error {
 		return &apiError{http.StatusUnauthorized, err.Error()}
 	}
 	writeJSON(w, registry.AuthResponse{Status: "Login Succeeded"})
+	return nil
+}
+
+// getDistribution answers GET /distribution/NAME/json: what the registry
+// has for an image, looked up without pulling it.
+func (s *apiServer) getDistribution(w http.ResponseWriter, r *http.Request) error {
+	ref, ok := strings.CutSuffix(strings.TrimPrefix(r.URL.Path, "/distribution/"), "/json")
+	if r.Method != http.MethodGet || !ok || ref == "" {
+		return notImplemented("runwhp does not serve %s", r.URL.Path)
+	}
+	ac, err := registryAuth(r)
+	if err != nil {
+		return err
+	}
+	is := image.Open(s.root)
+	withAuth(is, ac)
+	desc, platforms, err := is.Distribution(r.Context(), ref)
+	if err != nil {
+		var te *transport.Error
+		if errors.As(err, &te) && (te.StatusCode == http.StatusUnauthorized || te.StatusCode == http.StatusForbidden) {
+			return &apiError{http.StatusUnauthorized, err.Error()}
+		}
+		return notFound("%v", err)
+	}
+	out := registry.DistributionInspect{
+		Descriptor: ocispec.Descriptor{MediaType: string(desc.MediaType), Digest: godigest.Digest(desc.Digest.String()), Size: desc.Size},
+		Platforms:  []ocispec.Platform{},
+	}
+	for _, p := range platforms {
+		out.Platforms = append(out.Platforms, ocispec.Platform{OS: p.OS, Architecture: p.Architecture, Variant: p.Variant, OSVersion: p.OSVersion})
+	}
+	writeJSON(w, out)
 	return nil
 }

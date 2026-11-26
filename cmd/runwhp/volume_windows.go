@@ -318,6 +318,9 @@ func hostPath(p, cwd string) (string, error) {
 	switch {
 	case p == "":
 		return "", errors.New("the host path is empty")
+	case isAPISocket(p):
+		return "", fmt.Errorf("%s cannot be mounted into a container: no socket or pipe of the host reaches a guest yet, "+
+			"so containers cannot drive Docker's API; for Testcontainers, set TESTCONTAINERS_RYUK_DISABLED=true", p)
 	case len(p) >= 3 && isLetter(p[0]) && p[1] == ':' && (p[2] == '\\' || p[2] == '/'),
 		strings.HasPrefix(p, `\\`), strings.HasPrefix(p, "//"):
 		return filepath.Clean(p), nil
@@ -333,6 +336,15 @@ func hostPath(p, cwd string) (string, error) {
 		return filepath.Clean(strings.ToUpper(p[1:2]) + `:\` + p[min(3, len(p)):]), nil
 	}
 	return "", fmt.Errorf("host path %s is not an absolute Windows path, such as C:\\src", p)
+}
+
+// isAPISocket reports whether a bind's source is Docker's socket, as
+// Testcontainers' Ryuk and docker-outside-of-docker mount it, or a named
+// pipe, such as Docker's or runwhp's API's.
+func isAPISocket(p string) bool {
+	low := strings.ToLower(strings.ReplaceAll(p, `\`, "/"))
+	return low == "/var/run/docker.sock" || low == "/run/docker.sock" ||
+		strings.HasPrefix(low, "//./pipe/") || strings.HasPrefix(low, "//?/pipe/")
 }
 
 // containerPath checks a mount point inside the container.

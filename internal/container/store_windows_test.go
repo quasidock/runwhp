@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -118,6 +119,27 @@ func TestResolve(t *testing.T) {
 		}
 		if err != nil || got.ID != tc.want.ID {
 			t.Errorf("Resolve(%q) = %v, %v; want %s", tc.ref, got, err, tc.want.Short())
+		}
+	}
+}
+
+// TestMadeUpNames checks that a container given no name gets one, as
+// Docker's do, by which it is found, and that many get different ones.
+func TestMadeUpNames(t *testing.T) {
+	s := Open(testRoot(t))
+	shape := regexp.MustCompile(`^[a-z]+_[a-z]+[0-9]?$`)
+	seen := map[string]bool{}
+	for range 40 {
+		c, err := s.Create(newConfig(""), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !shape.MatchString(c.Name) || CheckName(c.Name) != nil || seen[c.Name] {
+			t.Errorf("made-up name %q (seen before: %v)", c.Name, seen[c.Name])
+		}
+		seen[c.Name] = true
+		if got, err := s.Resolve(c.Name); err != nil || got.ID != c.ID {
+			t.Errorf("Resolve(%q) = %v, %v", c.Name, got, err)
 		}
 	}
 }

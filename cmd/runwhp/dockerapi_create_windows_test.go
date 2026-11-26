@@ -136,7 +136,10 @@ func TestSpecFromCreate(t *testing.T) {
 		t.Errorf("mounts %+v", s.mounts)
 	}
 	joined := strings.Join(warnings, "\n")
-	for _, w := range []string{"rounded up to 2", "--init", "json-file"} {
+	if s.logs.driver != "json-file" || s.logs.maxSize != 1<<20 {
+		t.Errorf("logs %+v", s.logs)
+	}
+	for _, w := range []string{"rounded up to 2", "--init"} {
 		if !strings.Contains(joined, w) {
 			t.Errorf("no warning of %s in %q", w, warnings)
 		}

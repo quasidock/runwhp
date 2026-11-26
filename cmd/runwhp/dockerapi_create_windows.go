@@ -114,11 +114,10 @@ func specFromCreate(req dcontainer.CreateRequest) (runSpec, []string, error) {
 		return s, nil, badRequest("%v", err)
 	}
 	driver := hc.LogConfig.Type
-	if driver == "json-file" {
-		// What the docker CLI's users mean is a log to read back, which
-		// runwhp's own format is.
-		warn("log driver json-file: runwhp keeps its log in its own format, as Docker's local driver does")
-		driver = container.LogDriverLocal
+	if driver == "" {
+		// Docker's daemon's default, which the API reports runwhp's own
+		// log as: it reads back as json-file's does.
+		driver = container.LogDriverJSONFile
 	}
 	var logOpts []string
 	for k, v := range hc.LogConfig.Config {

@@ -175,6 +175,14 @@ func runExec(root string, c *container.Container, ex *guestspec.Exec) (int, erro
 		return fail, err
 	}
 	defer sess.Close()
+	if ex.Detach {
+		// Started, it runs on without this session.
+		if _, err := sess.Started(); err != nil {
+			code, _ := sess.Wait()
+			return code, err
+		}
+		return 0, nil
+	}
 	send := func(m guestspec.Control) { sess.Send(m) }
 
 	// Control messages: signals and, with a terminal, its size.

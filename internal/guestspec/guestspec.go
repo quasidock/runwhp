@@ -368,7 +368,8 @@ const (
 // control connection the host then sends Control messages, signals and
 // terminal sizes, and init sends a last ExecEvent when the process has
 // exited and its output has been sent. A process started with Detach gets
-// /dev/null and no streams, and its session ends once it has started.
+// /dev/null and no streams, and goes on if the host closes the session
+// once it has started; init reports its end to a host that did not.
 //
 // When the container's process exits, init kills every process left,
 // those of runwhp exec included.

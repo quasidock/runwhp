@@ -5,7 +5,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -301,12 +303,16 @@ func (s *apiServer) endpointsOf(c *container.Container) map[string]*dnetwork.End
 	cfg := c.Config
 	if len(cfg.Networks) == 0 {
 		if !cfg.Network {
-			out["none"] = &dnetwork.EndpointSettings{NetworkID: "none"}
+			out["none"] = &dnetwork.EndpointSettings{NetworkID: network.Builtin(network.None).ID}
 			return out
 		}
-		e := &dnetwork.EndpointSettings{NetworkID: network.User}
+		// The network's ID is the one /networks gives bridge.
+		e := &dnetwork.EndpointSettings{NetworkID: network.Builtin(network.User).ID}
 		if c.State.Active() {
 			e.Gateway, e.IPAddress, e.IPPrefixLen = netstack.Gateway, netstack.Guest, netstack.Subnet.Bits()
+			e.MacAddress = dnetwork.HardwareAddr(netstack.GuestMAC[:])
+			sum := sha256.Sum256([]byte("runwhp-endpoint-" + c.ID))
+			e.EndpointID = hex.EncodeToString(sum[:])
 		}
 		out["bridge"] = e
 		return out
@@ -445,11 +451,12 @@ func (s *apiServer) inspectOf(c *container.Container, size bool) dcontainer.Insp
 
 	hc := &dcontainer.HostConfig{
 		NetworkMode: dcontainer.NetworkMode(dockerNetworkMode(cfg)), PortBindings: bindings,
-		RestartPolicy: dcontainer.RestartPolicy{Name: dcontainer.RestartPolicyMode(cfg.Restart.Name), MaximumRetryCount: cfg.Restart.MaxRetries},
-		AutoRemove:    cfg.AutoRemove,
-		LogConfig:     dcontainer.LogConfig{Type: cfg.LogDriver, Config: map[string]string{}},
-		Runtime:       "runwhp",
-		Isolation:     "",
+		RestartPolicy:   dcontainer.RestartPolicy{Name: dcontainer.RestartPolicyMode(cfg.Restart.Name), MaximumRetryCount: cfg.Restart.MaxRetries},
+		AutoRemove:      cfg.AutoRemove,
+		PublishAllPorts: cfg.PublishAll,
+		LogConfig:       dcontainer.LogConfig{Type: cfg.LogDriver, Config: map[string]string{}},
+		Runtime:         "runwhp",
+		Isolation:       "",
 	}
 	if hc.RestartPolicy.Name == "" {
 		hc.RestartPolicy.Name = "no"
@@ -558,10 +565,33 @@ func (s *apiServer) postContainerStop(w http.ResponseWriter, r *http.Request) er
 		w.WriteHeader(http.StatusNotModified)
 		return nil
 	}
-	if err := stopContainerWith(r.Context(), s.containers, c.ID, timeout, sig); err != nil {
+	if err := s.stopEmitting(r, c, timeout, sig); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)
+	return nil
+}
+
+// stopEmitting stops a container, with the events Docker's daemon gives a
+// stop: a kill with the stop signal, and once it has stopped, a stop.
+func (s *apiServer) stopEmitting(r *http.Request, c *container.Container, timeout time.Duration, sig int) error {
+	running := c.State.Status == container.Running
+	if running {
+		stopSig := sig
+		if stopSig == 0 {
+			stopSig = guestspec.SIGTERM
+			if n, err := guestspec.ParseSignal(c.Config.StopSignal); c.Config.StopSignal != "" && err == nil {
+				stopSig = n
+			}
+		}
+		s.emitContainer(c, "kill", map[string]string{"signal": strconv.Itoa(stopSig)})
+	}
+	if err := stopContainerWith(r.Context(), s.containers, c.ID, timeout, sig); err != nil {
+		return err
+	}
+	if running {
+		s.emitContainer(c, "stop", nil)
+	}
 	return nil
 }
 
@@ -577,11 +607,14 @@ func (s *apiServer) postContainerRestart(w http.ResponseWriter, r *http.Request)
 	if c.Config.AutoRemove {
 		return conflict("container %s was run with --rm, and would be gone once stopped", c.Short())
 	}
-	if err := stopContainerWith(r.Context(), s.containers, c.ID, timeout, sig); err != nil {
+	if err := s.stopEmitting(r, c, timeout, sig); err != nil {
 		return err
 	}
 	if err := startContainerIO(r.Context(), s.containers, c.ID, false); err != nil {
 		return err
+	}
+	if c, err := s.containers.Resolve(c.ID); err == nil {
+		s.emitContainer(c, "restart", nil)
 	}
 	w.WriteHeader(http.StatusNoContent)
 	return nil

@@ -211,7 +211,7 @@ func TestForegroundLog(t *testing.T) {
 	}
 
 	for _, args := range [][]string{
-		{"--log-driver", "json-file"},
+		{"--log-driver", "journald"},
 		{"--log-opt", "max-size=1k"},
 		{"--log-opt", "compress=true"},
 	} {

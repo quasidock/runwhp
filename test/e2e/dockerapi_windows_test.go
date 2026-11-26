@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -168,6 +169,7 @@ func TestDockerRun(t *testing.T) {
 		{[]string{"--dns", "1.1.1.1"}, "--dns"},
 		{[]string{"-p", "53:53/udp"}, "only tcp"},
 		{[]string{"--cap-add", "NET_ADMIN"}, "--cap-add"},
+		{[]string{"-v", "/var/run/docker.sock:/var/run/docker.sock"}, "TESTCONTAINERS_RYUK_DISABLED"},
 	} {
 		r := d.docker1(append(append([]string{"run", "--rm"}, tc.args...), img, "true")...)
 		if r.code == 0 || !strings.Contains(r.stderr, tc.want) {
@@ -249,6 +251,24 @@ func TestDockerLifecycle(t *testing.T) {
 	if got := strings.Join(lines(evs), ","); got != "create,attach,start,die,destroy" {
 		t.Errorf("events: %s", got)
 	}
+	// A stop's and a restart's events, as Docker Compose watches for them:
+	// a kill with the stop signal, the die and the stop; a restart's start
+	// and restart.
+	evs = d.dok("events", "--since", fmt.Sprint(since), "--until", fmt.Sprint(time.Now().Unix()+1),
+		"--filter", "container=tocker", "--format", "{{.Action}} {{index .Actor.Attributes \"signal\"}}")
+	got := strings.Join(lines(evs), ",")
+	for _, want := range []string{"kill 15", "stop ", "restart ", "rename "} {
+		if !strings.Contains(got, want) {
+			t.Errorf("events of tocker lack %q: %s", want, got)
+		}
+	}
+
+	// A container made without a name gets one, as Docker's do.
+	id := strings.TrimSpace(d.dok("create", img, "true"))
+	if name := d.dok("inspect", "-f", "{{.Name}}", id); !regexp.MustCompile(`^/[a-z]+_[a-z]+[0-9]?\n$`).MatchString(name) {
+		t.Errorf("made-up name %q", name)
+	}
+	d.dok("rm", id)
 }
 
 // TestDockerExec runs commands in a running container.
@@ -267,10 +287,31 @@ func TestDockerExec(t *testing.T) {
 	if r.stdout != "from stdin\n" || r.code != 0 {
 		t.Errorf("exec -i: %+v", r)
 	}
-	d.dok("exec", "-d", "ex", "sh", "-c", "sleep 0.3; echo done > /tmp/d")
+	d.dok("exec", "-d", "ex", "sh", "-c", "sleep 0.3; echo done > /tmp/d; exit 5")
 	time.Sleep(time.Second)
 	if out := d.dok("exec", "ex", "cat", "/tmp/d"); out != "done\n" {
 		t.Errorf("exec -d: %q", out)
+	}
+	// The detached exec's inspect says how it ended.
+	var execs struct{ ExecIDs []string }
+	d.get("/containers/ex/json", &execs)
+	ended := 0
+	for _, id := range execs.ExecIDs {
+		var ex struct {
+			Running       bool
+			ExitCode      *int
+			ProcessConfig struct{ Arguments []string }
+		}
+		d.get("/exec/"+id+"/json", &ex)
+		if len(ex.ProcessConfig.Arguments) == 2 && strings.HasSuffix(ex.ProcessConfig.Arguments[1], "exit 5") {
+			if ex.Running || ex.ExitCode == nil || *ex.ExitCode != 5 {
+				t.Errorf("exec -d's inspect: running %v, exit code %s", ex.Running, fmtIntPtr(ex.ExitCode))
+			}
+			ended++
+		}
+	}
+	if ended != 1 {
+		t.Errorf("found %d detached execs among %q", ended, execs.ExecIDs)
 	}
 	// docker top, as ps -ef and ps aux show the processes.
 	if out := d.dok("top", "ex"); !strings.HasPrefix(out, "UID") || !strings.Contains(out, "sleep 600") {
@@ -627,6 +668,7 @@ func TestDockerAPIShapes(t *testing.T) {
 	d.dok("run", "-d", "--name", "shape-run", "--label", "k=v", "--network", "shape-net", "-p", "127.0.0.1:18081:80",
 		"-v", "shape-vol:/data", "--health-cmd", "true", "--health-interval", "1s", img, "sleep", "600")
 	d.docker1("run", "--name", "shape-exit", img, "sh", "-c", "exit 3")
+	d.dok("run", "-d", "--name", "shape-ports", "-p", "80", "--expose", "9000", "-P", img, "sh", "-c", "sleep 1000 & exec sleep 999")
 	// A build, for the build cache system df lists.
 	d.dok("build", "-q", "-t", "shape-built", buildDir(t, map[string]string{"Dockerfile": "FROM " + img + "\nRUN echo > /built\n"}))
 	time.Sleep(2 * time.Second)
@@ -650,6 +692,9 @@ func TestDockerAPIShapes(t *testing.T) {
 		"VolumeUsage.Reclaimable": true,
 		// A misspelt key of Docker's own, " Parents".
 		"BuildCacheUsage.Items[]. Parents": true, "BuildCache[]. Parents": true,
+		// Docker Hub's alpine has arm variants; the mirror has linux/amd64
+		// alone.
+		"Platforms[].variant": true,
 	}
 	skip := func(k string) bool {
 		for p := range absent {
@@ -673,6 +718,10 @@ func TestDockerAPIShapes(t *testing.T) {
 		{"networks.json", "/networks"},
 		{"volume.json", "/volumes/shape-vol"},
 		{"df.json", "/system/df"},
+		{"top.json", "/containers/shape-ports/top"},
+		{"top-aux.json", "/containers/shape-ports/top?ps_args=aux"},
+		{"container-ports.json", "/containers/shape-ports/json"},
+		{"distribution.json", "/distribution/" + mirrored(t, alpine) + "/json"},
 	} {
 		data, err := os.ReadFile(filepath.Join("..", "..", "cmd", "runwhp", "testdata", "dockerapi", "docker29", tc.fixture))
 		if err != nil {
@@ -746,4 +795,11 @@ func readTar(t *testing.T, data []byte) map[string][]byte {
 			out[hdr.Name] = b
 		}
 	}
+}
+
+func fmtIntPtr(p *int) string {
+	if p == nil {
+		return "null"
+	}
+	return fmt.Sprint(*p)
 }

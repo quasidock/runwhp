@@ -242,11 +242,24 @@ func (s *apiServer) postExecStart(w http.ResponseWriter, r *http.Request) error 
 			return s.execFailed(e, err)
 		}
 		pid, _ := sess.Started()
-		sess.Close()
 		e.mu.Lock()
-		e.pid = pid
+		e.sess, e.running, e.pid = sess, true, pid
 		e.mu.Unlock()
 		s.emitContainer(c, events.ActionExecStart, map[string]string{"execID": e.id, "exec_command": joinArgs(ex.Args)})
+		// The session stays open to learn how the process ends, which its
+		// inspect then says; closing it, as the server stops, leaves the
+		// process running.
+		go func() {
+			select {
+			case <-sess.Done():
+			case <-s.ctx.Done():
+				sess.Close()
+				return
+			}
+			code, _ := sess.Wait()
+			sess.Close()
+			s.execEnded(c, e, code)
+		}()
 		w.WriteHeader(http.StatusOK)
 		return nil
 	}

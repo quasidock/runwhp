@@ -872,7 +872,8 @@ func (s *apiServer) routes() {
 		writeJSON(w, []any{})
 		return nil
 	})
-	for _, p := range []string{"/plugins/", "/distribution/", "/session", "/grpc", "/images/search"} {
+	s.handle("/distribution/", s.getDistribution)
+	for _, p := range []string{"/plugins/", "/session", "/grpc", "/images/search"} {
 		s.handle(p, func(_ http.ResponseWriter, r *http.Request) error {
 			return notImplemented("runwhp does not serve %s", r.URL.Path)
 		})

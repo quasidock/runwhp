@@ -95,6 +95,8 @@ type Config struct {
 	// Docker's ExposedPorts: its image's, --expose's and the published
 	// ones. Containers made before iteration 21 have none.
 	Expose []string `json:"expose,omitempty"`
+	// PublishAll says -P published the exposed ports, among Publish.
+	PublishAll bool `json:"publishAll,omitempty"`
 
 	// Shares are the host directories and files bound into the container,
 	// numbered as Mounts number them; Volumes the named volumes, one disk
@@ -125,7 +127,8 @@ type Config struct {
 	Restart RestartPolicy `json:"restart,omitzero"`
 
 	// The log: LogDriver is LogDriverLocal, runwhp's own, or LogDriverNone;
-	// empty means local. LogMaxSize and LogMaxFiles bound it, 0 meaning
+	// empty means local. LogDriverJSONFile is runwhp's own too, under the
+	// name it was asked for by, which Docker's clients look for. LogMaxSize and LogMaxFiles bound it, 0 meaning
 	// the defaults and a negative LogMaxSize no bound.
 	LogDriver   string `json:"logDriver,omitempty"`
 	LogMaxSize  int64  `json:"logMaxSize,omitempty"`
@@ -214,8 +217,9 @@ type ContainerdTask struct {
 
 // Log drivers.
 const (
-	LogDriverLocal = "local"
-	LogDriverNone  = "none"
+	LogDriverLocal    = "local"
+	LogDriverNone     = "none"
+	LogDriverJSONFile = "json-file"
 )
 
 // KeepsLog reports whether the container keeps a log.
