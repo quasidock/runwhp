@@ -1,5 +1,22 @@
 # Status
 
+- **Iteration 22** (2026-11-27): containers drive Docker's API, and
+  reach any named pipe of the host. A pipe bound into a container, with
+  `-v //./pipe/NAME:PATH` or `--mount`, is a Unix socket there: init
+  listens on it and carries each connection over the virtio socket
+  device, which now takes connections the guest opens, to the
+  container's runwhp, which connects to the pipe, half-closes included.
+  Docker's socket, `/var/run/docker.sock`, means runwhp's Engine API: the
+  server that made the container, or the store's. So Testcontainers runs
+  with Ryuk, which removes what a session left; the docker CLI in a
+  container runs, attaches to and removes containers; Docker Compose's
+  and `runwhp compose`'s `use_api_socket` work, with the docker CLI's
+  credentials; and Dev Containers' docker-outside-of-docker gives a dev
+  container's user docker. A volume a mount makes takes the mount's
+  labels, the API takes SELinux label options, and a build on an image
+  with an empty layer no longer fails. See
+  [Host pipes](../README.md#host-pipes) and
+  [Iteration 22 results](#iteration-22-results).
 - **Iteration 21** (2026-11-26): Docker's own tools run through runwhp's
   Engine API, each tested end to end: Docker Compose's plugin, building
   with the classic builder it falls back to without buildx;
@@ -1917,3 +1934,98 @@ the WSL kernel with its vsock modules passed with `--module`, Docker's
 tools included; the API's containers boot runwhp's kernel in each.
 VS Code's "Reopen in Container", and `docker run -it` in a console, are
 still to be tried by hand.
+
+## Iteration 22 results
+
+Measured on the test machine with runwhp's kernel, from Git Bash, with
+the store on NTFS (`C:`), over four or five runs. "Iteration 21" is that
+iteration's build, run in turn with this one. Docker is Docker 29.10 in
+WSL on the same machine; `docker:cli` is the docker CLI 29.10 in a
+container, with Docker's socket bound.
+
+runwhp's own commands cost what they did, and a socket costs a run
+nothing measurable: init binds it as it makes the other mounts, and the
+host listens for it on the vsock device it already has:
+
+| Measurement | Iteration 21 | Iteration 22 |
+| --- | --- | --- |
+| `run --rm alpine:3.20 true`, `-m 512m` | 187-199 ms | 189-193 ms |
+| the same, default memory | 255-285 ms | 253-261 ms |
+| the same, `-m 512m` and `-v /var/run/docker.sock:/var/run/docker.sock` | | 187-196 ms |
+| `runwhp help` | 62-66 ms | 61-65 ms |
+
+The docker CLI in a container, against runwhp's Engine API through the
+socket, and against Docker through its own; and docker.exe on the host,
+as the earlier iterations measured it:
+
+| Measurement | `docker:cli` → runwhp | `docker:cli` → Docker | docker.exe → runwhp | Docker's CLI in WSL |
+| --- | --- | --- | --- | --- |
+| `docker version` | 18-19 ms | 34-35 ms | 98-105 ms | 39-46 ms |
+| `docker ps` of 1 or 2 containers | 20 ms | 28-29 ms | 102-113 ms | 34-37 ms |
+| `docker logs` of 200 MB, to `wc -c` in the container or nowhere on the host | 0.93-0.95 s | 9.8-10.0 s | 0.53-0.55 s | 10.9-11.1 s |
+
+A docker command in a container through runwhp's API answers in under
+20 ms, faster than through Docker's own socket in WSL: the docker CLI
+starts in a few milliseconds on Linux, where docker.exe takes about 93,
+and each request is one vsock connection, carried by the container's
+runwhp to the API's pipe. 200 MB crosses the socket at about 215 MB/s,
+`wc` included, against 380 MB/s to docker.exe on the host; Docker's
+`logs` is slow either way, reading its json-file log.
+
+testcontainers-go's redis module run, used and terminated, as its test in
+`test/clients/go` does, with and without Ryuk:
+
+| Measurement | runwhp | Docker |
+| --- | --- | --- |
+| Ryuk off | 650-717 ms | 948-1046 ms |
+| Ryuk on | 1149-1175 ms | 1500-1595 ms, and 5026 ms the first time |
+
+Ryuk costs about 0.5 s a session with either: its container is made and
+started before the test's, and testcontainers-go waits for its log line
+and its port.
+
+Measuring a `docker run` attached through the socket, of a container
+writing 200 MB as fast as `head -c` of `/dev/zero`, found that the
+API's attach falls more than 4 MiB behind and is cut off, the
+container's output never waiting for an attach: in 5 runs of 6 through
+the socket, and in every run of 8 with docker.exe on the host. The
+socket now forwards in 256 KiB pieces, with a 2 MiB vsock buffer in the
+guest, and is cut off in 5 runs of 8; see [Known gaps](gaps.md).
+
+runwhp.exe is 24.1 MB, as in iteration 21, runwhp-compose.exe 27.6 MB,
+and runwhp-init 3.3 MB, 0.2 MB more.
+
+The new tests cover:
+
+- **vsock:** the host's listener taking a guest's connection, refusing
+  one for a port nothing listens on, a second request for a pair, one
+  past its backlog and any once closed or drained; data, credit and a
+  half-close each way.
+- **The forwarder:** init's token and the mount's index checked; a pipe
+  in message mode, with its half-close carried both ways, and one in byte
+  mode; twenty connections at once; a pipe nothing serves refused, and
+  logged once a minute with a hint for the API's. init's splice and its
+  socket, root's with mode 0660, in a guest.
+- **Taking the mounts:** `-v`, `--mount` and the API's `Binds` and
+  `Mounts` of Docker's socket in each spelling, of named pipes, and of
+  `type=npipe`; compose's binds and `use_api_socket`; a volume made by a
+  mount with its labels; SELinux label options taken, and others refused.
+- **End to end, with runwhp:** a pipe of the test's own reached from a
+  container, a hundred connections at once, from exec and after a
+  restart, in byte mode too; a pipe nothing serves warned of; the docker
+  CLI in a container reaching the API through each spelling of Docker's
+  socket, running a container attached and with input, and inspect
+  showing the mount as Docker's does; `use_api_socket` with `runwhp
+  compose` and with Docker Compose, the credentials found; a build on an
+  image with an empty layer.
+- **End to end, with Docker's tools:** testcontainers-go and Docker's Go
+  SDK with Ryuk on, which removes the container, network and volume a
+  session that ended left; docker-py running the docker CLI in a
+  container; the Dev Containers CLI with docker-outside-of-docker, whose
+  user runs docker.
+
+The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
+the WSL kernel with its vsock modules passed with `--module`, Docker's
+tools included. VS Code's "Reopen in Container", with
+docker-outside-of-docker, and `docker run -it` in a console, are still to
+be tried by hand.

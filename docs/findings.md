@@ -757,3 +757,38 @@
   `restarting: true`, and `start` and `restart` follow.
 - **alpine:3.20's busybox has no `httpd`**; its `nc -lk -p PORT -e cat
   FILE` serves a file to every connection.
+- **Which socket testcontainers-go binds into Ryuk**: Docker's own
+  `//var/run/docker.sock` only when `/info` says `OperatingSystem: "Docker
+  Desktop"`; for any other daemon, the path of the pipe it reached the
+  daemon on, `npipe://` taken off, as in `//./pipe/runwhp_engine`, unless
+  `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE` says otherwise. Ryuk 0.14.0
+  itself only pings, lists containers, networks, volumes and images by the
+  session's labels, and removes them: containers with `force` and `v`,
+  volumes with `force`, images with `noprune` false. It prunes nothing,
+  and skips what was made after it began reaping.
+- **testcontainers-go labels the volumes it mounts** through the mount's
+  `VolumeOptions.Labels`, and Ryuk finds them by those labels: a daemon
+  that makes the volume without them leaves it behind.
+- **Docker Compose's `use_api_socket`** binds
+  `/var/run/docker.sock:/var/run/docker.sock:rw`, whatever the daemon's
+  socket; with credentials stored, it adds `DOCKER_CONFIG=/run/secrets/docker`
+  to the container's environment and puts `run/secrets/docker/config.json`,
+  the credentials as `auths`, into the created container with `PUT
+  /archive` before starting it; with none, it does neither.
+- **Dev Containers' docker-outside-of-docker 1.10** binds
+  `/var/run/docker.sock` to `/var/run/docker-host.sock` with `--mount`,
+  asks `--security-opt label=disable`, and for a non-root user runs
+  `socat` as root, through sudo, to a socket at `/var/run/docker.sock`
+  that user can open. The CLI passes mount sources as written.
+- **Microsoft's devcontainers/base images list an empty layer**, the
+  1024 zero bytes of an empty tar, whose diffID is
+  `sha256:5f70bf18…`, which a store need not hold.
+- **A half-close crosses a pipe in message mode only**: go-winio's
+  `CloseWrite` writes a zero-length message, which its reader returns as
+  end of file. Carried from a guest's `shutdown(SHUT_WR)`, through vsock's
+  `SHUTDOWN` with its send flag, to `CloseWrite` on the pipe, and back
+  the same way, a docker CLI in a container ends an attach's input as on
+  the host.
+- **`os.Stat` of a named pipe does not connect to it**: one that does not
+  exist gives "cannot find the file", and one that does, busy or not,
+  another error, so it tells them apart without taking an instance.

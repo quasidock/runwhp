@@ -3,7 +3,10 @@
 - `attach` to a container run in the foreground shows its output, but
   cannot type into it: its input belongs to the runwhp that runs it. An
   attached runwhp that falls 4 MiB behind the container's output is cut
-  off, rather than holding the output up.
+  off, rather than holding the output up, the API's attaches included: a
+  `docker run` of a container writing as fast as `head -c` of
+  `/dev/zero` is cut off within a few megabytes, where Docker's would
+  slow the container down. `docker logs` is not.
 - Restart policies end with the runwhp running the container: a logoff,
   or killing that runwhp, ends the container for good, and nothing starts
   containers at logon, so `unless-stopped` is `always`. There is no
@@ -33,8 +36,9 @@
   `--rm`, and about 35 ms slower for a kept container, whose writable layer
   is frozen at the end, than in iteration 7; the vsock device is about 5 ms
   of it.
-- `runwhp exec` needs vsock in the guest's kernel. runwhp's has it; WSL's
-  builds it as modules, which have to be passed with `--module`.
+- `runwhp exec`, and host pipes, need vsock in the guest's kernel.
+  runwhp's has it; WSL's builds it as modules, which have to be passed
+  with `--module`.
 - Volumes cannot be resized, nor shared by containers running at once, even
   read-only. `runwhp volume` cannot copy files in or out: `cp` reaches a
   volume only through a container that mounts it.
@@ -118,6 +122,10 @@
   animated progress: compose writes Docker Compose's plain progress lines,
   as it does when its output is not a console. `depends_on`'s `restart:
   true` restarts nothing.
+- A foreground `compose run` of a service with `use_api_socket` gets
+  Docker's socket but not the docker CLI's credentials, which `up` and
+  `run -d` copy into the container before starting it: a foreground run
+  boots its container itself.
 - `compose` reads compose files with compose-go v2.16.2; Docker Compose
   5.8 has v2.17.0, which needs a newer Go than runwhp's.
 - Attached `compose up` shows the containers' output from when it started,
@@ -130,10 +138,26 @@
   testcontainers-go 0.45, Docker's Go SDK, docker-py 7.2 and the Dev
   Containers CLI 0.90, VS Code's own code; VS Code itself only by hand.
   Testcontainers for Java and .NET, and Docker's other SDKs, are untried.
-- No socket or pipe of the host reaches a guest, so a container cannot
-  drive the API: Testcontainers' Ryuk, and Dev Containers'
-  docker-outside-of-docker, which bind Docker's socket into a container,
-  are refused, and Testcontainers needs `TESTCONTAINERS_RYUK_DISABLED=true`.
+- Only named pipes of the host reach a guest, not Windows's Unix sockets,
+  and only through a container's mounts: build steps, whose `RUN
+  --mount=type=ssh` would want an agent's pipe, and nerdctl's containers
+  have none. OpenSSH's agent's pipe is untried.
+- A client in a container gives the API paths of its own in its binds,
+  which the API reads as the host's, as Docker Desktop does: `docker run
+  -v $PWD:/src` from a container binds nothing the container has.
+- A pipe in byte mode, as OpenSSH's agent's is, carries no half-close: a
+  client that ends its request with one waits for the pipe's server to
+  answer or close. Docker's and runwhp's API pipes are in message mode.
+- A socket belongs to root, with mode 0660, and there is no `--group-add`:
+  another user reaches it through a proxy of root's, as Dev Containers'
+  docker-outside-of-docker runs one. Its mount point is made in the
+  writable layer, as a bind mount's is, so `diff` and `commit` show an
+  empty file there.
+- Dev Containers' `remoteUser`, `vscode` in Microsoft's images, cannot
+  write to the workspace unless it is the container's user too: host files
+  with no owner of their own show as the container's user's, root's
+  unless `containerUser` says otherwise, and Dev Containers'
+  `updateRemoteUserUID` works on Linux hosts alone.
 - The API serves its own pipe, `\\.\pipe\runwhp_engine`, and Docker's
   `docker_engine` only when started with `--docker-engine`; without it,
   tools that take no docker context, testcontainers-go and Docker's Go
