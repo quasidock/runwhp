@@ -30,6 +30,13 @@ const socketDir = "/runwhp/sock"
 // as Dev Containers' docker-outside-of-docker runs one.
 const socketMode = 0o660
 
+// spliceBuffer is how much a forwarded connection reads at a time, each
+// way, and vsockBuffer how much its connection to the host buffers.
+const (
+	spliceBuffer = 256 << 10
+	vsockBuffer  = 2 << 20
+)
+
 // listenSocket makes the socket of mount i and starts carrying its
 // connections to the host. It returns the socket's path, for mountAll to
 // bind over the mount point.
@@ -99,6 +106,10 @@ func (f *socketForwarder) connect() (*vsockConn, error) {
 		f.warned.Do(func() { logf("socket %s cannot reach the host: vsock: %v", f.target, err) })
 		return nil, err
 	}
+	// A buffer larger than vsock's 256 KiB lets the host send on while
+	// init passes what came before to the client.
+	unix.SetsockoptUint64(fd, unix.AF_VSOCK, unix.SO_VM_SOCKETS_BUFFER_MAX_SIZE, vsockBuffer)
+	unix.SetsockoptUint64(fd, unix.AF_VSOCK, unix.SO_VM_SOCKETS_BUFFER_SIZE, vsockBuffer)
 	if err := unix.Connect(fd, &unix.SockaddrVM{CID: unix.VMADDR_CID_HOST, Port: guestspec.PipePort}); err != nil {
 		unix.Close(fd)
 		return nil, fmt.Errorf("connecting to the host: %w", err)
@@ -153,7 +164,8 @@ func splice(a, b halfCloser) {
 	wg.Add(2)
 	one := func(dst, src halfCloser) {
 		defer wg.Done()
-		if _, err := io.Copy(dst, src); err != nil && !errors.Is(err, syscall.EPIPE) && !errors.Is(err, syscall.ECONNRESET) &&
+		// In large pieces, and through the buffer, not a ReaderFrom's own.
+		if _, err := io.CopyBuffer(struct{ io.Writer }{dst}, src, make([]byte, spliceBuffer)); err != nil && !errors.Is(err, syscall.EPIPE) && !errors.Is(err, syscall.ECONNRESET) &&
 			!errors.Is(err, net.ErrClosed) && !errors.Is(err, os.ErrClosed) {
 			debugf("socket: %v", err)
 		}

@@ -25,6 +25,11 @@ var pipeDialTimeout = 2 * time.Second
 // reached, which a client trying again and again would otherwise fill.
 const pipeWarnEvery = time.Minute
 
+// spliceBuffer is how much a forwarded connection reads at a time, each
+// way: a stream's output, an attach's, is read off the pipe in large
+// pieces, as fast as its server writes them.
+const spliceBuffer = 256 << 10
+
 // socketToken makes a boot's Spec.SocketToken.
 func socketToken() string {
 	b := make([]byte, 16)
@@ -165,7 +170,7 @@ func splicePipe(c guestConn, r io.Reader, p net.Conn) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, err := io.Copy(p, r)
+		_, err := io.CopyBuffer(p, r, make([]byte, spliceBuffer))
 		if pc, ok := p.(interface{ CloseWrite() error }); ok && err == nil {
 			err = pc.CloseWrite()
 		}
@@ -175,7 +180,7 @@ func splicePipe(c guestConn, r io.Reader, p net.Conn) {
 	}()
 	go func() {
 		defer wg.Done()
-		_, err := io.Copy(c, p)
+		_, err := io.CopyBuffer(c, p, make([]byte, spliceBuffer))
 		if err == nil {
 			err = c.CloseWrite()
 		}
