@@ -37,9 +37,39 @@
 - `runwhp exec`, and host pipes, need vsock in the guest's kernel.
   runwhp's has it; WSL's builds it as modules, which have to be passed
   with `--module`.
-- Volumes cannot be resized, nor shared by containers running at once, even
-  read-only. `runwhp volume` cannot copy files in or out: `cp` reaches a
-  volume only through a container that mounts it.
+- Volumes cannot be resized. `runwhp volume` cannot copy files in or out:
+  `cp` reaches a volume only through a container that mounts it.
+- A volume a running container has to itself cannot be shared until it
+  starts again: a second container needing it is refused, and the volume
+  is shared from then on. Docker shares any volume at any time.
+- Each request to a shared volume crosses two processes and two guests,
+  about 0.45 ms on the test machine, against about 0.1 ms to a bind mount:
+  the time goes on handing each request from one thread to the next, in
+  each process and guest, not on serving it. As containers cache none of
+  a shared volume's names and attributes, so that each sees the others'
+  changes at once, a `stat` or an `fstat` is a request too, and a path one
+  or two more for each of its elements: opening and closing a file takes
+  about 3.5 ms, making one about 4 ms, `ls -lR` of 10,000 files 63 s, and
+  `tar -x` of them 72 s, against 0.27 ms, 0.7 ms, 0.18 s and 30 s on a bind
+  mount. Reads and writes move about 200 MB/s, the guest's vsock taking
+  what reaches it in 4 KiB pieces.
+- A container sees no inotify events for other containers' changes to a
+  shared volume, nor their writes through shared memory mappings until
+  they sync them.
+- A shared volume stays shared: it cannot be made a container's alone
+  again but by making it anew.
+- When a shared volume's server dies, its containers get I/O errors from
+  the volume until each starts again, which starts a new server: the
+  server's nodes and files were their sessions', and are not taken up
+  again.
+- A lock request on a shared volume that waits cannot be interrupted: the
+  kernel's virtio-fs sends no interrupts, so a process waiting on `fcntl`'s
+  `F_SETLKW` or `flock` waits until it gets the lock or its container
+  stops. Deadlocks between containers are not detected, and `F_GETLK`
+  gives no process for a lock another holds. POSIX ACLs are kept, but only
+  mode bits are enforced.
+- The first container to use a shared volume waits for its server to
+  boot, about 0.1 s more than its own start.
 - Image `VOLUME` declarations are ignored: those paths stay in the writable
   layer, as they would with `docker run --rm`.
 - A full host disk shows in the container as I/O errors on the writable layer
@@ -102,14 +132,12 @@
   may still find its address, and their frames for it are dropped; and
   for up to 2 s after one starts, a name or alias others already find
   elsewhere, a scaled service's say, may be answered without it.
-- `compose` refuses a named volume two services would mount at once, or a
-  service with replicas mounts, where Docker shares it: a runwhp volume is
-  a disk only one running VM can have. Bind mounts can be shared.
 - `compose up` stops a container it makes again before making the new one,
-  as a volume or an address is one VM's at a time, so a service is down
-  while it is replaced; Docker Compose makes the new one first. Anonymous
-  volumes live in the container's writable layer, and go with it, where
-  Docker Compose carries them over to the new container.
+  as an address is one VM's at a time, so a service is down while it is
+  replaced; Docker Compose makes the new one first. Anonymous volumes live
+  in the container's writable layer, and go with it, where Docker Compose
+  carries them over to the new container.
+- `compose` takes no volume driver option but `shared`.
 - `compose` refuses UDP ports, as `run` does, and publishes ports on
   127.0.0.1 unless an address is given, where Docker publishes them on
   every address.

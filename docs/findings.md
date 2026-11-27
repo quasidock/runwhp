@@ -833,3 +833,57 @@
   delegated: runc's seccomp profile, device eBPF filter and namespaces
   need nothing else of the guest's kernel, and dockerd picks overlayfs
   and cgroup v2 on a volume.
+- **virtio-fs keeps a guest's file locks to itself unless the server
+  takes them.** Linux 6.18's FUSE forwards `fcntl` and `flock` locks once
+  INIT grants `FUSE_POSIX_LOCKS` and `FUSE_FLOCK_LOCKS`, `flock`'s as
+  whole-file locks owned by the open file with `FUSE_LK_FLOCK`, and then
+  keeps none of its own: a lock request answered ENOSYS fails, rather than
+  falling back. It marks a lock to the end of the file with `OFFSET_MAX`,
+  2^63-1, and takes a GETLK answer ending past it for an I/O error.
+  virtio-fs sends no interrupts (`virtio_fs_send_interrupt` is a TODO), so
+  a waiting `F_SETLKW` cannot be interrupted, and a server must not let
+  waiting requests use up what serves the others. virtio-fs mounts with
+  `default_permissions`, so the guest's kernel checks access before a
+  request leaves it, and turns `syncfs` on.
+- **A FUSE server that keeps extended attributes doubles the cost of every
+  write**, unless it takes `FUSE_HANDLE_KILLPRIV_V2`: before each write the
+  kernel asks whether the file has a `security.capability` attribute to
+  drop, unless the super block has `SB_NOSEC`, which only
+  `HANDLE_KILLPRIV_V2` sets. With it, the kernel asks once per file, and
+  tells the server to clear setuid and setgid itself, with flags on WRITE,
+  on an OPEN that truncates, and on SETATTR, which the kernel takes at any
+  protocol minor from 6. virtiofsd keeps extended attributes off by
+  default, likely for this.
+- **A guest can serve another guest's files over FUSE as virtiofsd
+  does**, from a descriptor per node, `O_PATH` and never followed, making
+  each call relative to one: files removed while open stay readable, and
+  nothing leads out of the directory. Making files as the caller, on a
+  thread whose fsuid and fsgid are the caller's, drops the thread's
+  `CAP_DAC_OVERRIDE` and the rest of the file system's capabilities, which
+  a per-thread `capset` raises again; giving root's ids back raises them
+  too. POSIX locks of many owners map onto open file description locks,
+  one descriptor for each owner and file.
+- **What a request to a shared volume costs is threads handing it on**,
+  not serving it: GETATTR from the host straight to the volume's server
+  process and its guest and back takes about 260 µs, of which the pipe
+  between the processes is about 35 µs and the guest's file system about
+  12 µs; from a container's guest, about 450-500 µs. Each hop hands the
+  request to another thread, through a pipe's completion port, a
+  goroutine, an interrupt into a halted vCPU, or a guest's workqueue, at
+  tens of microseconds apiece on Windows, where a bind mount serves its
+  request on the vCPU that sent it. A vCPU that waits a while for its
+  reply, rather than halting, saves 5-10 %; a server guest of one vCPU
+  about 15 %.
+- **Guests sharing files over FUSE must cache nothing to stay coherent.**
+  With the second of names and attributes a bind mount's guest keeps, two
+  SQLite writers in two containers failed with disk I/O errors in two runs
+  of three: SQLite removes its journal and makes it again with each
+  transaction, and a guest that still had the old name opened the removed
+  file, which the server, holding a descriptor of it, served. Without
+  caching, every path element is a LOOKUP and every `stat` a GETATTR,
+  usually both, since attributes a LOOKUP brings are stale at once; with
+  `AUTO_INVAL_DATA`, every read of a cached page asks for the file's
+  attributes first, which is what keeps a page another guest wrote from
+  being read stale. The kernel counts timeouts in jiffies, 4 ms at the
+  guest kernel's default 250 Hz, and rounds any timeout up to one, so the
+  smallest cache short of none is a 4 ms window.

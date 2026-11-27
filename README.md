@@ -9,7 +9,9 @@ HCS, and no administrator rights at run time.
 
 `runwhp` is experimental. It runs Linux containers from registry images,
 interactively or not, with a network, the host's files and volumes of their
-own, on a kernel of its own and on several processors. Containers on a
+own, which containers running at once share, each volume served to them
+by a guest of its own, on a kernel of its own and on several
+processors. Containers on a
 network of the user's reach each other by name, as on Docker's user-defined
 networks, with no daemon between them. Containers are kept
 after they stop, can run in the background, and can be started again,
@@ -855,11 +857,14 @@ which the container gets as a disk of its own.
   anything is mounted. `nocopy` (`-v NAME:PATH:nocopy`, or `volume-nocopy`
   with `--mount`) leaves it empty. The container sees the file system's
   `_data` directory, so `lost+found` never shows.
-- **One container at a time.** runwhp opens a volume's disk image
-  exclusively, so a second container asking for it fails with "volume NAME
-  is in use", as does `runwhp volume rm`. One container can mount a volume
-  at several paths. `volume rm` and `volume prune` also leave alone a
-  volume that a stopped container mounts, as Docker does.
+- **Alone, or shared.** A container alone on a volume has its disk: its
+  runwhp opens the disk image exclusively and gives it to the guest, at the
+  guest's own disk speed. Once containers need a volume at once, it is
+  shared from then on: a guest of its own, the volume's server, has the
+  disk, and serves its file system to every container using it; see
+  [Shared volumes](#shared-volumes). One container can mount a volume at
+  several paths. `volume rm` and `volume prune` leave alone a volume that a
+  container mounts, running or stopped, as Docker does.
 - **Kept safe.** The file system has a journal. When the container ends,
   init freezes it, which writes everything back and leaves it clean, before
   the VM resets. A VM stopped at once, by a second Ctrl+C, the 10-second
@@ -887,11 +892,80 @@ takes them. What it holds counts against `--memory`.
 
 | `runwhp volume` | |
 | --- | --- |
-| `create [--opt size=SIZE] [NAME]` | Make a volume, from `1g` to `16t`; without a name, a random one |
-| `ls [-q]` | List volumes with their size and what they take on disk |
-| `inspect NAME...` | Describe volumes as JSON, saying whether a container is using them |
+| `create [--opt size=SIZE] [--opt shared=true] [NAME]` | Make a volume, from `1g` to `16t`; without a name, a random one; shared from the start with `shared=true` |
+| `ls [-q]` | List volumes with their size, what they take on disk and whether they are shared |
+| `inspect NAME...` | Describe volumes as JSON, saying whether a container is using them, whether they are shared, and which containers their servers serve |
 | `rm NAME...` | Remove volumes and all they hold |
 | `prune -a [-f]` | Remove every volume no container uses, after asking unless `-f`. Without `-a` it removes nothing: anonymous volumes go with their containers |
+
+#### Shared volumes
+
+Any number of containers can use a volume at once, as with Docker:
+
+```powershell
+.\out\runwhp.exe volume create --opt shared=true pgdata
+.\out\runwhp.exe run -d --name db -v pgdata:/var/lib/postgresql/data postgres:17
+.\out\runwhp.exe run --rm -v pgdata:/data alpine:3.20 du -sh /data
+```
+
+A volume's disk can be in one VM only. A volume containers use at once is
+therefore served by a guest of its own, the volume's server, in a runwhp of
+its own: the server's guest mounts the disk's ext4 file system, and each
+container's runwhp passes its guest's file requests to it, over virtio-fs
+and a named pipe, each container a session of its own. So the containers
+see one file system, with what Linux keeps in one: names that differ in
+case alone, extended attributes, owners and modes, hard links, special
+files, and locks, `flock(2)`'s and POSIX's, which hold between containers
+as between processes, so that SQLite, say, can have writers in two
+containers.
+
+- **When a volume is shared.** A container alone on a volume has its disk.
+  A volume becomes shared, and stays so, when containers need it at once:
+  - `compose` shares a volume two services mount, or a service with
+    replicas, before it makes their containers. A running container of the
+    project's that has the volume's disk, as `up --scale` finds the first
+    replica, is started again.
+  - A container made while a created container, whose process has not
+    started, has the volume's disk boots that one again onto the volume's
+    server, as `network connect` boots a created container again. Docker
+    Compose through the [Engine API](#docker-engine-api), which makes a
+    project's containers before starting any, shares so.
+  - A container needing a volume a running container has is refused, as
+    before, but the volume is shared from then on: once that container
+    starts again, both can use it.
+  - `volume create --opt shared=true`, `--mount volume-opt=shared=true`,
+    compose's `driver_opts: {shared: "true"}` and the API's driver option
+    `shared` share a volume from the start.
+
+  The BuildKit builder's volume is never shared: its overlayfs cannot have
+  its upper layer on a shared volume. A volume shared cannot be made a
+  container's alone again, but by making it anew.
+- **The server.** The first container to need it starts it, which adds
+  about 0.1 s to its start, and it stops 10 seconds after the last container's guest
+  stops, freezing the file system first, as a container's guest freezes
+  its volumes. Its guest has 1 GiB, which it takes from Windows only as it
+  uses it, mostly for the volume's page cache, and gives back as a
+  container's guest does, and two vCPUs. It logs to `server.log`, beside
+  the volume's disk. `RUNWHP_VOLUME_GRACE`, `RUNWHP_VOLUME_MEMORY` (MiB)
+  and `RUNWHP_VOLUME_CPUS` change its grace, memory and vCPUs.
+- **What a container sees of another's changes.** Everything, at once, as
+  in one kernel: a write is the volume's as soon as it returns, a file
+  another container makes, removes or replaces is seen so at the next
+  look, and a file's size and times are always the volume's. Containers
+  cache none of a shared volume's names or attributes, and keep a file's
+  pages only while nothing has changed it. Only inotify sees a container's
+  own changes alone.
+- **What it costs.** Each request a container's kernel sends crosses two
+  processes and two guests: on the test machine, about 0.45 ms, against
+  about 0.1 ms to a bind mount and nothing at all on a volume a container
+  has alone, whose requests its own kernel serves. A small write is one
+  request; a `stat` one, and each element of a path one or two more, so
+  opening and closing a file takes about 3.5 ms, and `ls -l` about 6 ms a
+  file. Work that makes or lists many files, such as unpacking an archive
+  or installing dependencies, is several times slower on a shared volume
+  than on a bind mount, and hundreds of times slower than on a volume a
+  container has alone: keep such trees on a volume of one container's.
+  See [Iteration 24 results](docs/status.md#iteration-24-results).
 
 ### Cleaning up
 
@@ -1150,7 +1224,9 @@ and `state` show. Containers are named `PROJECT-SERVICE-N`, networks
 as Docker Compose names them. A service's containers join the project's
 networks with the service's name as an alias, so they reach each other by
 it, through the networks of [User-defined networks](#user-defined-networks);
-a scaled service's name resolves to every replica.
+a scaled service's name resolves to every replica. A volume two services
+mount, or a scaled service, is shared before their containers are made;
+see [Shared volumes](#shared-volumes).
 
 compose-go, the library Docker Compose reads compose files with, reads the
 project: the compose.yaml, compose.yml, docker-compose.yaml or
@@ -1363,7 +1439,7 @@ context, or, with `docker-api start --docker-engine`, Docker's own pipe:
 | testcontainers-go | 0.45.0 | Its reaper, Ryuk 0.14.0, runs as with Docker: it binds the pipe testcontainers-go reached the API on as Docker's socket, which reaches the API from its container as a [host pipe](#host-pipes), and removes the containers, networks, volumes and images a session left once it ends. It reads `DOCKER_HOST`, or `tc.host` in `~/.testcontainers.properties`, or finds `docker_engine` with `--docker-engine`, not docker contexts. Its modules, wait strategies, files and networks work |
 | Docker's Go SDK, `github.com/moby/moby/client` | v0.6.2 | `client.FromEnv` reads `DOCKER_HOST`, not contexts |
 | docker-py | 7.2.0, with pywin32 | `docker.from_env()` reads `DOCKER_HOST`, or since 7.2 the current context. `containers.run` gives a run's output, as the API reports runwhp's log as `json-file` |
-| Dev Containers | the CLI 0.90.0, which VS Code's extension bundles | From an image, a Dockerfile with features, built with BuildKit when buildx is installed and with the classic builder otherwise, or a compose file. The `docker-outside-of-docker` feature works: the dev container's docker drives runwhp's API, its user's through the feature's proxy. In VS Code, point the extension at runwhp with `docker.context`, or start the API with `--docker-engine`. A volume two dev containers mount at once is refused, as a runwhp volume is one running container's. A `remoteUser` other than the container's user cannot write to the workspace; see [Known gaps](docs/gaps.md) |
+| Dev Containers | the CLI 0.90.0, which VS Code's extension bundles | From an image, a Dockerfile with features, built with BuildKit when buildx is installed and with the classic builder otherwise, or a compose file. The `docker-outside-of-docker` feature works: the dev container's docker drives runwhp's API, its user's through the feature's proxy. In VS Code, point the extension at runwhp with `docker.context`, or start the API with `--docker-engine`. Dev containers mounting one volume share it, as Docker's do. A `remoteUser` other than the container's user cannot write to the workspace; see [Known gaps](docs/gaps.md) |
 
 Testcontainers for Java and .NET, and Docker's other SDKs, are untried.
 
@@ -1661,12 +1737,13 @@ bzImage.
 | [`internal/network`](internal/network) | User-defined networks in the store: subnets, address leases held by the runwhps running containers, what each knows of the others, and their pipes |
 | [`internal/compose`](internal/compose) | compose.yaml projects, read with compose-go: services turned into what `run` takes, refused or warned of where runwhp cannot do as they ask, and named, labelled and hashed as Docker Compose does. Builds on any OS |
 | [`internal/dockerapi`](internal/dockerapi) | The Engine API's parts that need no Windows: API versions, Docker's filters and JSON message streams, stats as Docker gives them, and the events found by comparing containers' states, with their broker. Builds on any OS; the server itself, its endpoints and jobs are `cmd/runwhp`'s `dockerapi*` files |
-| [`internal/fuse`](internal/fuse) | The FUSE protocol as virtio-fs speaks it, served from a file system interface. Builds on any OS |
+| [`internal/fuse`](internal/fuse) | The FUSE protocol as virtio-fs speaks it, served from a file system interface, and carried over a stream between processes and guests. Builds on any OS |
 | [`internal/disk`](internal/disk) | The files behind virtual disks: overlapped I/O from many goroutines, sparse files, freeing ranges, exclusive and delete-on-close opens |
 | [`internal/ext4`](internal/ext4) | Makes empty ext4 file systems as mke2fs would, and reads back whether one was left clean. Builds on any OS |
-| [`internal/volume`](internal/volume) | Named volumes in the store: names, making, listing and removing them |
+| [`internal/volume`](internal/volume) | Named volumes in the store: names, making, listing and removing them, sharing them, and the pipe of a shared volume's server |
 | [`internal/container`](internal/container) | Containers in the store: records, names, locks, state, restart policies, logs, written, rotated and read with their times, and the pipe of the runwhp running one, whose attach requests carry frames in the framing of logs before iteration 13 |
 | [`internal/hostfs`](internal/hostfs) | The host end of bind mounts: Windows files served as that file system, with WSL's metadata |
+| [`internal/volfs`](internal/volfs) | A shared volume's file system as its server's guest serves it to containers: a passthrough of a Linux directory over FUSE, with its locks and extended attributes |
 | [`internal/image`](internal/image), [`internal/layer`](internal/layer) | Registry pulls, image records and configuration blobs, layer conversion and cache with each layer's tar metadata, image archives read and written, imports, commits and Dockerfile changes, pushes, and listing and removing them |
 | [`internal/build`](internal/build), [`internal/buildcache`](internal/buildcache) | The Dockerfile builder: stages, arguments, history and configuration as BuildKit's, the build context and `.dockerignore`, COPY's rules, RUN's heredocs and mounts, the step cache's keys and entries, and the guests that run steps |
 | [`internal/rootfs`](internal/rootfs) | The host's client of init's root file server, which cp, export, diff, commit and build reach guests' files through |
@@ -1712,6 +1789,13 @@ WSL kernel; tests of runwhp's own kernel are then skipped.
   runwhp's own builder lacks, `bind,from=` and ssh mounts, cache export
   and import, stages built at once, steps that share one guest, rather
   than keep a builder of their own?
+- A shared volume's requests cost about 0.45 ms each, mostly in handing
+  them from thread to thread across two processes and two guests. Would
+  shared memory between a container's runwhp and the volume's server, or
+  the server's file system in the host process itself, be worth what it
+  takes? And should a volume read far more than it is written, as a web
+  server's files are, be allowed a short cache of names and attributes,
+  at the cost of what one container sees of another's changes?
 - Is a one-time administrator step acceptable on machines where the hypervisor
   is off, or must there be a fallback that needs none?
 - virtio-mmio with generated ACPI, as spiked, or virtio over PCI with MSI-X,

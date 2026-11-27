@@ -1,5 +1,23 @@
 # Status
 
+- **Iteration 24** (2026-11-27): shared volumes. Any number of running
+  containers use a named volume at once, as with Docker. A volume they
+  share is served by a guest of its own, in a runwhp of its own, `runwhp
+  __volume`: its guest mounts the volume's disk and serves the file system
+  over FUSE, each container's runwhp passing its guest's requests on, so
+  that every container sees one file system, with names that differ in
+  case alone, extended attributes, owners and locks, `flock`'s and
+  POSIX's, held between containers as between processes. The server
+  starts with the first container that needs it and stops ten seconds
+  after the last. A container alone on a volume keeps its disk, as fast as
+  before: a volume becomes shared, and stays so, when compose sees two
+  services or replicas mount it, when a container is made beside a created
+  one holding it, which boots again onto the server, as Docker Compose
+  through the Engine API needs, when a running one holds it, from that
+  one's next start, or when made with `--opt shared=true`. compose no
+  longer refuses shared volumes. See
+  [Shared volumes](../README.md#shared-volumes) and
+  [Iteration 24 results](#iteration-24-results).
 - **Iteration 23** (2026-11-27): BuildKit, through buildx. With buildx
   installed, `docker build`, `docker buildx build`, Docker Compose's
   `buildx bake` and Dev Containers build through the Engine API's `/grpc`
@@ -2127,3 +2145,117 @@ stores were on ReFS (`E:`), as `C:` had little room, but for nerdctl's,
 whose containerd snapshotter does not start on a ReFS root, and which
 pass on NTFS. VS Code's "Reopen in Container" with buildx, and `docker
 run -it` in a console, are still to be tried by hand.
+
+## Iteration 24 results
+
+Measured on the test machine with runwhp's kernel, from Git Bash, with
+the store on NTFS (`C:`), over two to five runs. "Iteration 23" is that
+iteration's build, run in turn with this one. "Shared" is a volume shared,
+served by its server; "alone" a volume a container has to itself; "bind"
+a bind mount of a directory on NTFS.
+
+runwhp's own commands cost what they did: a volume a container has alone
+is opened as before, and its holder is only recorded in the container's
+state:
+
+| Measurement | Iteration 23 | Iteration 24 |
+| --- | --- | --- |
+| `run --rm alpine:3.20 true`, `-m 512m` | 185-196 ms | 187-194 ms |
+| the same, default memory | 254-265 ms | 246-260 ms |
+| the same, `-m 512m` and a volume | 208-225 ms | 199-240 ms |
+
+The first container on a shared volume starts its server, about 0.1 s
+more; the next finds it serving:
+
+| `run --rm -m 512m -v VOLUME:/v alpine:3.20 true` | |
+| --- | --- |
+| first, starting the server | 298-316 ms |
+| next | 200-220 ms |
+
+System calls on each, timed in the container by a program of the
+measurement's own, a request apiece on a shared volume but where said:
+
+| Measurement | Shared | Alone | Bind |
+| --- | --- | --- | --- |
+| `pwrite` of 820 bytes | 549-554 µs | 0.7-0.8 µs | 55-131 µs |
+| `pwrite` of 128 KiB | 902-920 µs | 50-51 µs | 263-310 µs |
+| `pread` of 4 KiB, cached, which asks for the file's attributes | 425-448 µs | 0.4 µs | 1.1 µs |
+| `fstat` | 400-450 µs | 0.4 µs | 0.5 µs |
+| `fsync` | 766-802 µs | 670-746 µs | 422-467 µs |
+| `open` and `close`, two path elements | 3.1-3.6 ms | 1.6-1.9 µs | 268-411 µs |
+| `creat` and `close` | 3.8-4.1 ms | 8-10 µs | 0.71-1.4 ms |
+| `unlink` | 2.6-2.7 ms | 3.4-5.3 µs | 0.33-0.74 ms |
+| `flock`, taken and given up | 0.79-0.89 ms | 0.3 µs | 0.6 µs, the guest's own |
+
+A request crosses the container's runwhp, a pipe, the server's runwhp and
+vsock into the server's guest, and back. From the host straight to the
+server, a GETATTR goes there and back in 255-280 µs, of which the pipe
+takes 33-47 µs and the guest's file system about 12 µs: the rest is
+handing the request from thread to thread, which a bind mount, served on
+the vCPU that asked, does not. A vCPU that waits up to 1 ms for its reply,
+rather than halting, saved 5-10 %. Before the server took
+`HANDLE_KILLPRIV_V2`, the kernel asked for a file's capabilities before
+every write, and a small write took 0.94-1.1 ms. Before containers stopped
+caching names and attributes, which SQLite needed (below), `open` and
+`close` took 1.3-1.4 ms and `fstat` nothing.
+
+Throughput, with `dd`, and reading the file back with the page cache
+dropped:
+
+| Measurement | Shared | Alone | Bind |
+| --- | --- | --- | --- |
+| 200 MB in 1 MiB writes, then `fsync` | 1040-1099 ms | 350-380 ms | 470-500 ms |
+| 20 MB in 4 KiB writes, then `fsync` | 2170-2350 ms | 39-50 ms | 260-560 ms |
+| reading 200 MB | 960-990 ms | 99-119 ms | 199-219 ms |
+
+A tree of 10,000 files, as iteration 5 measured bind mounts, from
+`golang:1.26`:
+
+| Measurement | Shared | Alone | Bind |
+| --- | --- | --- | --- |
+| `tar -x` | 72.0-74.3 s | 89 ms | 30.5-34.5 s |
+| `find` | 1.2-1.4 s | 0-10 ms | 129-210 ms |
+| `ls -lR` | 62.9-64.8 s | 30 ms | 179 ms |
+| `rm -rf` | 18.8-19.3 s | 59-69 ms | 7.3-7.5 s |
+
+`ls -l` takes about ten requests a file: a LOOKUP and a GETATTR for each
+of its system calls' paths, and `listxattr`, which a bind mount answers
+ENOSYS once, and the kernel asks no more. With the second's cache of
+iteration 23's bind mounts, `ls -lR` took 5.3-5.7 s and `tar -x` 51-57 s.
+
+Two containers, each inserting 500 rows into one SQLite database on a
+shared volume, in transactions of 10, at once, with Python 3.12: 3.5-3.9 s,
+every row kept. With the second's cache, it took 1.9-3.2 s, and one writer
+failed with a disk I/O error in three runs of six.
+
+runwhp.exe is 24.4 MB, runwhp-compose.exe 27.8 MB, and runwhp-init 3.5 MB.
+
+The new tests cover:
+
+- **FUSE:** lock requests, FLUSH's lock owner, extended attributes and
+  their size probes, NoKeepCache, and HANDLE_KILLPRIV_V2's flags, offered
+  only by file systems that serve them; FUSE over a stream, replies out of
+  order, FORGET unanswered, 114 waiting SETLKWs holding up no other
+  request, EIO once the stream ends, and the frame limit; virtio-fs's
+  handlers that complete later, and Drain answering them.
+- **The volume's file system**, run as root in a guest: files removed
+  while open, names refused that would lead out, owners and setgid
+  directories, locks between sessions, a waiter woken and one failed when
+  its session ends, extended attributes, `copy_file_range`, `RENAME2`'s
+  flags, setuid cleared, and listings continued in small replies.
+- **Volumes:** marking one shared, the server's pipe name, its status and
+  stop, its lock; the policy's decisions; the refusal read as 409.
+- **compose:** which volumes a project shares, and driver options.
+- **End to end:** two containers on a shared volume: each other's files,
+  a file replaced seen at once, appends kept, `flock` and POSIX locks held
+  against each other, names differing in case, extended attributes,
+  owners; a running holder's refusal sharing the volume from its restart;
+  created containers sharing when started; the server's grace, stop, cp of
+  a stopped container and death; runwhp compose with two services and
+  replicas on one volume and `--scale`; Docker Compose through the API
+  with a service's replicas on another's volume.
+
+The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
+the WSL kernel with its vsock modules passed with `--module`, which the
+volumes' servers boot too, with their stores on ReFS (`E:`) but for
+nerdctl's, which pass on NTFS.
