@@ -200,8 +200,18 @@ type Network struct {
 // Resolv is what /etc/resolv.conf says.
 type Resolv struct {
 	Nameservers []string `json:"nameservers,omitempty"`
+	Search      []string `json:"search,omitempty"`
 	Options     []string `json:"options,omitempty"`
+	// Embedded, if set, is the address init's embedded DNS server passes
+	// queries on to: init serves DNS at 127.0.0.11, as Docker's embedded
+	// server answers on a user-defined network, and resolv.conf names it in
+	// place of Nameservers. Should init fail to serve it, Nameservers stand.
+	Embedded string `json:"embedded,omitempty"`
 }
+
+// EmbeddedDNS is where init serves DNS for a container whose Resolv has
+// Embedded, as Docker's embedded server does.
+const EmbeddedDNS = "127.0.0.11"
 
 // Mount kinds.
 const (

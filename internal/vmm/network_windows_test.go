@@ -79,7 +79,7 @@ func TestOpenUserNetworks(t *testing.T) {
 	if !reflect.DeepEqual(n.specs, want) || len(n.devices()) != 2 {
 		t.Errorf("specs %+v", n.specs)
 	}
-	if !reflect.DeepEqual(n.resolv, &guestspec.Resolv{Nameservers: []string{"172.18.0.1"}, Options: []string{"ndots:0"}}) ||
+	if !reflect.DeepEqual(n.resolv, &guestspec.Resolv{Nameservers: []string{"172.18.0.1"}, Embedded: "172.18.0.1", Options: []string{"ndots:0"}}) ||
 		!reflect.DeepEqual(n.hostnameAddrs, []string{"172.18.0.9", "172.19.0.2"}) {
 		t.Errorf("resolv %+v, hostname addresses %q", n.resolv, n.hostnameAddrs)
 	}
@@ -92,7 +92,7 @@ func TestOpenUserNetworks(t *testing.T) {
 		t.Errorf("a taken address: %v", err)
 	}
 	files, err := openNetwork(root, cfg, false, t.Logf)
-	if err != nil || len(files.devices()) != 0 || files.resolv.Nameservers[0] != "172.18.0.1" || files.hostnameAddrs != nil {
+	if err != nil || len(files.devices()) != 0 || files.resolv.Nameservers[0] != "172.18.0.1" || files.resolv.Embedded != "172.18.0.1" || files.hostnameAddrs != nil {
 		t.Errorf("without devices: %+v %v", files, err)
 	}
 	n.close(t.Logf)

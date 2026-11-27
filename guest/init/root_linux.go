@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -251,6 +252,16 @@ func prepareRoot(spec *guestspec.Spec) error {
 	if err := loopbackUp(); err != nil {
 		logf("bringing up lo: %v", err)
 	}
+	// The embedded DNS needs only lo, so it starts while the interfaces
+	// are set up.
+	embedded := make(chan bool, 1)
+	if r := spec.Resolv; r != nil && r.Embedded != "" && spec.Serve == "" {
+		go func() { embedded <- embeddedDNSUp(r) }()
+	} else {
+		// A guest serving a stopped container's files serves no DNS, but
+		// shows the container the resolv.conf it has when it runs.
+		embedded <- r != nil && r.Embedded != ""
+	}
 	// A guest serving a stopped container's files has no network devices,
 	// but shows the container its /etc/resolv.conf.
 	if len(spec.Networks) > 0 && spec.Serve == "" {
@@ -259,9 +270,29 @@ func prepareRoot(spec *guestspec.Spec) error {
 		}
 	}
 	if r := spec.Resolv; r != nil {
-		writeEtc("resolv.conf", resolvFile(r))
+		writeEtc("resolv.conf", resolvFile(r, <-embedded))
 	}
 	return nil
+}
+
+// embeddedDNSUp starts the embedded DNS a container on a user-defined
+// network gets, and reports whether resolv.conf should name it. Should the
+// server fail to start, as on a kernel without nftables' NAT, the container
+// asks the host's server at its gateway itself, as it did before there was
+// one.
+func embeddedDNSUp(r *guestspec.Resolv) bool {
+	up, err := netip.ParseAddr(r.Embedded)
+	if err != nil {
+		logf("embedded DNS: %v", err)
+		return false
+	}
+	start := time.Now()
+	if err := startEmbeddedDNS(up); err != nil {
+		logf("embedded DNS at %s: %v; resolv.conf names %s", guestspec.EmbeddedDNS, err, strings.Join(r.Nameservers, ", "))
+		return false
+	}
+	debugf("embedded DNS at %s in %d µs", guestspec.EmbeddedDNS, time.Since(start).Microseconds())
+	return true
 }
 
 // hostsFile is the container's /etc/hosts: on a user-defined network,
@@ -286,11 +317,19 @@ func hostsFile(spec *guestspec.Spec) string {
 	return b.String()
 }
 
-// resolvFile is the container's /etc/resolv.conf.
-func resolvFile(r *guestspec.Resolv) string {
+// resolvFile is the container's /etc/resolv.conf, naming the embedded DNS
+// server rather than r's if embedded.
+func resolvFile(r *guestspec.Resolv, embedded bool) string {
 	var b strings.Builder
-	for _, server := range r.Nameservers {
+	servers := r.Nameservers
+	if embedded {
+		servers = []string{guestspec.EmbeddedDNS}
+	}
+	for _, server := range servers {
 		fmt.Fprintf(&b, "nameserver %s\n", server)
+	}
+	if len(r.Search) > 0 {
+		fmt.Fprintf(&b, "search %s\n", strings.Join(r.Search, " "))
 	}
 	if len(r.Options) > 0 {
 		fmt.Fprintf(&b, "options %s\n", strings.Join(r.Options, " "))

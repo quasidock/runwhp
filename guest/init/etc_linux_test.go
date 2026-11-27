@@ -26,11 +26,19 @@ func TestHostsFile(t *testing.T) {
 }
 
 func TestResolvFile(t *testing.T) {
-	if got := resolvFile(&guestspec.Resolv{Nameservers: []string{"10.0.2.3"}}); got != "nameserver 10.0.2.3\n" {
+	if got := resolvFile(&guestspec.Resolv{Nameservers: []string{"10.0.2.3"}}, false); got != "nameserver 10.0.2.3\n" {
 		t.Errorf("default network: %q", got)
 	}
-	got := resolvFile(&guestspec.Resolv{Nameservers: []string{"172.18.0.1"}, Options: []string{"ndots:0"}})
-	if got != "nameserver 172.18.0.1\noptions ndots:0\n" {
+	user := &guestspec.Resolv{Nameservers: []string{"172.18.0.1"}, Embedded: "172.18.0.1", Options: []string{"ndots:0"}}
+	if got := resolvFile(user, true); got != "nameserver 127.0.0.11\noptions ndots:0\n" {
 		t.Errorf("user-defined network: %q", got)
+	}
+	if got := resolvFile(user, false); got != "nameserver 172.18.0.1\noptions ndots:0\n" {
+		t.Errorf("user-defined network, no embedded server: %q", got)
+	}
+	given := &guestspec.Resolv{Nameservers: []string{"192.0.2.53", "192.0.2.54"},
+		Search: []string{"corp.test", "example.test"}, Options: []string{"ndots:2", "timeout:1"}}
+	if got := resolvFile(given, false); got != "nameserver 192.0.2.53\nnameserver 192.0.2.54\nsearch corp.test example.test\noptions ndots:2 timeout:1\n" {
+		t.Errorf("--dns, --dns-search, --dns-option: %q", got)
 	}
 }

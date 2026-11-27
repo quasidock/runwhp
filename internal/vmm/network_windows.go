@@ -97,16 +97,28 @@ func openNetwork(root string, cfg *container.Config, devices bool, logf func(str
 	return n, nil
 }
 
-// userResolv is the resolv.conf of a container on user-defined networks:
-// the primary network's gateway answers DNS, for the names of every
-// network the container is on, and names are tried as given first, as
-// Docker's ndots:0 has them.
+// userResolv is the resolv.conf of a container on user-defined networks,
+// for a guest that has no network devices.
 func userResolv(root string, cfg *container.Config) *guestspec.Resolv {
-	r := &guestspec.Resolv{Options: []string{"ndots:0"}}
-	if nw, err := network.Open(root).Get(cfg.Networks[0].Network); err == nil {
-		r.Nameservers = []string{nw.Gateway.String()}
+	nw, err := network.Open(root).Get(cfg.Networks[0].Network)
+	if err != nil {
+		return &guestspec.Resolv{Options: []string{"ndots:0"}}
 	}
-	return r
+	return userResolvFor(nw.Gateway)
+}
+
+// userResolvFor is the resolv.conf of a container whose primary network's
+// gateway is gateway: the gateway answers DNS, for the names of every
+// network the container is on, through init's embedded server at
+// 127.0.0.11, as Docker's answers there, or asked directly should that
+// server not start; and names are tried as given first, as Docker's
+// ndots:0 has them.
+func userResolvFor(gateway netip.Addr) *guestspec.Resolv {
+	return &guestspec.Resolv{
+		Nameservers: []string{gateway.String()},
+		Embedded:    gateway.String(),
+		Options:     []string{"ndots:0"},
+	}
 }
 
 // join leases the container an address on each of its networks, as its VM
@@ -188,7 +200,7 @@ func (n *guestNetwork) join(root string, cfg *container.Config, logf func(string
 		n.hostnameAddrs = append(n.hostnameAddrs, l.IP.String())
 		logf("network %s: %s, gateway %s", l.Net.Name, spec.Address, l.Net.Gateway)
 	}
-	n.resolv = &guestspec.Resolv{Nameservers: []string{n.leases[0].Net.Gateway.String()}, Options: []string{"ndots:0"}}
+	n.resolv = userResolvFor(n.leases[0].Net.Gateway)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	n.cancel = cancel

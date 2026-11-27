@@ -164,8 +164,7 @@ func TestUserNetworkByName(t *testing.T) {
 	}
 	script += "ping -c 2 -W 2 srv >/dev/null && echo pinged; nslookup " + ip + " | grep -o 'name = .*'; grep -c . /etc/hosts; cat /etc/resolv.conf"
 	r := run(t, "--network", net, alpine, "sh", "-c", script)
-	want := strings.Repeat(server+"\n", 7) + "pinged\nname = " + server + "." + net + "\n7\nnameserver " +
-		strings.TrimSuffix(ip, ".2") + ".1\noptions ndots:0\n"
+	want := strings.Repeat(server+"\n", 7) + "pinged\nname = " + server + "." + net + "\n7\nnameserver 127.0.0.11\noptions ndots:0\n"
 	expect(t, r, want, 0)
 
 	// 20 MB each way, and a UDP datagram.
@@ -185,6 +184,45 @@ func TestUserNetworkByName(t *testing.T) {
 	if !strings.HasSuffix(r.stdout, "1\n") {
 		t.Errorf("a closed port: %+v", r)
 	}
+}
+
+// dnsOverTCP asks a DNS server over TCP for argv[2]'s address, and prints
+// it, as Python has no resolver that would.
+const dnsOverTCP = `
+import socket, struct, sys
+server, name = sys.argv[1], sys.argv[2]
+q = struct.pack('>HHHHHH', 0x1234, 0x0100, 1, 0, 0, 0)
+q += b''.join(bytes([len(p)]) + p.encode() for p in name.split('.')) + b'\0' + struct.pack('>HH', 1, 1)
+s = socket.create_connection((server, 53), 5)
+s.sendall(struct.pack('>H', len(q)) + q)
+def read(n):
+    b = b''
+    while len(b) < n:
+        b += s.recv(n - len(b))
+    return b
+m = read(struct.unpack('>H', read(2))[0])
+print(socket.inet_ntoa(m[-4:]) if struct.unpack('>H', m[6:8])[0] else 'no answer')
+`
+
+// TestEmbeddedDNS asks 127.0.0.11, as nginx's resolver and Docker's own
+// containers on a user-defined network do, over UDP and TCP, from a
+// container that serves port 53 itself: the kernel sends only what is for
+// 127.0.0.11 to init's server.
+func TestEmbeddedDNS(t *testing.T) {
+	parallel(t)
+	net := newNetwork(t)
+	server := serving(t, "--network", net)
+	waitServing(t, net, server)
+	ip := networksOf(t, server).Networks[net].IPAddress
+
+	r := run(t, "--network", net, alpine, "sh", "-c",
+		"nc -lu -s 0.0.0.0 -p 53 >/dev/null & nc -lk -s 0.0.0.0 -p 53 >/dev/null & "+
+			"for i in $(seq 50); do [ $(netstat -ln | grep -c '0.0.0.0:53 ') = 2 ] && break; sleep 0.1; done; "+
+			"netstat -ln | grep -c '0.0.0.0:53 '; nslookup -type=a "+server+" 127.0.0.11 | grep -o 'Address: 172.*'")
+	expect(t, r, "2\nAddress: "+ip+"\n", 0)
+
+	r = run(t, "--network", net, "python:3.12-slim", "python3", "-c", dnsOverTCP, "127.0.0.11", server)
+	expect(t, r, ip+"\n", 0)
 }
 
 func TestUserNetworkIsolation(t *testing.T) {
