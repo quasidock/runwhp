@@ -568,9 +568,10 @@ type apiServer struct {
 	shutdown sync.Once
 	stopped  chan struct{}
 
-	execs  *execTable
-	events *eventBroker
-	jobs   *jobRunner
+	execs   *execTable
+	events  *eventBroker
+	jobs    *jobRunner
+	builder builderState
 }
 
 func newAPIServer(root, pipe string, log io.Writer, debugLog bool) (*apiServer, error) {
@@ -660,6 +661,9 @@ func (s *apiServer) stop() {
 			s.cancel()
 			s.execs.closeAll()
 			s.jobs.close()
+			// The builder is the server's, as Docker's BuildKit is its
+			// daemon's; its cache stays on its volume.
+			s.stopBuilder()
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			if err := s.http.Shutdown(ctx); err != nil {
@@ -931,7 +935,9 @@ func (s *apiServer) routes() {
 		return nil
 	})
 	s.handle("/distribution/", s.getDistribution)
-	for _, p := range []string{"/plugins/", "/session", "/grpc", "/images/search"} {
+	s.handle("POST /grpc", s.postGRPC)
+	s.handle("POST /session", s.postSession)
+	for _, p := range []string{"/plugins/", "/images/search"} {
 		s.handle(p, func(_ http.ResponseWriter, r *http.Request) error {
 			return notImplemented("runwhp does not serve %s", r.URL.Path)
 		})
@@ -955,7 +961,9 @@ func (s *apiServer) postShutdown(w http.ResponseWriter, _ *http.Request) error {
 
 func (s *apiServer) ping(w http.ResponseWriter, r *http.Request) error {
 	h := w.Header()
-	h.Set("Builder-Version", "1")
+	// BuildKit, as /grpc and /session serve it, for buildx's docker
+	// driver. A docker CLI without buildx still uses /build.
+	h.Set("Builder-Version", "2")
 	h.Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	h.Set("Pragma", "no-cache")
 	h.Set("Swarm", "inactive")

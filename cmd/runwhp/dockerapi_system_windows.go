@@ -95,7 +95,7 @@ func (s *apiServer) getInfo(w http.ResponseWriter, _ *http.Request) error {
 	}
 	info.Name, _ = os.Hostname()
 	info.HTTPProxy, info.HTTPSProxy, info.NoProxy = os.Getenv("HTTP_PROXY"), os.Getenv("HTTPS_PROXY"), os.Getenv("NO_PROXY")
-	if cs, err := s.containers.List(); err == nil {
+	if cs, err := s.listContainers(); err == nil {
 		info.Containers = len(cs)
 		for _, c := range cs {
 			switch {

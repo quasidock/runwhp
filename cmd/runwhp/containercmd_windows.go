@@ -84,7 +84,9 @@ func cmdList(args []string, stdout io.Writer) int {
 	}
 	var cs []*container.Container
 	for _, c := range all {
-		if f.matchContainer(c) {
+		// The Engine API's builder is the server's; runwhp logs and
+		// inspect still take its name.
+		if f.matchContainer(c) && !isBuilder(c) {
 			cs = append(cs, c)
 		}
 	}

@@ -53,7 +53,7 @@ func healthOf(c *container.Container) string {
 // look compares the store's containers with what it saw last, and emits
 // what changed.
 func (b *eventBroker) look() {
-	cs, err := b.s.containers.List()
+	cs, err := b.s.listContainers()
 	if err != nil {
 		return
 	}

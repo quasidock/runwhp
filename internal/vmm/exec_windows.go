@@ -215,6 +215,13 @@ func (s *Supervisor) DialGuest(ctx context.Context, port uint32) (GuestConn, err
 	case guestspec.RootPort:
 		// The container's files, from the moment its root is ready.
 		h = s.withRoot()
+	case guestspec.BuildKitPort:
+		// BuildKit's daemon, in runwhp's builder alone: no other
+		// container's processes are the host's to connect to.
+		if _, ok := s.rec.Config.Labels[guestspec.BuilderLabel]; !ok {
+			return nil, fmt.Errorf("vsock port %d is not runwhp's", port)
+		}
+		h = s.running()
 	default:
 		return nil, fmt.Errorf("vsock port %d is not runwhp's", port)
 	}

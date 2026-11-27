@@ -24,6 +24,7 @@ import (
 	"github.com/quasidock/runwhp/internal/buildcache"
 	"github.com/quasidock/runwhp/internal/container"
 	"github.com/quasidock/runwhp/internal/disk"
+	"github.com/quasidock/runwhp/internal/guestspec"
 	"github.com/quasidock/runwhp/internal/image"
 	"github.com/quasidock/runwhp/internal/kernel"
 	"github.com/quasidock/runwhp/internal/volume"
@@ -277,7 +278,12 @@ func within(dir, path string) bool {
 }
 
 // Removable is true for a container that a container prune removes:
-// stopped, or created and waiting to start.
+// stopped, or created and waiting to start; but not the Engine API's
+// builder, which is no container of the user's, as Docker's BuildKit is
+// none, and whose volume holds the build cache.
 func Removable(c *container.Container) bool {
+	if _, builder := c.Config.Labels[guestspec.BuilderLabel]; builder {
+		return false
+	}
 	return c.State.Status == container.Stopped || c.State.Status == container.Created
 }

@@ -77,6 +77,22 @@ func (s *apiServer) resolve(ref string) (*container.Container, error) {
 	return c, err
 }
 
+// listContainers lists the store's containers, but the builder, which is
+// the server's, as Docker's BuildKit is no container of the user's.
+func (s *apiServer) listContainers() ([]*container.Container, error) {
+	cs, err := s.containers.List()
+	if err != nil {
+		return nil, err
+	}
+	out := cs[:0]
+	for _, c := range cs {
+		if !isBuilder(c) {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
 func (s *apiServer) postContainerCreate(w http.ResponseWriter, r *http.Request) error {
 	var req dcontainer.CreateRequest
 	if err := readJSON(r, &req); err != nil {
@@ -178,7 +194,7 @@ func (s *apiServer) getContainers(w http.ResponseWriter, r *http.Request) error 
 	if err != nil {
 		return err
 	}
-	cs, err := s.containers.List()
+	cs, err := s.listContainers()
 	if err != nil {
 		return err
 	}
