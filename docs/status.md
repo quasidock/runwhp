@@ -1,5 +1,19 @@
 # Status
 
+- **Iteration 25** (2026-11-28): faster tests. The end-to-end tests run
+  in parallel, 8 at a time, but for those that measure time or the
+  machine, or touch what is global to the user's store, which run first,
+  alone: the default configuration takes about 3 minutes rather than 13,
+  and the four configurations, nerdctl's tests included, about 14 minutes
+  rather than 49. `test/e2e/matrix.sh` runs them all and reports each
+  run's phases and slowest tests. Running at once found five faults that
+  a busy machine shows, now fixed: a container could not be removed as
+  soon as a wait for it returned, as docker-py removes one; many
+  connections at once to a host pipe had some reset, by vsock's backlog,
+  by a signal interrupting init's connect, or by the host giving up on a
+  busy pipe after 2 s; and removing a container failed while its exiting
+  runwhp still held its files. The unit tests take 14 s rather than 28.
+  See [Iteration 25 results](#iteration-25-results).
 - **Iteration 24** (2026-11-27): shared volumes. Any number of running
   containers use a named volume at once, as with Docker. A volume they
   share is served by a guest of its own, in a runwhp of its own, `runwhp
@@ -2259,3 +2273,98 @@ The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
 the WSL kernel with its vsock modules passed with `--module`, which the
 volumes' servers boot too, with their stores on ReFS (`E:`) but for
 nerdctl's, which pass on NTFS.
+
+## Iteration 25 results
+
+Measured on the test machine, 16 threads and 16 GB, from Git Bash with
+`test/e2e/matrix.sh`, the stores on ReFS (`E:`) but for nerdctl's, on
+NTFS. "Before" is the suite as iteration 24 left it, one test at a time;
+"after" is 8 at a time, over three to six runs.
+
+| Configuration | Before | After | Serial phase | Parallel phase |
+| --- | --- | --- | --- | --- |
+| runwhp's kernel, default vCPUs | 779 s | 167-184 s | 39-41 s | 125-143 s |
+| `--cpus=1` | 652 s | 152-173 s | 38-40 s | 115-133 s |
+| `--cpus=16` | 727 s | 241-260 s | 41-44 s | 197-219 s |
+| the WSL kernel | 853 s | 204-209 s | 49-52 s | 153-158 s |
+| nerdctl's tests, each time | 18 s | 16-18 s | | |
+
+The before times but the default's are iteration 24's own runs. The four
+configurations with nerdctl's tests took 2946 s before, about 49 minutes,
+and 843-872 s after, about 14, plus a minute to build the tests once.
+
+Run at once, the tests' own times add up to 950-1010 s in the default
+configuration, against 781 s one at a time: each takes about a quarter
+longer, on a machine they keep busy, and the parallel phase is as long as
+the work in it allows rather than as its longest test. With 16 vCPUs a
+guest, eight guests share 16 threads, and their tests' times add up to
+about 1570 s. `-parallel` 6 took 187 s, and 12 took 164 s, no faster
+than 8.
+
+The serial phase is the floor of each run. It holds the tests that time
+what they test, or measure CPU, bandwidth or the console, and those that
+touch the user's whole store, Docker's pipe or the containers runwhp
+lists: TestHealthcheck 7.0 s, TestRestarting 5.4 s, TestClockResync 3.6 s
+and TestStats 3.2 s are the longest. TestHealthcheck runs its four parts
+at once, on containers of their own, 17.6 s before; TestRestarting waits
+out a 2 s backoff rather than 3. The memory tests run in parallel, as
+what they measure is their container's alone; TestMemoryReclaimedWhenIdle
+watches its two containers at once, 31-34 s rather than 49.
+
+The longest tests, in the parallel phase, with the default vCPUs:
+
+| Test | Before | After |
+| --- | --- | --- |
+| TestDevcontainerCLI | 134.7 s | 49-70 s |
+| TestDevcontainerBuildx | 36.9 s | 48-59 s |
+| TestBuildx | 27.4 s | 47-55 s |
+| TestGoClients | 15.5 s | 17-40 s |
+| TestMemoryReclaimedWhenIdle | 48.8 s | 31-34 s |
+| TestDockerRun | 26.1 s | 26-30 s |
+
+TestDevcontainerCLI's cases run at once, the docker-outside-of-docker
+case with an API of its own: Dev Containers' CLI builds every container's
+features into one fixed tag, `dev_container_feature_content_temp`, which
+two cases building at once on one daemon take from each other. Its base
+image comes from the e2e mirror rather than MCR, as alpine does for the
+tests that pushed it from Docker Hub.
+
+Tests do not share stores they pull into. Seeding each test's store with
+the images others pulled was left out: pulls and conversions from the
+mirror are about 30-40 s of the parallel phase's work, 3-5 s of its time.
+
+What a busy machine showed, now fixed:
+
+- **Removal after a wait.** A container's runwhp answers those waiting
+  for its end, then exits, holding the container until it has. docker-py's
+  `run(remove=True)` removes it as soon as the wait returns, as Docker
+  allows, and had 409, "container is exited", once in 20 runs with two
+  16-vCPU guests busy. A delete waits up to 5 s for the runwhp of a
+  container that has ended.
+- **Removal of files still held.** The runwhp that ran a container may
+  still hold its files once it has given up the lock, and Windows will not
+  move the directory aside: removal tried for 0.3 s, and now for 3 s.
+- **Many connections to a host pipe.** TestHostPipes opens 100 at once.
+  With other guests busy, vsock's backlog of 16 reset some, now 256;
+  then the host gave up on the busy pipe after 2 s, failing 8-42 of 100,
+  now 10 s, Docker's client's own; then 1-3 of 100 were reset when Go's
+  runtime signalled init's thread during its connect, which vsock then
+  drops: init connects again.
+
+One test failed for its own timing: TestSharedVolume held its locks for
+3 s, which a container booting with 16 vCPUs on a busy machine missed. It
+now holds them until the other container has found them held, and takes
+4.5 s rather than 10-17.
+
+`go test ./...` takes 14 s rather than 28. TestOutputHubSlow sends its
+slow client 16 times the backlog rather than 64 MiB, 1.7 s rather than
+6.6 s, and TestOpenLayerKept waits 100 ms rather than 2 s for a layer in
+use: `internal/vmm`, 6 s rather than 13, no longer bounds the run.
+
+The whole suite passes with 1, the default and 16 vCPUs on runwhp's
+kernel, and on the WSL kernel with its vsock modules: four runs of the
+matrix, the first two failing a test each with 16 vCPUs, TestDockerPy and
+TestSharedVolume, before the fixes above. Six runs of the default
+configuration alone passed after TestHostPipes' fixes. With
+`RUNWHP_E2E_SERIAL=1` it runs one test at a time, as before, and passes in
+667 s, shorter than 779 s for the serial tests' shorter waits.

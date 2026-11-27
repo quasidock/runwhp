@@ -1761,7 +1761,7 @@ bzImage.
 build, WHP and network access, and run with `RUNWHP_E2E=1`:
 
 ```powershell
-$env:RUNWHP_E2E = '1'; go test -count=1 ./test/e2e
+$env:RUNWHP_E2E = '1'; go test -count=1 -parallel 8 ./test/e2e
 ```
 
 They boot whatever runwhp would: the pinned kernel, or the one
@@ -1769,10 +1769,12 @@ They boot whatever runwhp would: the pinned kernel, or the one
 semicolons, to every `runwhp run`, such as `--kernel` and `--module` for the
 WSL kernel; tests of runwhp's own kernel are then skipped.
 
-Most tests run in parallel, `-parallel` at a time, 8 on the test machine.
-Those that time what they test, measure the machine's CPU or bandwidth, or
-look at what is global to the user's store or the machine, run first, one
-at a time. `RUNWHP_E2E_SERIAL=1` runs every test alone.
+Most tests run in parallel, `-parallel` at a time, which Go sets to the
+machine's processors unless told: on the test machine's 16 threads, 6 at
+a time was slower than 8, and 12 no faster. Those that time what they
+test, measure the machine's CPU, memory or bandwidth, or look at what is
+global to the user's store or the machine, run first, one at a time.
+`RUNWHP_E2E_SERIAL=1` runs every test alone.
 
 `test/e2e/matrix.sh`, from Git Bash, builds the tests once and runs them
 in each configuration, the default, `--cpus=1`, `--cpus=16` and WSL's
@@ -1780,13 +1782,14 @@ kernel, keeping go test's JSON for each in `out\e2e`, and prints each
 run's time, its serial and parallel phases and its slowest tests:
 
 ```sh
-RUNWHP_E2E_PARALLEL=8 RUNWHP_E2E_WSL_FLAGS='--kernel=...;--module=...' test/e2e/matrix.sh
+RUNWHP_E2E_WSL_FLAGS='--kernel=...;--module=...' test/e2e/matrix.sh
 ```
 
-`RUNWHP_E2E_CONFIGS` picks configurations, `RUNWHP_E2E_TMP` puts the
-tests' stores elsewhere, nerdctl's tests then running apart with the TMP
-the script was given, and `RUNWHP_E2E_BASE` compares each run with an
-earlier one's JSON. Arguments go to the test binary, as `-test.run=Volume`.
+`RUNWHP_E2E_CONFIGS` picks configurations, `RUNWHP_E2E_PARALLEL` sets
+`-parallel`, 8 unless set, `RUNWHP_E2E_TMP` puts the tests' stores
+elsewhere, nerdctl's tests then running apart with the TMP the script was
+given, and `RUNWHP_E2E_BASE` compares each run with an earlier one's
+JSON. Arguments go to the test binary, as `-test.run=Volume`.
 
 ## Open questions
 
