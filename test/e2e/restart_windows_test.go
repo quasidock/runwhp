@@ -141,7 +141,7 @@ func TestRestartAlways(t *testing.T) {
 
 // TestRestarting checks what a container waiting to start again allows.
 func TestRestarting(t *testing.T) {
-	setEnv(t, "RUNWHP_RESTART_BACKOFF", "3s")
+	setEnv(t, "RUNWHP_RESTART_BACKOFF", "2s")
 	name := newName(t)
 	detached(t, "--name", name, "--restart", "always", alpine, "sh", "-c", bootCounter("exit 1"))
 	s := waitState(t, name, 30*time.Second, "restarting", func(s stateJSON) bool { return s.Status == "restarting" })
@@ -180,7 +180,7 @@ func TestRestarting(t *testing.T) {
 	if s := stateOf(t, name); s.Status != "stopped" || exitCodeOf(s) != 1 || time.Since(start) > 2*time.Second {
 		t.Errorf("stop took %v: %+v", time.Since(start), s)
 	}
-	time.Sleep(3500 * time.Millisecond)
+	time.Sleep(2500 * time.Millisecond) // past the next run's delay
 	if r := cli(t, "logs", name); strings.Contains(r.stdout, "boot 3") {
 		t.Errorf("ran after stop: %q", r.stdout)
 	}
