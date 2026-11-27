@@ -183,3 +183,52 @@ func TestPublishBusyPort(t *testing.T) {
 		t.Errorf("exit %d, stderr %q; want 125 and the port named", r.code, r.stderr)
 	}
 }
+
+// hostIPv4 is an address of the host's own, not its loopback, that Windows
+// itself can ping, which the guest's pings reach through the host.
+func hostIPv4(t *testing.T) string {
+	t.Helper()
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, _ := ifc.Addrs()
+		for _, a := range addrs {
+			ipn, ok := a.(*net.IPNet)
+			if !ok || ipn.IP.To4() == nil || ipn.IP.IsLinkLocalUnicast() {
+				continue
+			}
+			ip := ipn.IP.String()
+			if exec.Command("ping", "-n", "1", "-w", "1000", ip).Run() == nil {
+				return ip
+			}
+		}
+	}
+	t.Skip("the host has no address of its own that answers a ping")
+	return ""
+}
+
+// TestPing pings beyond the host, the host's own address being the one
+// sure to answer without the internet: the guest's echo goes out from the
+// host and its reply comes back from where it went. An address the guest
+// may not reach is not answered; a TTL of 1 runs out at the gateway, the
+// first hop of traceroute's ICMP probes; and host-gateway on a network of
+// the user's reaches the host's loopback.
+func TestPing(t *testing.T) {
+	parallel(t)
+	ip := hostIPv4(t)
+	r := run(t, alpine, "sh", "-c",
+		"ping -c 2 -W 2 "+ip+" | grep -c 'bytes from "+ip+"'; "+
+			"ping -c 1 -W 1 10.0.2.99 >/dev/null || echo unanswered; "+
+			"traceroute -I -n -q 1 -w 2 -m 2 "+ip+" 2>/dev/null | tail -n +2 | awk '{print $1, $2}'")
+	expect(t, r, "2\nunanswered\n1 10.0.2.2\n2 "+ip+"\n", 0)
+
+	net := newNetwork(t)
+	r = run(t, "--network", net, "--add-host", hostGateway, alpine, "sh", "-c",
+		"ping -c 1 -W 2 host.docker.internal | grep -c 'bytes from 10.0.2.2'; ping -c 1 -W 2 "+ip+" | grep -c 'bytes from'")
+	expect(t, r, "1\n1\n", 0)
+}

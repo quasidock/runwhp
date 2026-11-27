@@ -30,6 +30,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/network/arp"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/icmp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 	"gvisor.dev/gvisor/pkg/waiter"
@@ -107,6 +108,10 @@ type Config struct {
 	// Resolver answers DNS queries; nil means net.DefaultResolver, which on
 	// Windows asks the system resolver.
 	Resolver Resolver
+	// Ping sends the guest's echo requests for addresses beyond the link
+	// from the host; nil means the system's, where there is one. Without
+	// one, only the stack's own addresses answer pings.
+	Ping Pinger
 	// GuestChecksums, if set, reports whether the guest takes frames
 	// without TCP and UDP checksums, which the stack then leaves out.
 	GuestChecksums func() bool
@@ -132,8 +137,11 @@ type Stack struct {
 	closed  bool
 	closers map[io.Closer]struct{} // live connections, closed by Close
 
+	pings chan struct{} // a token for each ping in flight
+
 	tcpFlows, udpFlows, publishedConns, dnsQueries atomic.Uint64
 	refused, dialFailures, inDropped               atomic.Uint64
+	pingsSent, pingsDropped                        atomic.Uint64
 }
 
 // New builds the stack, opens the published ports' listeners, and starts
@@ -148,6 +156,9 @@ func New(cfg Config) (*Stack, error) {
 	if cfg.Resolver == nil {
 		cfg.Resolver = net.DefaultResolver
 	}
+	if cfg.Ping == nil {
+		cfg.Ping = systemPinger()
+	}
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
 	}
@@ -157,7 +168,8 @@ func New(cfg Config) (*Stack, error) {
 	// gVisor logs to stderr by default, which in runwhp is the container's
 	// stderr. Its logger is global; the latest stack's Logf gets it.
 	gvlog.SetTarget(logEmitter(cfg.Logf))
-	s := &Stack{cfg: cfg, in: make(chan []byte, inboundQueue), closers: map[io.Closer]struct{}{}}
+	s := &Stack{cfg: cfg, in: make(chan []byte, inboundQueue), closers: map[io.Closer]struct{}{},
+		pings: make(chan struct{}, pingsInFlight)}
 
 	// Listeners first, so a busy port fails before anything else starts.
 	for _, p := range cfg.Publish {
@@ -171,7 +183,7 @@ func New(cfg Config) (*Stack, error) {
 
 	s.stack = stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, arp.NewProtocol},
-		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
+		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4},
 	})
 	s.link = channel.New(inboundQueue, MTU+header.EthernetMinimumSize, tcpip.LinkAddress(cfg.Addresses.GatewayMAC[:]))
 	if err := s.setup(); err != nil {
@@ -223,6 +235,8 @@ func (s *Stack) setup() error {
 
 	st.SetTransportProtocolHandler(tcp.ProtocolNumber, tcp.NewForwarder(st, 0, tcpInFlight, s.forwardTCP).HandlePacket)
 	st.SetTransportProtocolHandler(udp.ProtocolNumber, udp.NewForwarder(st, s.forwardUDP).HandlePacket)
+	// The ICMP transport has to be registered for its handler to run.
+	st.SetTransportProtocolHandler(icmp.ProtocolNumber4, s.forwardICMP)
 
 	dns := tcpip.FullAddress{NIC: nicID, Addr: addr(as.DNS), Port: 53}
 	var err error
@@ -333,8 +347,9 @@ func (s *Stack) closeListeners() {
 
 // Stats summarises the stack's activity.
 func (s *Stack) Stats() string {
-	return fmt.Sprintf("network: %d tcp and %d udp flows out, %d connections in, %d dns queries, %d refused, %d dial failures, %d frames dropped",
+	return fmt.Sprintf("network: %d tcp and %d udp flows out, %d connections in, %d dns queries, %d pings out (%d dropped), %d refused, %d dial failures, %d frames dropped",
 		s.tcpFlows.Load(), s.udpFlows.Load(), s.publishedConns.Load(), s.dnsQueries.Load(),
+		s.pingsSent.Load(), s.pingsDropped.Load(),
 		s.refused.Load(), s.dialFailures.Load(), s.inDropped.Load())
 }
 
@@ -376,26 +391,38 @@ func (s *Stack) outbound() {
 // 127.0.0.1, so loopback is refused here rather than trusted to the guest's
 // routing.
 func (s *Stack) target(a tcpip.Address, port uint16) (netip.AddrPort, bool) {
-	if a.Len() != 4 || port == 0 {
+	if port == 0 {
 		return netip.AddrPort{}, false
+	}
+	ip, ok := s.targetAddr(a)
+	if !ok {
+		return netip.AddrPort{}, false
+	}
+	return netip.AddrPortFrom(ip, port), true
+}
+
+// targetAddr is target for the address alone, as for a ping.
+func (s *Stack) targetAddr(a tcpip.Address) (netip.Addr, bool) {
+	if a.Len() != 4 {
+		return netip.Addr{}, false
 	}
 	ip := netip.AddrFrom4(a.As4())
 	switch {
 	case ip == s.cfg.Addresses.Gateway, ip == Gateway:
 		if !s.cfg.HostGateway {
-			return netip.AddrPort{}, false
+			return netip.Addr{}, false
 		}
 		ip = netip.AddrFrom4([4]byte{127, 0, 0, 1})
 	case s.cfg.Addresses.Subnet.Contains(ip), Subnet.Contains(ip), ip.IsLoopback(), ip.IsUnspecified(), ip.IsMulticast(),
 		ip == netip.AddrFrom4([4]byte{255, 255, 255, 255}):
-		return netip.AddrPort{}, false
+		return netip.Addr{}, false
 	}
 	for _, p := range s.cfg.Refuse {
 		if p.Contains(ip) {
-			return netip.AddrPort{}, false
+			return netip.Addr{}, false
 		}
 	}
-	return netip.AddrPortFrom(ip, port), true
+	return ip, true
 }
 
 // forwardTCP carries a guest connection to the host. It dials first, so a
