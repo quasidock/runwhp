@@ -72,6 +72,10 @@ type Config struct {
 
 	// ConsoleLine receives the kernel console (COM1) a line at a time.
 	ConsoleLine func(line string)
+	// Stopped, if set, is called once the guest has stopped, before the
+	// devices drain: whatever holds up a device's writes to the host
+	// should stop holding them up then.
+	Stopped func()
 	// Logf receives VMM diagnostics. nil discards them.
 	Logf func(format string, a ...any)
 }
@@ -281,6 +285,9 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 	m.uart.flush()
 	m.portMu.Unlock()
 	m.logf("%s  stopped: %s", since(), result.Reason)
+	if cfg.Stopped != nil {
+		cfg.Stopped()
+	}
 	if !m.drain(ctx) {
 		// A device is still reading guest memory, most likely blocked
 		// writing to the host. The process is about to exit; leaving the

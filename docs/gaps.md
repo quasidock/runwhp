@@ -2,11 +2,9 @@
 
 - `attach` to a container run in the foreground shows its output, but
   cannot type into it: its input belongs to the runwhp that runs it. An
-  attached runwhp that falls 4 MiB behind the container's output is cut
-  off, rather than holding the output up, the API's attaches included: a
-  `docker run` of a container writing as fast as `head -c` of
-  `/dev/zero` is cut off within a few megabytes, where Docker's would
-  slow the container down. `docker logs` is not.
+  attached runwhp that stops reading holds the container's output up, as
+  with Docker, `runwhp attach` included; once the container's process has
+  ended, it is let go after 5 s.
 - Restart policies end with the runwhp running the container: a logoff,
   or killing that runwhp, ends the container for good, and nothing starts
   containers at logon, so `unless-stopped` is `always`. There is no

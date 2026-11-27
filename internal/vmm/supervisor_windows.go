@@ -295,7 +295,12 @@ func (s *Supervisor) hooks(b *vmBoot, waitStart bool) bootHooks {
 			s.mu.Lock()
 			b.vm = h
 			s.mu.Unlock()
-		}}
+			s.hub.hold()
+		},
+		// Once the guest has stopped, its last output is not to wait for
+		// attached runwhps: the VM drains it, and goes, at once.
+		stopped: s.hub.release,
+	}
 }
 
 // isReady records that a container booted to wait for its start is ready.

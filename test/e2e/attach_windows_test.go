@@ -100,6 +100,39 @@ func TestAttachStdin(t *testing.T) {
 	}
 }
 
+// slowCounter counts what it is written, taking its time over each write.
+type slowCounter struct {
+	n     int64
+	delay time.Duration
+}
+
+func (c *slowCounter) Write(p []byte) (int, error) {
+	time.Sleep(c.delay)
+	c.n += int64(len(p))
+	return len(p), nil
+}
+
+// TestAttachSlow checks that an attached runwhp reading slowly gets every
+// byte of a container writing as fast as it can, far past what waits for
+// it, the container's output waiting for it, as Docker's does; and that the
+// log gets them all too.
+func TestAttachSlow(t *testing.T) {
+	const total = 64 << 20
+	name := newName(t)
+	created(t, "--name", name, alpine, "sh", "-c", "head -c 67108864 /dev/zero; exit 3")
+	cmd := exec.Command(runwhp(t), "start", "-a", name)
+	out := &slowCounter{delay: 2 * time.Millisecond}
+	var stderr syncBuffer
+	cmd.Stdout, cmd.Stderr = out, &stderr
+	err := cmd.Run()
+	if code := cmd.ProcessState.ExitCode(); code != 3 || out.n != total {
+		t.Fatalf("start -a: exit %d (%v), %d bytes, stderr %q", code, err, out.n, stderr.String())
+	}
+	if r := cli(t, "logs", name); len(r.stdout) != total {
+		t.Errorf("logs: %d bytes", len(r.stdout))
+	}
+}
+
 // TestStartAttach checks start -a: a created container's output from the
 // first byte, again once it has stopped, and with -i input that ends the
 // container's once it ends, as create -i takes input once.

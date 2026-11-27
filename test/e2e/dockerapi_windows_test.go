@@ -164,6 +164,14 @@ func TestDockerRun(t *testing.T) {
 	if out := d.dok("run", "--rm", "-t", img, "sh", "-c", "test -t 1 && echo tty"); strings.TrimSpace(out) != "tty" {
 		t.Errorf("run -t: %q", out)
 	}
+	// A container writing as fast as it can, to a docker CLI reading
+	// slowly: its output waits for the attach, which gets every byte.
+	slow := &slowCounter{delay: 2 * time.Millisecond}
+	cmd := d.cmd(nil, "run", "--rm", img, "head", "-c", "67108864", "/dev/zero")
+	cmd.Stdout = slow
+	if err := cmd.Run(); err != nil || slow.n != 64<<20 {
+		t.Errorf("run of 64 MiB attached: %v, %d bytes", err, slow.n)
+	}
 	out := d.dok("run", "--rm", "-e", "A=1", "-w", "/tmp", "-u", "nobody", "--hostname", "box", img, "sh", "-c", "echo $A $(pwd) $(id -u) $(hostname)")
 	if out != "1 /tmp 65534 box\n" {
 		t.Errorf("env, workdir, user, hostname: %q", out)

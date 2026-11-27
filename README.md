@@ -354,8 +354,10 @@ container's. Ctrl+P Ctrl+Q, or `--detach-keys`, detach and leave it
 running; without `-t`, Ctrl+C sends it SIGINT. Several runwhps can attach
 at once, and the terminal takes the size of the last to change. A runwhp
 attached to a container run in the foreground gets its output only. The
-container's output never waits for an attached runwhp: one that falls
-4 MiB behind is cut off. `start -a` boots a stopped container, attaches,
+container's output waits for the slowest attached runwhp once 1 MiB is
+queued for it, as Docker's waits for its attached clients, but goes to the
+container's log, or the console of the runwhp running it, first; a VM
+that stops leaves what it wrote last queued, rather than waiting. `start -a` boots a stopped container, attaches,
 and only then starts its process, so its first output is not missed; it
 takes one container, and its output also goes to the container's log. `wait` prints how containers ended, once they have.
 
@@ -1643,9 +1645,7 @@ WSL kernel; tests of runwhp's own kernel are then skipped.
   that Docker Compose works through the API, should it take over from
   `runwhp compose`, or BuildKit's session be served for buildx, which
   Docker Compose and Dev Containers use when it is installed?
-- Should an attach through the Engine API hold the container's output up
-  when it falls behind, as Docker's does, rather than be cut off? And
-  how should host files with no owner of their own show, so that Dev
+- How should host files with no owner of their own show, so that Dev
   Containers' `remoteUser` can write to its workspace, as it can on a
   Linux host, where Dev Containers gives that user the files' owner's
   UID?

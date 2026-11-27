@@ -68,6 +68,9 @@ type bootHooks struct {
 	failed func(console []string)
 	// attached, if set, is given what reaches into the VM before it boots.
 	attached func(*vmHandles)
+	// stopped, if set, is called once the guest has stopped, before its
+	// devices drain.
+	stopped func()
 }
 
 // vmHandles are what the runwhp running a container reaches its VM
@@ -306,6 +309,7 @@ func bootContainer(ctx context.Context, root string, cfg *container.Config, laye
 		Devices:     devices,
 		Probe:       handles.probe,
 		ConsoleLine: consoleLine,
+		Stopped:     hooks.stopped,
 		Logf:        logf,
 	})
 	term.Restore() // before anything else is printed

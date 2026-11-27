@@ -27,6 +27,9 @@ func (s *frameSink) Write(p []byte) (int, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.failed {
+		return 0, io.ErrClosedPipe
+	}
 	return s.buf.Write(p)
 }
 
@@ -92,51 +95,124 @@ func TestOutputHub(t *testing.T) {
 	}
 }
 
-// TestOutputHubBehind checks that a client that stops reading is cut off
-// once attachBacklog is queued for it, while the output and another client
-// go on unhindered.
-func TestOutputHubBehind(t *testing.T) {
+// slowSink takes a write only every delay.
+type slowSink struct {
+	frameSink
+	delay time.Duration
+}
+
+func (s *slowSink) Write(p []byte) (int, error) {
+	time.Sleep(s.delay)
+	return s.frameSink.Write(p)
+}
+
+// TestOutputHubSlow checks that a client reading slowly gets every byte of
+// output far beyond attachBacklog, the output waiting for it, as Docker's
+// waits for its attached clients, while another client and the log get
+// everything too.
+func TestOutputHubSlow(t *testing.T) {
 	h := newOutputHub()
 	var log bytes.Buffer
 	out := h.wrap(container.Stdout, &log)
-	stuck := &frameSink{block: make(chan struct{})}
-	fine := &frameSink{}
-	cs, cf := newAttachClient(stuck), newAttachClient(fine)
+	slow, fine := &slowSink{delay: time.Millisecond}, &frameSink{}
+	cs, cf := newAttachClient(slow), newAttachClient(fine)
 	h.add(cs)
 	h.add(cf)
 	go cs.write()
 	go cf.write()
-	chunk := bytes.Repeat([]byte("x"), 64<<10)
-	written := make(chan struct{})
-	go func() {
-		for range 2 * attachBacklog / len(chunk) {
-			out.Write(chunk)
+	chunk := bytes.Repeat([]byte("x"), 16<<10)
+	total := 64 << 20
+	for range total / len(chunk) {
+		out.Write(chunk)
+		cs.mu.Lock()
+		queued := cs.queued
+		cs.mu.Unlock()
+		if queued > attachBacklog+len(chunk)+64 {
+			t.Fatalf("%d bytes queued for the slow client", queued)
 		}
-		close(written)
-	}()
-	select {
-	case <-written:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the output waited for a client that does not read")
 	}
-	if log.Len() != 2*attachBacklog {
+	for _, c := range []*attachClient{cs, cf} {
+		c.finish(container.AppendFrame(nil, container.AttachExit, []byte("{}")))
+		<-c.done
+	}
+	if log.Len() != total {
 		t.Errorf("the log got %d bytes", log.Len())
 	}
-	h.mu.Lock()
-	_, stillThere := h.clients[cs]
-	h.mu.Unlock()
-	if stillThere {
-		t.Error("the stuck client was not cut off")
+	for name, s := range map[string]*frameSink{"slow": &slow.frameSink, "other": fine} {
+		if stdout, _, exit := s.frames(t); len(stdout) != total || string(exit) != "{}" {
+			t.Errorf("the %s client got %d bytes, exit %q", name, len(stdout), exit)
+		}
 	}
-	close(stuck.block)
-	<-cs.done
-	if _, stderr, _ := stuck.frames(t); stderr != behindMessage {
-		t.Errorf("the stuck client was told %q", stderr)
-	}
-	cf.finish(container.AppendFrame(nil, container.AttachExit, []byte("{}")))
-	<-cf.done
-	if stdout, _, _ := fine.frames(t); len(stdout) != 2*attachBacklog {
-		t.Errorf("the other client got %d bytes", len(stdout))
+}
+
+// TestOutputHubWaitEnds checks that output waiting for a client that does
+// not read is let go when it detaches, when its connection fails, and when
+// the guest stops; and that runwhps attach meanwhile.
+func TestOutputHubWaitEnds(t *testing.T) {
+	chunk := bytes.Repeat([]byte("x"), attachBacklog)
+	for _, end := range []string{"detach", "fail", "release"} {
+		t.Run(end, func(t *testing.T) {
+			h := newOutputHub()
+			out := h.wrap(container.Stdout, io.Discard)
+			stuck := &frameSink{block: make(chan struct{})}
+			c := newAttachClient(stuck)
+			h.add(c)
+			go c.write()
+			wrote := make(chan struct{})
+			go func() {
+				defer close(wrote)
+				for range 4 {
+					out.Write(chunk)
+				}
+			}()
+			select {
+			case <-wrote:
+				t.Fatal("the output did not wait for a client that does not read")
+			case <-time.After(100 * time.Millisecond):
+			}
+			// The wait holds no lock: another runwhp attaches.
+			added := make(chan struct{})
+			go func() {
+				h.add(newAttachClient(io.Discard))
+				close(added)
+			}()
+			select {
+			case <-added:
+			case <-time.After(5 * time.Second):
+				t.Fatal("attaching waited for the stuck client")
+			}
+			h.mu.Lock()
+			for o := range h.clients {
+				if o != c {
+					delete(h.clients, o)
+				}
+			}
+			h.mu.Unlock()
+			switch end {
+			case "detach":
+				c.close()
+				close(stuck.block)
+			case "fail":
+				stuck.mu.Lock()
+				stuck.failed = true
+				stuck.mu.Unlock()
+				close(stuck.block)
+			case "release":
+				h.release()
+			}
+			select {
+			case <-wrote:
+			case <-time.After(10 * time.Second):
+				t.Fatalf("the output still waits after %s", end)
+			}
+			if end == "release" {
+				close(stuck.block)
+				h.hold() // a next boot waits again
+				if !h.free && h.released == nil {
+					t.Error("hold left no released channel")
+				}
+			}
+		})
 	}
 }
 

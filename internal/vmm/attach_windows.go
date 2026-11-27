@@ -18,19 +18,46 @@ import (
 // container's output and, for a container in the background run with -i,
 // its input, over the container's pipe (see container.OpAttach).
 
-// attachBacklog is how far an attached runwhp may fall behind the
-// container's output before it is cut off. The container's output never
-// waits for an attached runwhp: it goes where it goes first, to a log, a
-// file or the console of the runwhp running it.
-const attachBacklog = 4 << 20
+// attachBacklog is how much output may wait for an attached runwhp before
+// the container's output waits for it, as Docker's waits for its attached
+// clients: the slowest of them paces the container. The output goes where
+// it goes first, to a log, a file or the console of the runwhp running it,
+// before it waits, so the log is never behind what attached runwhps got.
+const attachBacklog = 1 << 20
 
 // outputHub passes the container's output on to attached runwhps.
 type outputHub struct {
 	mu      sync.Mutex
 	clients map[*attachClient]bool
+	// released is closed once the guest has stopped: what it wrote then
+	// is queued without waiting, so that its devices drain, and the VM
+	// goes, however slowly attached runwhps read.
+	released chan struct{}
+	free     bool // released is closed
 }
 
-func newOutputHub() *outputHub { return &outputHub{clients: map[*attachClient]bool{}} }
+func newOutputHub() *outputHub {
+	return &outputHub{clients: map[*attachClient]bool{}, released: make(chan struct{})}
+}
+
+// hold has the output wait for attached runwhps again, as a VM boots.
+func (h *outputHub) hold() {
+	h.mu.Lock()
+	if h.free {
+		h.released, h.free = make(chan struct{}), false
+	}
+	h.mu.Unlock()
+}
+
+// release stops the output waiting for attached runwhps, as the VM stops.
+func (h *outputHub) release() {
+	h.mu.Lock()
+	if !h.free {
+		close(h.released)
+		h.free = true
+	}
+	h.mu.Unlock()
+}
 
 // wrap returns a writer that writes to w, then hands what it wrote to the
 // attached runwhps as stream.
@@ -58,15 +85,27 @@ func (h *outputHub) offer(stream byte, p []byte) {
 		return
 	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if len(h.clients) == 0 {
+		h.mu.Unlock()
 		return
 	}
 	frame := container.AppendFrame(nil, stream, p)
+	var full []*attachClient
 	for c := range h.clients {
-		if !c.enqueue(frame) {
+		ok, behind := c.enqueue(frame)
+		switch {
+		case !ok:
 			delete(h.clients, c)
+		case behind:
+			full = append(full, c)
 		}
+	}
+	released := h.released
+	h.mu.Unlock()
+	// The wait is outside the lock, so that runwhps attach and detach
+	// meanwhile.
+	for _, c := range full {
+		c.waitRoom(released)
 	}
 }
 
@@ -85,20 +124,20 @@ func (h *outputHub) remove(c *attachClient) {
 // attachClient is one attached runwhp: frames queued for it, and the
 // goroutine writing them to its connection.
 type attachClient struct {
-	w    io.Writer
-	wake chan struct{}
-	done chan struct{} // closed once the writer has stopped
+	w     io.Writer
+	wake  chan struct{}
+	space chan struct{} // signalled as the writer takes the queue
+	done  chan struct{} // closed once the writer has stopped
 
 	mu     sync.Mutex
 	queue  [][]byte
 	queued int
-	behind bool   // cut off for falling attachBacklog behind
 	closed bool   // detached: write nothing more
 	exit   []byte // the last frame, once the container has stopped
 }
 
 func newAttachClient(w io.Writer) *attachClient {
-	return &attachClient{w: w, wake: make(chan struct{}, 1), done: make(chan struct{})}
+	return &attachClient{w: w, wake: make(chan struct{}, 1), space: make(chan struct{}, 1), done: make(chan struct{})}
 }
 
 func (c *attachClient) signal() {
@@ -109,22 +148,46 @@ func (c *attachClient) signal() {
 }
 
 // enqueue queues a frame without waiting, and reports whether the client
-// still takes output.
-func (c *attachClient) enqueue(frame []byte) bool {
+// still takes output, and whether attachBacklog now waits for it.
+func (c *attachClient) enqueue(frame []byte) (ok, behind bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.behind || c.closed || c.exit != nil {
-		return false
-	}
-	if c.queued+len(frame) > attachBacklog {
-		c.behind = true
-		c.signal()
-		return false
+	if c.closed || c.exit != nil || c.stopped() {
+		return false, false
 	}
 	c.queue = append(c.queue, frame)
 	c.queued += len(frame)
 	c.signal()
-	return true
+	return true, c.queued >= attachBacklog
+}
+
+func (c *attachClient) stopped() bool {
+	select {
+	case <-c.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// waitRoom waits until less than attachBacklog waits for the client, or
+// it takes no more output, or released is closed.
+func (c *attachClient) waitRoom(released <-chan struct{}) {
+	for {
+		c.mu.Lock()
+		room := c.queued < attachBacklog || c.closed || c.exit != nil
+		c.mu.Unlock()
+		if room {
+			return
+		}
+		select {
+		case <-c.space:
+		case <-c.done:
+			return
+		case <-released:
+			return
+		}
+	}
 }
 
 // finish has the writer send what is queued, then exit, and stop.
@@ -143,17 +206,19 @@ func (c *attachClient) close() {
 	c.signal()
 }
 
-const behindMessage = "runwhp: this attach fell too far behind the container's output, and was cut off\n"
-
-// write writes queued frames until the client is finished, closed or cut
-// off, or its connection fails.
+// write writes queued frames until the client is finished or closed, or
+// its connection fails.
 func (c *attachClient) write() {
 	defer close(c.done)
 	for range c.wake {
 		c.mu.Lock()
-		queue, behind, closed, exit := c.queue, c.behind, c.closed, c.exit
+		queue, closed, exit := c.queue, c.closed, c.exit
 		c.queue, c.queued = nil, 0
 		c.mu.Unlock()
+		select {
+		case c.space <- struct{}{}:
+		default:
+		}
 		if closed {
 			return
 		}
@@ -162,11 +227,7 @@ func (c *attachClient) write() {
 				return
 			}
 		}
-		switch {
-		case behind:
-			c.w.Write(container.AppendFrame(nil, container.AttachStderr, []byte(behindMessage)))
-			return
-		case exit != nil:
+		if exit != nil {
 			c.w.Write(exit)
 			return
 		}
@@ -329,7 +390,7 @@ func (s *Supervisor) attach(c net.Conn, r *bufio.Reader, req container.Request) 
 		}
 	case <-detached:
 		cl.close()
-	case <-cl.done: // cut off, or its connection failed
+	case <-cl.done: // its connection failed
 	}
 }
 
