@@ -98,18 +98,20 @@ func TestSharedVolume(t *testing.T) {
 	expect(t, execIn(t, a, "sh", "-c", "wc -l < /data/log; grep -c '^a' /data/log; grep -c '^b' /data/log"), "400\n200\n200\n", 0)
 
 	// flock: a holds the lock; the other container cannot have it until a
-	// lets go.
-	// waitFile waits, in the container, up to 30 s for a file a holds the
-	// lock by.
+	// lets go, which it does once the other has found it busy, however
+	// long that container takes to boot.
+	// waitFile waits, in the container, up to 30 s for a file: the one a
+	// makes once it holds the lock, or the one the other makes to release
+	// it.
 	const waitFile = "i=0; while [ ! -e $0 ]; do i=$((i+1)); [ $i -gt 300 ] && echo gave up && exit 9; sleep 0.1; done; "
 	var held result
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		held = execIn(t, a, "flock", "-x", "/data/lock", "sh", "-c", "touch /data/held; sleep 3")
+		held = execIn(t, a, "flock", "-x", "/data/lock", "sh", "-c", "touch /data/held; "+waitFile, "/data/release")
 	}()
 	expect(t, run(t, "-v", v+":/data", alpine, "sh", "-c",
-		waitFile+"flock -n /data/lock true && echo free || echo busy; flock -x /data/lock echo got", "/data/held"),
+		waitFile+"flock -n /data/lock true && echo free || echo busy; touch /data/release; flock -x /data/lock echo got", "/data/held"),
 		"busy\ngot\n", 0)
 	wg.Wait()
 	if held.code != 0 {
@@ -117,9 +119,9 @@ func TestSharedVolume(t *testing.T) {
 	}
 	// POSIX locks, as fcntl takes them, likewise.
 	wg.Add(1)
-	go func() { defer wg.Done(); held = execIn(t, a, "/t/locker", "posix", "/data/plock", "3", "/data/pheld") }()
+	go func() { defer wg.Done(); held = execIn(t, a, "/t/locker", "posix", "/data/plock", "/data/prelease", "/data/pheld") }()
 	expect(t, run(t, "-v", v+":/data", "-v", locker(t), alpine, "sh", "-c",
-		waitFile+"/t/locker try /data/plock; /t/locker posix /data/plock 0", "/data/pheld"),
+		waitFile+"/t/locker try /data/plock; touch /data/prelease; /t/locker posix /data/plock 0", "/data/pheld"),
 		"busy\nlocked\n", 0)
 	wg.Wait()
 	if held.code != 0 || held.stdout != "locked\n" {

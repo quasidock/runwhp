@@ -3,9 +3,10 @@
 // Command locker takes POSIX locks and sets extended attributes for the
 // end-to-end tests, which alpine's busybox cannot.
 //
-//	locker posix PATH SECONDS [MARK]  wait for a write lock on the whole file,
+//	locker posix PATH HOLD [MARK]     wait for a write lock on the whole file,
 //	                                  make MARK once it holds it, hold it
-//	                                  SECONDS, and print "locked"
+//	                                  HOLD seconds, or until the file HOLD
+//	                                  names is there, and print "locked"
 //	locker try PATH                   print "locked" if a write lock can be
 //	                                  had at once, else "busy"
 //	locker setx PATH NAME VALUE       set an extended attribute
@@ -46,11 +47,10 @@ func main() {
 			fail("lock: %v", err)
 		}
 		if os.Args[1] == "posix" && len(os.Args) > 3 {
-			secs, _ := strconv.Atoi(os.Args[3])
 			if len(os.Args) > 4 {
 				os.WriteFile(os.Args[4], nil, 0o644)
 			}
-			time.Sleep(time.Duration(secs) * time.Second)
+			hold(os.Args[3])
 		}
 		fmt.Println("locked")
 	case "setx":
@@ -66,6 +66,20 @@ func main() {
 		fmt.Println(string(buf[:n]))
 	default:
 		fail("unknown command %s", os.Args[1])
+	}
+}
+
+// hold waits what arg says: a number of seconds, or until the file it names
+// is there, for at most a minute.
+func hold(arg string) {
+	if secs, err := strconv.Atoi(arg); err == nil {
+		time.Sleep(time.Duration(secs) * time.Second)
+		return
+	}
+	for deadline := time.Now().Add(time.Minute); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		if _, err := os.Stat(arg); err == nil {
+			return
+		}
 	}
 }
 
