@@ -78,8 +78,11 @@ const (
 	// vsockFirstPort is the first of the ports Dial takes for itself;
 	// Listen takes those below it.
 	vsockFirstPort = 49152
-	// vsockBacklog bounds the connections a listener holds unaccepted.
-	vsockBacklog = 16
+	// vsockBacklog bounds the connections a listener holds unaccepted. A
+	// client may open many at once, as Docker Compose does to Docker's
+	// socket, faster than a busy host takes them: 16 reset some of 100
+	// opened at once while other containers ran.
+	vsockBacklog = 256
 )
 
 // How long a Dial waits for the guest to answer, and how long a Close waits
