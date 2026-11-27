@@ -123,6 +123,8 @@ func start(begin time.Time, ctl *controller) (guestspec.Status, error) {
 		return none, serveLayers(&spec, ctl)
 	case guestspec.ServeRoot:
 		return none, serveRoot(&spec, ctl)
+	case guestspec.ServeVolume:
+		return none, serveVolume(&spec, ctl)
 	default:
 		return none, fmt.Errorf("init cannot serve %q", spec.Serve)
 	}

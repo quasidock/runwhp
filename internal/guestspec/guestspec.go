@@ -125,8 +125,13 @@ type Spec struct {
 	// port: init sets the clock from it before it starts the process, which
 	// would otherwise see the CMOS stub's whole seconds.
 	ClockSync bool `json:"clockSync,omitempty"`
-	// Volumes is how many volume disks there are.
+	// Volumes is how many volumes there are, each a disk with the serial
+	// VolumeSerial(i), unless SharedVolumes lists it.
 	Volumes int `json:"volumes,omitempty"`
+	// SharedVolumes lists the volumes that other containers use too: each
+	// is a virtio-fs device tagged VolumeFSTag(i), served by the volume's
+	// own guest, rather than a disk.
+	SharedVolumes []int `json:"sharedVolumes,omitempty"`
 	// Networks configures the network interfaces, one for each network
 	// device, in the devices' order, which is the order the kernel names
 	// them eth0, eth1 and so on. None means the guest has only loopback.
@@ -163,7 +168,9 @@ type Spec struct {
 	// read-only, each on its own, serves their files on ArchivePort, sends
 	// an Event with Ready, and waits for the host to stop the machine; with
 	// ServeRoot, init prepares a stopped container's root and mounts as
-	// for a run and serves them on RootPort. Either way it runs no process.
+	// for a run and serves them on RootPort; with ServeVolume, init mounts
+	// its one volume disk and serves it on VolumePort. Either way it runs
+	// no process.
 	Serve string `json:"serve,omitempty"`
 }
 

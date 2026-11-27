@@ -16,7 +16,10 @@ var storage = struct {
 	shares    int   // the virtio-fs mount, or -1
 	delegated int   // the delegated shares' virtio-fs mount, or -1
 	volumes   []int // each volume's file system
-	rw        int   // a kept writable layer's file system, or -1
+	// sharedVolumes are the virtio-fs mounts of volumes served by their own
+	// guests.
+	sharedVolumes []int
+	rw            int // a kept writable layer's file system, or -1
 	// rcuExpedited is /sys/kernel/rcu_expedited, opened while the
 	// initramfs's sysfs is still reachable and writable, or -1.
 	rcuExpedited int
@@ -72,6 +75,14 @@ func stopStorage() {
 			if err := unix.Syncfs(fd); err != nil {
 				logf("syncing the host's files: %v", err)
 			}
+		}
+	}
+	// A shared volume's writes reach its guest as they are made, but for
+	// shared memory mappings' dirty pages; syncfs writes those back, and
+	// has the volume's guest write the volume to its disk.
+	for i, fd := range storage.sharedVolumes {
+		if err := unix.Syncfs(fd); err != nil {
+			logf("syncing shared volume %d: %v", i, err)
 		}
 	}
 }

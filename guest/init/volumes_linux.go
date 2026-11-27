@@ -4,10 +4,12 @@ package main
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/quasidock/runwhp/internal/guestspec"
 )
@@ -30,9 +32,15 @@ func prepareVolumes(spec *guestspec.Spec) error {
 	// made says which volumes' _data init made now: new volumes.
 	made := map[int]bool{}
 	if spec.Volumes > 0 {
-		serials := make([]string, spec.Volumes)
-		for i := range serials {
-			serials[i] = guestspec.VolumeSerial(i)
+		shared := map[int]bool{}
+		for _, i := range spec.SharedVolumes {
+			shared[i] = true
+		}
+		var serials []string
+		for i := range spec.Volumes {
+			if !shared[i] {
+				serials = append(serials, guestspec.VolumeSerial(i))
+			}
 		}
 		devices, err := waitDisks(serials)
 		if err != nil {
@@ -40,22 +48,37 @@ func prepareVolumes(spec *guestspec.Spec) error {
 		}
 		openRCUExpedited()
 		for i := range spec.Volumes {
-			dev, dir := devices[guestspec.VolumeSerial(i)], volumeDir(i)
+			dir := volumeDir(i)
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				return err
 			}
-			replay := needsRecovery(dev)
-			if err := syscall.Mount(dev, dir, "ext4", 0, volumeMountOpts); err != nil {
-				return fmt.Errorf("mounting volume disk %d (%s): %w", i, dev, err)
+			if shared[i] {
+				fd, err := mountSharedVolume(i, dir)
+				if err != nil {
+					return err
+				}
+				// Until the volume is ready, which another container
+				// starting at once may be making it too: the lock is the
+				// volume's, so every container sees it.
+				if err := syscall.Flock(fd, syscall.LOCK_EX); err != nil {
+					return fmt.Errorf("locking shared volume %d: %w", i, err)
+				}
+				defer syscall.Flock(fd, syscall.LOCK_UN)
+			} else {
+				dev := devices[guestspec.VolumeSerial(i)]
+				replay := needsRecovery(dev)
+				if err := syscall.Mount(dev, dir, "ext4", 0, volumeMountOpts); err != nil {
+					return fmt.Errorf("mounting volume disk %d (%s): %w", i, dev, err)
+				}
+				if replay {
+					debugf("volume disk %d (%s): replayed its journal", i, dev)
+				}
+				fd, err := syscall.Open(dir, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
+				if err != nil {
+					return err
+				}
+				storage.volumes = append(storage.volumes, fd)
 			}
-			if replay {
-				debugf("volume disk %d (%s): replayed its journal", i, dev)
-			}
-			fd, err := syscall.Open(dir, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
-			if err != nil {
-				return err
-			}
-			storage.volumes = append(storage.volumes, fd)
 			err = os.Mkdir(filepath.Join(dir, guestspec.VolumeData), 0o755)
 			if err != nil && !os.IsExist(err) {
 				return err
@@ -143,6 +166,31 @@ func prepareVolumes(spec *guestspec.Spec) error {
 		}
 	}
 	return nil
+}
+
+// mountSharedVolume mounts volume i, served by the volume's own guest, at
+// dir, and returns a descriptor of it, which stopStorage syncs.
+func mountSharedVolume(i int, dir string) (int, error) {
+	tag := guestspec.VolumeFSTag(i)
+	// The device is probed as the kernel boots; give it a moment all the
+	// same.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		err := syscall.Mount(tag, dir, "virtiofs", 0, "")
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, syscall.ENOENT) || time.Now().After(deadline) {
+			return -1, fmt.Errorf("mounting shared volume %d: %w", i, err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	fd, err := syscall.Open(dir, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, err
+	}
+	storage.sharedVolumes = append(storage.sharedVolumes, fd)
+	return fd, nil
 }
 
 // imageDir returns where the image's directory at the container path p is,
