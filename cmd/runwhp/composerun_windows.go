@@ -467,6 +467,8 @@ func (c *composeCtx) cmdRun(args []string) int {
 		errorf("%v", err)
 		return 1
 	}
+	// The run's container joins the service's, if they run.
+	plan.extra = service
 	if err := c.prepare(ctx, plan, *build, false, "", false); err != nil {
 		return c.failed(ctx, err)
 	}

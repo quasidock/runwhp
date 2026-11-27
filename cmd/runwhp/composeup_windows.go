@@ -155,6 +155,9 @@ type upPlan struct {
 	plans    map[string]compose.Container
 	builds   map[string]*compose.Build
 	imageIDs map[string]string
+	// extra is a service of which a container more runs beside its
+	// replicas, as compose run's.
+	extra string
 }
 
 func (c *composeCtx) up(ctx context.Context, second <-chan struct{}, o upOptions) int {
@@ -305,6 +308,57 @@ func (c *composeCtx) prepare(ctx context.Context, plan *upPlan, build, noBuild b
 	for _, key := range c.usedVolumes(plan) {
 		if err := c.ensureVolume(key, c.project.Volumes[key]); err != nil {
 			return err
+		}
+	}
+	return c.shareVolumes(ctx, plan)
+}
+
+// shareVolumes makes shared the project's volumes that its containers
+// would use at once, so that they can, as compose.SharedVolumes finds
+// them over the whole project. A running container of the project's that
+// has the disk of one just made shared is started again, so that it reaches
+// the volume through its server too, as scaling a service up needs.
+func (c *composeCtx) shareVolumes(ctx context.Context, plan *upPlan) error {
+	scale := func(name string) int {
+		n := 1
+		if s, ok := plan.project.Services[name]; ok {
+			n = s.GetScale()
+		} else if s, ok := c.project.Services[name]; ok {
+			n = s.GetScale()
+		}
+		if name == plan.extra {
+			n++
+		}
+		return n
+	}
+	vs := volume.Open(c.root)
+	for _, name := range compose.SharedVolumes(c.project, compose.ServicesOf(c.project, nil), scale) {
+		changed, err := vs.SetShared(name)
+		if errors.Is(err, volume.ErrNotFound) {
+			continue // made when a service using it first runs
+		}
+		if err != nil {
+			return err
+		}
+		if !changed {
+			continue
+		}
+		cs, err := c.projectContainers(false)
+		if err != nil {
+			return err
+		}
+		for _, ct := range cs {
+			if ct.State.Status != container.Running || !slices.ContainsFunc(ct.State.DirectVolumes, func(d string) bool { return strings.EqualFold(d, name) }) {
+				continue
+			}
+			c.event("Container", ct.Name, "Restarting")
+			if err := stopContainer(c.store, ct.ID, stopTimeoutOf(ct.Config)); err != nil {
+				return err
+			}
+			if err := startContainerIO(ctx, c.store, ct.ID, false); err != nil {
+				return err
+			}
+			c.event("Container", ct.Name, "Started")
 		}
 	}
 	return nil
@@ -519,9 +573,9 @@ func (c *composeCtx) createReplica(ctx context.Context, plan *upPlan, name strin
 	return nil
 }
 
-// recreate makes a service's container again: stopped first, as a runwhp
-// volume or address is one VM's at a time, then renamed aside, made anew,
-// and removed.
+// recreate makes a service's container again: stopped first, as an
+// address is one VM's at a time, and so is the disk of a volume that is
+// not shared, then renamed aside, made anew, and removed.
 func (c *composeCtx) recreate(ctx context.Context, plan *upPlan, name string, i int, old *container.Container, timeout int) error {
 	c.event("Container", old.Name, "Recreate")
 	if err := stopContainer(c.store, old.ID, stopTimeout(timeout)); err != nil {

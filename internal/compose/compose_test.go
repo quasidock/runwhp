@@ -360,27 +360,35 @@ services:
   many: {image: a, volumes: ["solo:/s"], deploy: {replicas: 2}}
   bind: {image: a, volumes: ["./x:/x"]}
   bind2: {image: a, volumes: ["./x:/x"]}
-volumes: {data: {}, seed: {}, solo: {}}
+  one: {image: a, volumes: ["asked:/s", "alone:/t"]}
+volumes: {data: {}, seed: {}, solo: {}, asked: {driver_opts: {shared: "true"}}, alone: {}}
 `}, LoadOptions{})
 	var pr Problems
 	Check(p, ServicesOf(p, nil), &pr)
-	got := pr.Err().Error()
-	for _, want := range []string{
-		`services "a" and "b" both mount volume myapp_x_data: a runwhp volume is used by one running container at a time`,
-		`service "many" mounts volume myapp_x_solo and has 2 replicas`,
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("no error saying %q in:\n%s", want, got)
-		}
-	}
-	if strings.Contains(got, "seed") || len(pr.Errors) != 2 {
-		t.Errorf("errors: %v", pr.Errors)
-	}
-	// Running a alone is fine.
-	pr = Problems{}
-	Check(p, []string{"a", "mig", "app"}, &pr)
 	if pr.Err() != nil {
-		t.Errorf("a alone: %v", pr.Err())
+		t.Fatalf("volumes services share are refused: %v", pr.Err())
+	}
+	scale := func(name string) int { s := p.Services[name]; return s.GetScale() }
+	got := SharedVolumes(p, ServicesOf(p, nil), scale)
+	want := []string{"myapp_x_asked", "myapp_x_data", "myapp_x_solo"}
+	if !slices.Equal(got, want) {
+		t.Errorf("shared volumes %v, want %v", got, want)
+	}
+	// A replica more makes a volume one service mounts shared.
+	got = SharedVolumes(p, []string{"one"}, func(string) int { return 2 })
+	if !slices.Equal(got, []string{"myapp_x_alone", "myapp_x_asked"}) {
+		t.Errorf("scaled up: %v", got)
+	}
+	// driver_opts other than shared are refused.
+	p2, _ := project(t, map[string]string{"compose.yaml": `
+services:
+  a: {image: a, volumes: ["v:/v", "w:/w"]}
+volumes: {v: {driver_opts: {type: nfs}}, w: {driver_opts: {shared: "maybe"}}}
+`}, LoadOptions{})
+	pr = Problems{}
+	Check(p2, ServicesOf(p2, nil), &pr)
+	if err := pr.Err(); err == nil || !strings.Contains(err.Error(), "driver_opts type is not supported") || !strings.Contains(err.Error(), `shared="maybe"`) {
+		t.Errorf("driver_opts: %v", err)
 	}
 }
 

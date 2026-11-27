@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"strconv"
 	"strings"
 
 	"github.com/compose-spec/compose-go/v2/types"
@@ -37,8 +38,8 @@ func hashOf(v any) string {
 }
 
 // Check looks over a project for what runwhp cannot do as it asks: its
-// networks, volumes, secrets and configs, and volumes services would use
-// at once, which runwhp cannot share. services are those up would run.
+// networks, volumes, secrets and configs. services are those up would
+// run.
 func Check(p *types.Project, services []string, pr *Problems) {
 	if len(p.Jobs) > 0 {
 		pr.refuse("jobs are not supported")
@@ -70,18 +71,31 @@ func Check(p *types.Project, services []string, pr *Problems) {
 		if v.Driver != "" && v.Driver != "local" {
 			pr.refuse("volume %s: driver %s is not supported: runwhp's volumes are disk images in its store", key, v.Driver)
 		}
-		if len(v.DriverOpts) > 0 {
-			pr.refuse("volume %s: driver_opts are not supported", key)
+		for opt, val := range v.DriverOpts {
+			switch {
+			case opt != "shared":
+				pr.refuse("volume %s: driver_opts %s is not supported; runwhp knows shared", key, opt)
+			case !validBool(val):
+				pr.refuse("volume %s: driver_opts shared=%q: give true or false", key, val)
+			}
 		}
 	}
-	sharedVolumes(p, services, pr)
 }
 
-// sharedVolumes refuses a named volume that two of services, or two
-// replicas of one, would mount at once: a runwhp volume is a disk only one
-// running VM can have. A service that waits for another to complete runs
-// after it, not with it.
-func sharedVolumes(p *types.Project, services []string, pr *Problems) {
+func validBool(s string) bool {
+	_, err := strconv.ParseBool(s)
+	return err == nil
+}
+
+// SharedVolumes returns the names, in the store, of the project's volumes
+// that containers would use at once, which are to be shared: those two
+// services mount, or a service with replicas, scale says how many, or
+// whose driver_opts say shared. A service that waits for another to
+// complete runs after it, not with it. services are those to consider,
+// which the project's whole, rather than those up runs, so that a volume
+// is shared before its first user starts, not after.
+func SharedVolumes(p *types.Project, services []string, scale func(service string) int) []string {
+	shared := map[string]bool{}
 	users := map[string][]string{} // a volume's name in the store, and the services mounting it
 	for _, name := range services {
 		s, ok := p.Services[name]
@@ -94,30 +108,34 @@ func sharedVolumes(p *types.Project, services []string, pr *Problems) {
 				continue
 			}
 			vol := v.Source
-			if vc, ok := p.Volumes[v.Source]; ok && vc.Name != "" {
-				vol = vc.Name
+			if vc, ok := p.Volumes[v.Source]; ok {
+				if vc.Name != "" {
+					vol = vc.Name
+				}
+				if on, _ := strconv.ParseBool(vc.DriverOpts["shared"]); on {
+					shared[vol] = true
+				}
 			}
 			if seen[vol] {
 				continue
 			}
 			seen[vol] = true
 			users[vol] = append(users[vol], name)
-			if s.GetScale() > 1 {
-				pr.refuse("service %q mounts volume %s and has %d replicas: a runwhp volume is used by one running container at a time; share files through a bind mount", name, vol, s.GetScale())
+			if scale(name) > 1 {
+				shared[vol] = true
 			}
 		}
 	}
-	for _, vol := range sortedKeys(users) {
-		names := users[vol]
+	for vol, names := range users {
 		for i, a := range names {
 			for _, b := range names[i+1:] {
-				if completesBefore(p, a, b) || completesBefore(p, b, a) {
-					continue
+				if !completesBefore(p, a, b) && !completesBefore(p, b, a) {
+					shared[vol] = true
 				}
-				pr.refuse("services %q and %q both mount volume %s: a runwhp volume is used by one running container at a time; share files through a bind mount", a, b, vol)
 			}
 		}
 	}
+	return sortedKeys(shared)
 }
 
 // completesBefore reports whether service b waits for a to complete.
