@@ -103,7 +103,11 @@ func serveSession(vol *volfs.Volume, conn *os.File) {
 	defer conn.Close()
 	start := time.Now()
 	s := vol.NewSession()
-	srv := &fuse.Server{FS: s, TimeGran: 1, NoKeepCache: true, Logf: debugf}
+	// The containers cache neither names nor attributes, nor files' pages
+	// past an open: another container may change any of them at any
+	// time, and one acting on what it remembers, a file another removed
+	// and made again, as SQLite's journal is, say, acts on the wrong file.
+	srv := &fuse.Server{FS: s, TimeGran: 1, NoKeepCache: true, Timeout: -1, Logf: debugf}
 	err := fuse.ServeStream(conn, srv, s.Close)
 	s.Close()
 	if err != nil {

@@ -128,7 +128,11 @@ const DefaultTimeout = time.Second
 // Server decodes FUSE requests, calls its FileSystem, and encodes the
 // replies. It implements virtio.FsHandler.
 type Server struct {
-	FS      FileSystem
+	FS FileSystem
+	// Timeout is how long the guest may cache names, attributes and the
+	// absence of names: DefaultTimeout if zero, and nothing if negative, so
+	// that the guest asks again each time, as it must when other guests
+	// change the same files.
 	Timeout time.Duration
 	// Logf, when set, reports protocol problems and errors the file system
 	// returned that are not an Errno.
@@ -181,8 +185,11 @@ func (s *Server) keepCache() uint32 {
 }
 
 func (s *Server) timeout() time.Duration {
-	if s.Timeout == 0 {
+	switch {
+	case s.Timeout == 0:
 		return DefaultTimeout
+	case s.Timeout < 0:
+		return 0
 	}
 	return s.Timeout
 }

@@ -85,6 +85,17 @@ func TestSharedVolume(t *testing.T) {
 		t.Errorf("volume inspect with one container on it: %+v", info)
 	}
 
+	// A file another container replaces is the new file at once, not the
+	// one it remembers, as SQLite's journal, removed and made again each
+	// transaction, needs.
+	b := newName(t)
+	detached(t, "--name", b, "-v", v+":/data", alpine, "sleep", "300")
+	for i := range 5 {
+		expect(t, execIn(t, b, "sh", "-c", fmt.Sprintf("echo old%d > /data/j; cat /data/j", i)), fmt.Sprintf("old%d\n", i), 0)
+		expect(t, execIn(t, a, "sh", "-c", fmt.Sprintf("cat /data/j > /dev/null; rm /data/j; echo new%d > /data/j", i)), "", 0)
+		expect(t, execIn(t, b, "cat", "/data/j"), fmt.Sprintf("new%d\n", i), 0)
+	}
+
 	// Appends from both at once.
 	const appends = "i=0; while [ $i -lt 200 ]; do echo $1$i >> /data/log; i=$((i+1)); done"
 	var wg sync.WaitGroup
