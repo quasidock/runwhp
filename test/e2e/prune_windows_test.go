@@ -74,11 +74,14 @@ func stopVolumeServers(root string) {
 	}
 }
 
+// in is the store as subtest t uses it: what fails there fails t.
+func (s *ownStore) in(t *testing.T) *ownStore { return &ownStore{t, s.root} }
+
 // cli runs runwhp on the store with exactly args, with stdin.
 func (s *ownStore) cli(stdin string, args ...string) result {
 	s.t.Helper()
-	cmd := exec.Command(runwhp(s.t), args...)
-	cmd.Env = append(os.Environ(), "RUNWHP_ROOT="+s.root)
+	cmd := command(s.t, args...)
+	cmd.Env = append(cmd.Env, "RUNWHP_ROOT="+s.root)
 	cmd.Stdin = strings.NewReader(stdin)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -130,10 +133,32 @@ func configDigest(t *testing.T, ref string) string {
 // and over: from Docker Hub, which allows 100 anonymous pulls an hour, a
 // few runs of the suite would use them up.
 var mirror struct {
-	once   sync.Once
-	host   string
-	mu     sync.Mutex
-	pushed map[string]bool
+	once sync.Once
+	host string
+	mu   sync.Mutex
+	refs map[string]*mirrorRef
+}
+
+// mirrorRef is one image's place in the mirror. Its lock is held while
+// the image is fetched or pushed, so that a test wanting another image,
+// as tests running at once do, does not wait behind a large one.
+type mirrorRef struct {
+	sync.Mutex
+	pushed bool
+}
+
+func mirrorRefOf(ref string) *mirrorRef {
+	mirror.mu.Lock()
+	defer mirror.mu.Unlock()
+	if mirror.refs == nil {
+		mirror.refs = map[string]*mirrorRef{}
+	}
+	m := mirror.refs[ref]
+	if m == nil {
+		m = &mirrorRef{}
+		mirror.refs[ref] = m
+	}
+	return m
 }
 
 // mirrored serves ref from the mirror and returns its reference there.
@@ -142,14 +167,35 @@ func mirrored(t *testing.T, ref string) string {
 	mirror.once.Do(func() {
 		srv := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
 		mirror.host = strings.Replace(strings.TrimPrefix(srv.URL, "http://"), "127.0.0.1", "localhost", 1)
-		mirror.pushed = map[string]bool{}
 	})
-	mirror.mu.Lock()
-	defer mirror.mu.Unlock()
+	m := mirrorRefOf(ref)
+	m.Lock()
+	defer m.Unlock()
 	there := mirror.host + "/" + ref
-	if mirror.pushed[ref] {
+	if m.pushed {
 		return there
 	}
+	if err := remote.Write(parseRef(t, there), cachedImageLocked(t, ref)); err != nil {
+		t.Fatal(err)
+	}
+	m.pushed = true
+	return there
+}
+
+// cachedImage is ref's linux/amd64 image from out\e2e-images, which it is
+// first fetched into, for tests that build images on others without asking
+// Docker Hub each time.
+func cachedImage(t *testing.T, ref string) v1.Image {
+	t.Helper()
+	m := mirrorRefOf(ref)
+	m.Lock()
+	defer m.Unlock()
+	return cachedImageLocked(t, ref)
+}
+
+// cachedImageLocked is cachedImage, with ref's mirrorRef held.
+func cachedImageLocked(t *testing.T, ref string) v1.Image {
+	t.Helper()
 	dir, err := filepath.Abs(filepath.Join("..", "..", "out", "e2e-images"))
 	if err != nil {
 		t.Fatal(err)
@@ -173,11 +219,7 @@ func mirrored(t *testing.T, ref string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := remote.Write(parseRef(t, there), img); err != nil {
-		t.Fatal(err)
-	}
-	mirror.pushed[ref] = true
-	return there
+	return img
 }
 
 // parseRef parses an image reference.
@@ -195,6 +237,7 @@ func repoOf(ref string) string { return ref[:strings.LastIndex(ref, ":")] }
 
 // TestImages lists and inspects pulled images.
 func TestImages(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	alpine, busybox := mirrored(t, alpine), mirrored(t, busybox)
 	s.ok("pull", alpine)
@@ -256,6 +299,7 @@ func TestImages(t *testing.T) {
 // TestRmi removes images, an image a container was made from with -f, and
 // that container's layers once it is gone.
 func TestRmi(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	alpine, busybox := mirrored(t, alpine), mirrored(t, busybox)
 	s.ok("pull", alpine)
@@ -296,6 +340,7 @@ func TestRmi(t *testing.T) {
 // TestImagePrune removes the images no container uses, and keeps the one a
 // running container uses.
 func TestImagePrune(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	alpine, busybox := mirrored(t, alpine), mirrored(t, busybox)
 	s.ok("pull", alpine)
@@ -325,6 +370,7 @@ func TestImagePrune(t *testing.T) {
 // has stored but not yet recorded, or that a run has resolved but not yet
 // recorded its container with.
 func TestPruneRace(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	alpine, python := mirrored(t, alpine), mirrored(t, "python:3.12-slim")
 	prune := func(stop chan struct{}, args ...string) *sync.WaitGroup {
@@ -383,6 +429,7 @@ func TestPruneRace(t *testing.T) {
 // TestContainerPrune removes a stopped container and a created one, whose
 // VM is stopped, and keeps a running one.
 func TestContainerPrune(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	alpine := mirrored(t, alpine)
 	id := func(args ...string) string { return strings.TrimSpace(s.ok(args...).stdout) }
@@ -424,6 +471,7 @@ func TestContainerPrune(t *testing.T) {
 
 // TestSystemDf counts a container's writable layer and its image.
 func TestSystemDf(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	alpine := mirrored(t, alpine)
 	s.ok(keepArgs("--name", "big", alpine, "sh", "-c", "head -c 52428800 /dev/urandom > /big && sync")...)
@@ -469,6 +517,7 @@ func hasRow(out, repo, tag, last string) bool {
 // an old kernel and a volume no container uses, and keeps a running
 // container with its image and volume.
 func TestSystemPrune(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	alpine, busybox := mirrored(t, alpine), mirrored(t, busybox)
 	old := filepath.Join(s.root, "kernels", "sha256", strings.Repeat("a", 64))

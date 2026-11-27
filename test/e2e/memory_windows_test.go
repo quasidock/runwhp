@@ -17,6 +17,9 @@ import (
 	"github.com/quasidock/runwhp/internal/whp"
 )
 
+// The memory tests run in parallel: what they measure, a guest's memory and
+// what its own runwhp has committed, is the container's alone.
+
 // defaultMemory is what runwhp gives a guest without -m: half this
 // machine's memory.
 func defaultMemory() uint64 { return max(vm.MaxMemory()/2&^(2<<20-1), 512<<20) }
@@ -36,6 +39,7 @@ func memTotal(t *testing.T, out string) uint64 {
 // through it. The kernel fills its Normal zone, the RAM above 4 GiB,
 // before the RAM below, so a tmpfs file of 512 MiB lands there.
 func TestMemoryAboveHole(t *testing.T) {
+	parallel(t)
 	const size = 512 << 20
 	script := fmt.Sprintf(`
 grep MemTotal /proc/meminfo
@@ -72,6 +76,7 @@ echo after $(normal)`, size)
 // TestMemoryDefault checks that a guest gets half this machine's memory
 // unless -m says otherwise, and that a kept container records it.
 func TestMemoryDefault(t *testing.T) {
+	parallel(t)
 	want := defaultMemory()
 	r := run(t, alpine, "grep", "MemTotal", "/proc/meminfo")
 	if total := memTotal(t, r.stdout); total < want*95/100 || total > want {
@@ -88,6 +93,7 @@ func TestMemoryDefault(t *testing.T) {
 }
 
 func TestMemoryTooLarge(t *testing.T) {
+	parallel(t)
 	r := run(t, "-m", fmt.Sprintf("%dm", vm.MaxMemory()>>20+2), alpine, "true")
 	if r.code != 125 || !strings.Contains(r.stderr, "this machine's memory") {
 		t.Errorf("more memory than the machine has: %+v", r)
@@ -98,6 +104,7 @@ func TestMemoryTooLarge(t *testing.T) {
 // what it touches: its kernel's page descriptors, 1/64 of its RAM, and
 // what it uses besides.
 func TestMemoryCommittedLazily(t *testing.T) {
+	parallel(t)
 	r := run(t, "--debug", alpine, "true")
 	m := regexp.MustCompile(`memory: (\d+) MiB, committed peak (\d+) MiB`).FindStringSubmatch(r.stderr)
 	if r.code != 0 || m == nil {
@@ -145,6 +152,7 @@ func needBalloon(t *testing.T, name string) {
 // frees it, and checks that its runwhp process takes the memory from
 // Windows and gives it back.
 func TestMemoryGivenBack(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	detached(t, "--name", name, "-m", "3g", "--tmpfs", "/t:size=2g", alpine, "sleep", "300")
 	needBalloon(t, name)
@@ -174,9 +182,10 @@ func TestMemoryGivenBack(t *testing.T) {
 // TestMemoryReclaimedWhenIdle writes 1 GiB to a container's writable
 // layer, which leaves it in the guest's page cache, and checks that an
 // idle guest gives the cache back, unless RUNWHP_RECLAIM_IDLE=0 says not
-// to.
+// to. The two containers run at once.
 func TestMemoryReclaimedWhenIdle(t *testing.T) {
-	cached := func(name string) uint64 {
+	parallel(t)
+	cached := func(t *testing.T, name string) uint64 {
 		t.Helper()
 		r := execIn(t, name, "grep", "^Cached:", "/proc/meminfo")
 		var kb uint64
@@ -185,36 +194,42 @@ func TestMemoryReclaimedWhenIdle(t *testing.T) {
 		}
 		return kb << 10
 	}
-	start := func(idle string) (string, int) {
-		t.Setenv("RUNWHP_RECLAIM_IDLE", idle)
+	start := func(t *testing.T, idle string) (string, int) {
+		t.Helper()
+		setEnv(t, "RUNWHP_RECLAIM_IDLE", idle)
 		name := newName(t)
 		detached(t, "--name", name, "-m", "3g", alpine, "sleep", "300")
+		needBalloon(t, name)
 		if r := execIn(t, name, "sh", "-c", "head -c 1073741824 /dev/zero >/root/f && sync"); r.code != 0 {
 			t.Fatalf("writing 1 GiB: %+v", r)
 		}
 		return name, stateOf(t, name).Pid
 	}
 
-	name, pid := start("2")
-	needBalloon(t, name)
-	full := commitOf(t, pid)
-	deadline := time.Now().Add(60 * time.Second)
-	for c := cached(name); c > 400<<20; c = cached(name) {
-		if time.Now().After(deadline) {
-			t.Fatalf("the guest still caches %d MiB after a minute idle", c>>20)
-		}
-		time.Sleep(2 * time.Second)
-	}
-	for now := commitOf(t, pid); now > full-500<<20; now = commitOf(t, pid) {
-		if time.Now().After(deadline) {
-			t.Fatalf("commit was %d MiB with the cache full and is still %d", full>>20, now>>20)
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-
-	name, _ = start("0")
-	time.Sleep(15 * time.Second)
-	if c := cached(name); c < 900<<20 {
-		t.Errorf("with RUNWHP_RECLAIM_IDLE=0, the cache went down to %d MiB", c>>20)
-	}
+	concurrently(t,
+		subtest{"reclaimed", func(t *testing.T) {
+			name, pid := start(t, "2")
+			full := commitOf(t, pid)
+			deadline := time.Now().Add(60 * time.Second)
+			for c := cached(t, name); c > 400<<20; c = cached(t, name) {
+				if time.Now().After(deadline) {
+					t.Fatalf("the guest still caches %d MiB after a minute idle", c>>20)
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+			for now := commitOf(t, pid); now > full-500<<20; now = commitOf(t, pid) {
+				if time.Now().After(deadline) {
+					t.Fatalf("commit was %d MiB with the cache full and is still %d", full>>20, now>>20)
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+		}},
+		subtest{"off", func(t *testing.T) {
+			name, _ := start(t, "0")
+			time.Sleep(15 * time.Second)
+			if c := cached(t, name); c < 900<<20 {
+				t.Errorf("with RUNWHP_RECLAIM_IDLE=0, the cache went down to %d MiB", c>>20)
+			}
+		}},
+	)
 }

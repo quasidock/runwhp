@@ -58,100 +58,131 @@ func (s *ownStore) statusOf(name string) string {
 	return ""
 }
 
+// TestHealthcheck checks healthchecks, as Docker's daemon runs them, and
+// --stop-timeout and --stop-signal. It runs alone, as it times checks and
+// stops; its parts, on containers of their own, run at once.
 func TestHealthcheck(t *testing.T) {
-	s := newOwnStore(t)
+	store := newOwnStore(t)
 	base := mirrored(t, alpine)
-	run := func(args ...string) string {
-		t.Helper()
+	run := func(s *ownStore, args ...string) string {
+		s.t.Helper()
 		return strings.TrimSpace(s.ok(append([]string{"run", "-d"}, withFlags(args)...)...).stdout)
 	}
 
-	// Starting, healthy once the file is there, unhealthy two checks after
-	// it goes.
-	run("--name", "h1", "--health-cmd", "test -f /tmp/ok && echo probe-ok", "--health-interval", "1s", "--health-retries", "2",
-		"--health-start-period", "3s", "--health-start-interval", "200ms",
-		base, "sh", "-c", "sleep 2; touch /tmp/ok; sleep 4; rm /tmp/ok; sleep 300")
-	if h := s.healthOf("h1"); h == nil || h.Status != "starting" {
-		t.Errorf("at first: %+v", h)
-	}
-	if got := s.statusOf("h1"); !strings.HasSuffix(got, "(health: starting)") {
-		t.Errorf("STATUS while starting: %q", got)
-	}
-	h := s.waitHealth("h1", "healthy", 10*time.Second)
-	if last := h.Log[len(h.Log)-1]; last.ExitCode != 0 || last.Output != "probe-ok\n" {
-		t.Errorf("a passing check: %+v", last)
-	}
-	if got := s.statusOf("h1"); !strings.HasSuffix(got, "(healthy)") {
-		t.Errorf("STATUS when healthy: %q", got)
-	}
-	if got := s.ok("list", "-q", "-f", "health=healthy").stdout; !strings.Contains(got, s.idOf("h1")) {
-		t.Errorf("list -f health=healthy: %q", got)
-	}
-	h = s.waitHealth("h1", "unhealthy", 15*time.Second)
-	if h.FailingStreak < 2 || len(h.Log) > 5 || h.Log[len(h.Log)-1].ExitCode != 1 {
-		t.Errorf("unhealthy: %+v", h)
-	}
+	concurrently(t,
+		// Starting, healthy once the file is there, unhealthy two checks
+		// after it goes.
+		subtest{"timeline", func(t *testing.T) {
+			s := store.in(t)
+			run(s, "--name", "h1", "--health-cmd", "test -f /tmp/ok && echo probe-ok", "--health-interval", "1s", "--health-retries", "2",
+				"--health-start-period", "3s", "--health-start-interval", "200ms",
+				base, "sh", "-c", "sleep 1; touch /tmp/ok; sleep 2; rm /tmp/ok; sleep 300")
+			if h := s.healthOf("h1"); h == nil || h.Status != "starting" {
+				t.Errorf("at first: %+v", h)
+			}
+			if got := s.statusOf("h1"); !strings.HasSuffix(got, "(health: starting)") {
+				t.Errorf("STATUS while starting: %q", got)
+			}
+			h := s.waitHealth("h1", "healthy", 10*time.Second)
+			if last := h.Log[len(h.Log)-1]; last.ExitCode != 0 || last.Output != "probe-ok\n" {
+				t.Errorf("a passing check: %+v", last)
+			}
+			if got := s.statusOf("h1"); !strings.HasSuffix(got, "(healthy)") {
+				t.Errorf("STATUS when healthy: %q", got)
+			}
+			if got := s.ok("list", "-q", "-f", "health=healthy").stdout; !strings.Contains(got, s.idOf("h1")) {
+				t.Errorf("list -f health=healthy: %q", got)
+			}
+			h = s.waitHealth("h1", "unhealthy", 15*time.Second)
+			if h.FailingStreak < 2 || len(h.Log) > 5 || h.Log[len(h.Log)-1].ExitCode != 1 {
+				t.Errorf("unhealthy: %+v", h)
+			}
 
-	// Paused, it is not checked; restarted, it starts again.
-	s.ok("pause", "h1")
-	before := s.healthOf("h1").FailingStreak
-	time.Sleep(2500 * time.Millisecond)
-	if got := s.healthOf("h1").FailingStreak; got != before {
-		t.Errorf("checked while paused: streak %d, then %d", before, got)
-	}
-	if got := s.statusOf("h1"); !strings.HasSuffix(got, "(Paused)") {
-		t.Errorf("STATUS when paused: %q", got)
-	}
-	s.ok("unpause", "h1")
-	s.ok("restart", "-t", "0", "h1")
-	if h := s.healthOf("h1"); h == nil || h.Status != "starting" || h.FailingStreak != 0 || len(h.Log) == 0 {
-		t.Errorf("after a restart: %+v", h)
-	}
+			// Paused, it is not checked, for longer than an interval;
+			// restarted, it starts again.
+			s.ok("pause", "h1")
+			before := s.healthOf("h1").FailingStreak
+			time.Sleep(1500 * time.Millisecond)
+			if got := s.healthOf("h1").FailingStreak; got != before {
+				t.Errorf("checked while paused: streak %d, then %d", before, got)
+			}
+			if got := s.statusOf("h1"); !strings.HasSuffix(got, "(Paused)") {
+				t.Errorf("STATUS when paused: %q", got)
+			}
+			s.ok("unpause", "h1")
+			s.ok("restart", "-t", "0", "h1")
+			if h := s.healthOf("h1"); h == nil || h.Status != "starting" || h.FailingStreak != 0 || len(h.Log) == 0 {
+				t.Errorf("after a restart: %+v", h)
+			}
+		}},
 
-	// A check that takes too long.
-	run("--name", "h2", "--health-cmd", "echo out; sleep 5", "--health-interval", "1s", "--health-timeout", "1s", "--health-retries", "1", base, "sleep", "300")
-	h = s.waitHealth("h2", "unhealthy", 10*time.Second)
-	if last := h.Log[0]; last.ExitCode != -1 || last.Output != "Health check exceeded timeout (1s): out\n" {
-		t.Errorf("a check that timed out: %+v", last)
-	}
+		// A check that takes too long.
+		subtest{"timeout", func(t *testing.T) {
+			s := store.in(t)
+			run(s, "--name", "h2", "--health-cmd", "echo out; sleep 5", "--health-interval", "1s", "--health-timeout", "1s", "--health-retries", "1", base, "sleep", "300")
+			h := s.waitHealth("h2", "unhealthy", 10*time.Second)
+			if last := h.Log[0]; last.ExitCode != -1 || last.Output != "Health check exceeded timeout (1s): out\n" {
+				t.Errorf("a check that timed out: %+v", last)
+			}
+		}},
 
-	// The image's HEALTHCHECK, and --no-healthcheck.
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM "+base+"\nHEALTHCHECK --interval=1s --start-period=5s --start-interval=200ms CMD [\"true\"]\n"), 0o644)
-	s.ok("build", "-q", "-t", "healthy:1", dir)
-	run("--name", "h3", "healthy:1", "sleep", "300")
-	start := time.Now()
-	s.waitHealth("h3", "healthy", 10*time.Second)
-	if d := time.Since(start); d > 3*time.Second {
-		t.Errorf("the image's start interval: healthy after %v", d)
-	}
-	run("--name", "h4", "--no-healthcheck", "healthy:1", "sleep", "300")
-	time.Sleep(1500 * time.Millisecond)
-	if h := s.healthOf("h4"); h != nil {
-		t.Errorf("--no-healthcheck: %+v", h)
-	}
-	if got := s.statusOf("h4"); strings.Contains(got, "health") {
-		t.Errorf("STATUS without a check: %q", got)
-	}
+		// The image's HEALTHCHECK, and --no-healthcheck.
+		subtest{"image", func(t *testing.T) {
+			s := store.in(t)
+			dir := t.TempDir()
+			os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM "+base+"\nHEALTHCHECK --interval=1s --start-period=5s --start-interval=200ms CMD [\"true\"]\n"), 0o644)
+			s.ok("build", "-q", "-t", "healthy:1", dir)
+			run(s, "--name", "h3", "healthy:1", "sleep", "300")
+			start := time.Now()
+			s.waitHealth("h3", "healthy", 10*time.Second)
+			if d := time.Since(start); d > 3*time.Second {
+				t.Errorf("the image's start interval: healthy after %v", d)
+			}
+			run(s, "--name", "h4", "--no-healthcheck", "healthy:1", "sleep", "300")
+			time.Sleep(1500 * time.Millisecond)
+			if h := s.healthOf("h4"); h != nil {
+				t.Errorf("--no-healthcheck: %+v", h)
+			}
+			if got := s.statusOf("h4"); strings.Contains(got, "health") {
+				t.Errorf("STATUS without a check: %q", got)
+			}
+		}},
 
-	// --stop-timeout and --stop-signal.
-	run("--name", "s1", "--stop-timeout", "1", base, "sh", "-c", "trap '' TERM; sleep 300 & wait")
-	start = time.Now()
-	s.ok("stop", "s1")
-	if d := time.Since(start); d > 6*time.Second {
-		t.Errorf("stop of a container with --stop-timeout 1 took %v", d)
-	}
-	var st struct{ ExitCode int }
-	json.Unmarshal([]byte(s.ok("state", "s1").stdout), &st)
-	if st.ExitCode != 137 {
-		t.Errorf("--stop-timeout: exit %d, want 137", st.ExitCode)
-	}
-	run("--name", "s2", "--stop-signal", "SIGUSR1", base, "sh", "-c", "trap 'exit 3' USR1; sleep 300 & wait")
-	time.Sleep(500 * time.Millisecond)
-	s.ok("stop", "s2")
-	json.Unmarshal([]byte(s.ok("state", "s2").stdout), &st)
-	if st.ExitCode != 3 {
-		t.Errorf("--stop-signal SIGUSR1: exit %d, want 3", st.ExitCode)
+		// --stop-timeout and --stop-signal.
+		subtest{"stop", func(t *testing.T) {
+			s := store.in(t)
+			run(s, "--name", "s1", "--stop-timeout", "1", base, "sh", "-c", "trap '' TERM; sleep 300 & wait")
+			start := time.Now()
+			s.ok("stop", "s1")
+			if d := time.Since(start); d > 6*time.Second {
+				t.Errorf("stop of a container with --stop-timeout 1 took %v", d)
+			}
+			var st struct{ ExitCode int }
+			json.Unmarshal([]byte(s.ok("state", "s1").stdout), &st)
+			if st.ExitCode != 137 {
+				t.Errorf("--stop-timeout: exit %d, want 137", st.ExitCode)
+			}
+			run(s, "--name", "s2", "--stop-signal", "SIGUSR1", base, "sh", "-c", "trap 'exit 3' USR1; echo ready; sleep 300 & wait")
+			waitLogIn(s, "s2", "ready")
+			s.ok("stop", "s2")
+			json.Unmarshal([]byte(s.ok("state", "s2").stdout), &st)
+			if st.ExitCode != 3 {
+				t.Errorf("--stop-signal SIGUSR1: exit %d, want 3", st.ExitCode)
+			}
+		}},
+	)
+}
+
+// waitLogIn waits for a container in the store to print want.
+func waitLogIn(s *ownStore, ref, want string) {
+	s.t.Helper()
+	for deadline := time.Now().Add(15 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		if strings.Contains(s.cli("", "logs", ref).stdout, want) {
+			return
+		}
+		if time.Now().After(deadline) {
+			s.t.Fatalf("container %s never printed %q", ref, want)
+		}
 	}
 }
 

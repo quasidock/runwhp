@@ -34,6 +34,7 @@ func ownKernel(t *testing.T) {
 }
 
 func TestKernelRelease(t *testing.T) {
+	parallel(t)
 	ownKernel(t)
 	r := run(t, alpine, "uname", "-r")
 	if r.code != 0 || !strings.HasSuffix(r.stdout, "-runwhp\n") {
@@ -44,6 +45,7 @@ func TestKernelRelease(t *testing.T) {
 // TestKernelFeatures probes for what kernel/runwhp.config builds in for
 // containers and for later work.
 func TestKernelFeatures(t *testing.T) {
+	parallel(t)
 	ownKernel(t)
 	script := `
 fail() { echo "$*"; exit 1; }
@@ -102,6 +104,7 @@ func guestClock(t *testing.T, r result) time.Time {
 // the time the message bringing it takes: the kernel boots with the CMOS
 // stub's whole seconds, and the host sends init its time as it starts.
 func TestKernelClock(t *testing.T) {
+	parallel(t)
 	const slack = 50 * time.Millisecond
 	before := time.Now()
 	r := run(t, alpine, "adjtimex")
@@ -123,7 +126,7 @@ func TestClockResync(t *testing.T) {
 		after := time.Now()
 		return guestClock(t, r).Sub(before.Add(after.Sub(before) / 2))
 	}
-	t.Setenv("RUNWHP_CLOCK_SYNC", "1")
+	setEnv(t, "RUNWHP_CLOCK_SYNC", "1")
 	name := running(t)
 	if r := execIn(t, name, "date", "-s", "2020-01-01 00:00:00"); r.code != 0 {
 		t.Fatalf("date -s: %+v", r)
@@ -138,7 +141,7 @@ func TestClockResync(t *testing.T) {
 		}
 	}
 
-	t.Setenv("RUNWHP_CLOCK_SYNC", "0")
+	setEnv(t, "RUNWHP_CLOCK_SYNC", "0")
 	name = running(t)
 	execIn(t, name, "date", "-s", "2020-01-01 00:00:00")
 	time.Sleep(2 * time.Second)
@@ -151,6 +154,7 @@ func TestClockResync(t *testing.T) {
 // the sleep registers and \_S5. The container cannot power off itself, so
 // the kernel's boot message is the test.
 func TestACPIPowerOff(t *testing.T) {
+	parallel(t)
 	ownKernel(t)
 	r := run(t, "--debug", alpine, "true")
 	if r.code != 0 || !strings.Contains(r.stderr, "ACPI: PM: (supports S0 S5)") {
@@ -161,6 +165,7 @@ func TestACPIPowerOff(t *testing.T) {
 // TestKernelFetch starts from an empty store: runwhp fetches its kernel,
 // does not fetch it under --pull never, and runwhp pull brings it back.
 func TestKernelFetch(t *testing.T) {
+	parallel(t)
 	ownKernel(t)
 	if os.Getenv("RUNWHP_KERNEL") != "" {
 		t.Skip("RUNWHP_KERNEL boots a local kernel")
@@ -168,8 +173,8 @@ func TestKernelFetch(t *testing.T) {
 	root := t.TempDir()
 	in := func(args ...string) result {
 		t.Helper()
-		cmd := exec.Command(runwhp(t), args...)
-		cmd.Env = append(os.Environ(), "RUNWHP_ROOT="+root)
+		cmd := command(t, args...)
+		cmd.Env = append(cmd.Env, "RUNWHP_ROOT="+root)
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
 		err := cmd.Run()
@@ -183,7 +188,8 @@ func TestKernelFetch(t *testing.T) {
 	}
 	kernels := filepath.Join(root, "kernels")
 
-	r := in(runArgs(alpine, "echo", "hi")...)
+	img := mirrored(t, alpine)
+	r := in(runArgs(img, "echo", "hi")...)
 	expect(t, r, "hi\n", 0)
 	if !strings.Contains(r.stderr, "pulling kernel ") || !strings.HasPrefix(r.stderr, "pulling") {
 		t.Errorf("stderr: %q", r.stderr)
@@ -199,14 +205,14 @@ func TestKernelFetch(t *testing.T) {
 	if err := os.RemoveAll(kernels); err != nil {
 		t.Fatal(err)
 	}
-	r = in(runArgs("--pull", "never", alpine, "true")...)
+	r = in(runArgs("--pull", "never", img, "true")...)
 	if r.code != 125 || !strings.Contains(r.stderr, "--pull=never") || !strings.Contains(r.stderr, "runwhp pull") {
 		t.Errorf("--pull never without a kernel: exit %d, stderr %q", r.code, r.stderr)
 	}
 
-	r = in("pull", alpine)
+	r = in("pull", img)
 	if r.code != 0 || !strings.HasPrefix(r.stdout, "sha256:") || !strings.Contains(r.stderr, "pulled kernel") {
 		t.Errorf("pull: exit %d, stdout %q, stderr %q", r.code, r.stdout, r.stderr)
 	}
-	expect(t, in(runArgs("--pull", "never", alpine, "true")...), "", 0)
+	expect(t, in(runArgs("--pull", "never", img, "true")...), "", 0)
 }

@@ -40,7 +40,8 @@ func waitState(t *testing.T, ref string, d time.Duration, what string, ok func(s
 // runs three times, and stops with its exit code. One that succeeds runs
 // once.
 func TestRestartOnFailure(t *testing.T) {
-	t.Setenv("RUNWHP_RESTART_BACKOFF", "50ms")
+	parallel(t)
+	setEnv(t, "RUNWHP_RESTART_BACKOFF", "50ms")
 	name := newName(t)
 	detached(t, "--name", name, "--restart", "on-failure:2", alpine, "sh", "-c", bootCounter("exit 3"))
 	s := waitStatus(t, name, "stopped", time.Minute)
@@ -75,7 +76,8 @@ func TestRestartOnFailure(t *testing.T) {
 // TestRestartAlways restarts a container that exits 0 until it runs for
 // good, then checks that stop and kill end it for good, until start.
 func TestRestartAlways(t *testing.T) {
-	t.Setenv("RUNWHP_RESTART_BACKOFF", "50ms")
+	parallel(t)
+	setEnv(t, "RUNWHP_RESTART_BACKOFF", "50ms")
 	name := newName(t)
 	detached(t, "--name", name, "--restart", "always", alpine, "sh", "-c",
 		bootCounter(`if [ $n -ge 3 ] && [ $n != 5 ]; then exec sleep 600; fi; exit 0`))
@@ -139,7 +141,7 @@ func TestRestartAlways(t *testing.T) {
 
 // TestRestarting checks what a container waiting to start again allows.
 func TestRestarting(t *testing.T) {
-	t.Setenv("RUNWHP_RESTART_BACKOFF", "3s")
+	setEnv(t, "RUNWHP_RESTART_BACKOFF", "3s")
 	name := newName(t)
 	detached(t, "--name", name, "--restart", "always", alpine, "sh", "-c", bootCounter("exit 1"))
 	s := waitState(t, name, 30*time.Second, "restarting", func(s stateJSON) bool { return s.Status == "restarting" })
@@ -197,7 +199,8 @@ func TestRestarting(t *testing.T) {
 // TestRestartPortTaken restarts a container whose published port someone
 // else has taken: each boot fails, and is tried again until it is free.
 func TestRestartPortTaken(t *testing.T) {
-	t.Setenv("RUNWHP_RESTART_BACKOFF", "200ms,400ms")
+	parallel(t)
+	setEnv(t, "RUNWHP_RESTART_BACKOFF", "200ms,400ms")
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -233,7 +236,8 @@ func TestRestartPortTaken(t *testing.T) {
 // TestRestartSupervisorKilled kills the runwhp of a container waiting to
 // start again: the container is stopped, with how it last ended.
 func TestRestartSupervisorKilled(t *testing.T) {
-	t.Setenv("RUNWHP_RESTART_BACKOFF", "1h")
+	parallel(t)
+	setEnv(t, "RUNWHP_RESTART_BACKOFF", "1h")
 	name := newName(t)
 	detached(t, "--name", name, "--restart", "always", alpine, "sh", "-c", "exit 7")
 	s := waitState(t, name, 30*time.Second, "restarting", func(s stateJSON) bool { return s.Status == "restarting" })
@@ -268,10 +272,11 @@ func handleCount(t *testing.T, pid int) uint32 {
 // TestRestartLeak boots a container 50 times in one runwhp, and checks
 // that what the runwhp holds does not grow with them.
 func TestRestartLeak(t *testing.T) {
+	parallel(t)
 	if testing.Short() {
 		t.Skip("50 boots")
 	}
-	t.Setenv("RUNWHP_RESTART_BACKOFF", "10ms,10ms")
+	setEnv(t, "RUNWHP_RESTART_BACKOFF", "10ms,10ms")
 	name := newName(t)
 	detached(t, "--name", name, "--restart", "always", "-m", "512m", alpine, "true")
 	at := func(n int) (stateJSON, uint32, uint64) {
@@ -300,7 +305,8 @@ func TestRestartLeak(t *testing.T) {
 // background runs it again, its output going to the log after the first
 // run's.
 func TestRestartForeground(t *testing.T) {
-	t.Setenv("RUNWHP_RESTART_BACKOFF", "50ms")
+	parallel(t)
+	setEnv(t, "RUNWHP_RESTART_BACKOFF", "50ms")
 	name := newName(t)
 	start := time.Now()
 	r := keep(t, "--name", name, "--restart", "always", alpine, "sh", "-c",

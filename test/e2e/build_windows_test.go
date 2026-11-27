@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -51,6 +50,7 @@ func (s *ownStore) imageID(ref string) string {
 // TestBuild builds an image as docker build does, again from the cache,
 // and again with a file changed.
 func TestBuild(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	base := mirrored(t, alpine)
 	dir := buildDir(t, map[string]string{
@@ -122,6 +122,7 @@ CMD ["cat", "/greeting"]
 // mcr.microsoft.com/devcontainers/base has: the layer is no file in the
 // store, and a step's guest boots without it.
 func TestBuildOnEmptyLayer(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	base := pushImage(t, "e2e/empty-layer:1", tarLayer(t, nil), tarLayer(t, map[string]string{"etc/marker": "base\n"}))
 	dir := buildDir(t, map[string]string{
@@ -135,6 +136,7 @@ func TestBuildOnEmptyLayer(t *testing.T) {
 }
 
 func TestBuildMultiStage(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	base, bb := mirrored(t, alpine), mirrored(t, busybox)
 	dir := buildDir(t, map[string]string{"Dockerfile": fmt.Sprintf(`FROM %[1]s AS never
@@ -161,6 +163,7 @@ COPY --from=%[2]s /bin/busybox /bb
 // TestBuildCopy copies files with BuildKit's rules: owners, modes,
 // destinations, archives and URLs.
 func TestBuildCopy(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	base := mirrored(t, alpine)
 
@@ -243,6 +246,7 @@ urlhello
 
 // TestBuildRun runs heredocs, mounts and failing commands.
 func TestBuildRun(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	base := mirrored(t, alpine)
 	secret := filepath.Join(t.TempDir(), "secret")
@@ -287,6 +291,7 @@ RUN --mount=type=bind,source=ctx.txt,target=/ctx.txt cp /ctx.txt /ctx.copy
 // TestBuildNetwork reaches the host from RUN, or nothing without a
 // network.
 func TestBuildNetwork(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	base := mirrored(t, alpine)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("host")) }))
@@ -305,6 +310,7 @@ func TestBuildNetwork(t *testing.T) {
 // TestBuildStdin reads the Dockerfile from stdin, with and without a
 // context.
 func TestBuildStdin(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	base := mirrored(t, alpine)
 	if r := s.cli("FROM "+base+"\nRUN echo stdin > /f\n", "build", "-t", "stdin:1", "-"); r.code != 0 {
@@ -328,6 +334,7 @@ func TestBuildStdin(t *testing.T) {
 // TestBuilderPrune counts the build cache in system df, and removes it:
 // what no image uses, then all of it, leaving the images' layers.
 func TestBuilderPrune(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	base := mirrored(t, alpine)
 	dir := buildDir(t, map[string]string{"Dockerfile": "FROM " + base + "\nRUN echo a > /a\nRUN --mount=type=cache,target=/c echo b > /b\n"})
@@ -379,11 +386,12 @@ func TestBuilderPrune(t *testing.T) {
 // TestBuildInterrupt stops a build with Ctrl+C during a RUN: it exits 130,
 // leaves no step's disk behind, and the steps done stay in the cache.
 func TestBuildInterrupt(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	base := mirrored(t, alpine)
 	dir := buildDir(t, map[string]string{"Dockerfile": "FROM " + base + "\nRUN echo first > /f\nRUN echo ready; sleep 300\n"})
-	cmd := exec.Command(runwhp(t), "build", dir)
-	cmd.Env = append(os.Environ(), "RUNWHP_ROOT="+s.root)
+	cmd := command(t, "build", dir)
+	cmd.Env = append(cmd.Env, "RUNWHP_ROOT="+s.root)
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP}
 	var stderr syncBuffer
 	cmd.Stderr = &stderr

@@ -14,7 +14,6 @@ import (
 	"log"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -31,6 +30,7 @@ import (
 // TestTag names an image anew, runs it by that name and by its ID, and
 // removes one name of two.
 func TestTag(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	alpine := mirrored(t, alpine)
 	s.ok("pull", alpine)
@@ -72,6 +72,7 @@ func TestTag(t *testing.T) {
 // TestHistory shows how alpine was built, with its layer's size as Docker
 // gives it: the size of its files.
 func TestHistory(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	alpine := mirrored(t, alpine)
 	s.ok("pull", alpine)
@@ -130,6 +131,7 @@ func mirrorArchive(t *testing.T, ref string) (path, id string) {
 // TestLoadArchives loads the mirror's archives, from a file and from
 // stdin, and runs what they hold.
 func TestLoadArchives(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	for _, ref := range []string{alpine, busybox} {
 		path, id := mirrorArchive(t, ref)
@@ -163,6 +165,7 @@ func TestLoadArchives(t *testing.T) {
 // TestImport makes images of alpine's root file system, plain and
 // compressed, from a file and from stdin, and runs them.
 func TestImport(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	path, _ := mirrorArchive(t, alpine)
 	img, err := tarball.ImageFromPath(path, nil)
@@ -289,6 +292,7 @@ func manifestOf(t *testing.T, path string) []map[string]any {
 // TestSaveLoad saves two images, checks the archive as another tool reads
 // it, loads it back with the same IDs, and saves by ID and by repository.
 func TestSaveLoad(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	alpine, python := mirrored(t, alpine), mirrored(t, "python:3.12-slim")
 	s.ok("pull", alpine)
@@ -350,6 +354,7 @@ func TestSaveLoad(t *testing.T) {
 // kept their tars' metadata: save fetches it from the registry, and fails
 // when the registry is gone.
 func TestSaveBackfill(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	path, _ := mirrorArchive(t, alpine)
 	img, err := tarball.ImageFromPath(path, nil)
@@ -391,6 +396,7 @@ func TestSaveBackfill(t *testing.T) {
 // TestSaveManyLayers saves an image of more layers than one guest can
 // serve.
 func TestSaveManyLayers(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	path, _ := mirrorArchive(t, busybox)
 	img, err := tarball.ImageFromPath(path, nil)
@@ -431,12 +437,13 @@ func e2eLayer(t *testing.T, name, body string) v1.Layer {
 // TestSavePrune prunes everything, over and over, while an image is
 // saved: the prunes wait for the save, which keeps the image's layers.
 func TestSavePrune(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	python := mirrored(t, "python:3.12-slim")
 	s.ok("pull", python)
 	out := filepath.Join(t.TempDir(), "saved.tar")
-	cmd := exec.Command(runwhp(t), "save", "-o", out, python)
-	cmd.Env = append(os.Environ(), "RUNWHP_ROOT="+s.root)
+	cmd := command(t, "save", "-o", out, python)
+	cmd.Env = append(cmd.Env, "RUNWHP_ROOT="+s.root)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {

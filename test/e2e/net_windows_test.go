@@ -32,6 +32,7 @@ func hostServer(t *testing.T, body []byte) (port string) {
 }
 
 func TestNetworkHostGateway(t *testing.T) {
+	parallel(t)
 	runwhp(t)
 	port := hostServer(t, []byte("hello from the host\n"))
 	r := run(t, "--add-host", hostGateway, alpine, "wget", "-q", "-O-", "http://host.docker.internal:"+port+"/")
@@ -41,6 +42,7 @@ func TestNetworkHostGateway(t *testing.T) {
 // TestNetworkGatewayOptIn checks that the host's loopback stays closed to a
 // container that did not ask for host-gateway.
 func TestNetworkGatewayOptIn(t *testing.T) {
+	parallel(t)
 	runwhp(t)
 	port := hostServer(t, []byte("secret\n"))
 	r := run(t, alpine, "wget", "-q", "-T", "5", "-O-", "http://10.0.2.2:"+port+"/")
@@ -50,6 +52,7 @@ func TestNetworkGatewayOptIn(t *testing.T) {
 }
 
 func TestNetworkDownload(t *testing.T) {
+	parallel(t)
 	runwhp(t)
 	data := make([]byte, 20<<20)
 	rand.Read(data)
@@ -62,11 +65,13 @@ func TestNetworkDownload(t *testing.T) {
 // TestNetworkInternet resolves a name through the host's resolver and
 // fetches over TLS, as package managers do.
 func TestNetworkInternet(t *testing.T) {
+	parallel(t)
 	r := run(t, alpine, "sh", "-c", "cat /etc/resolv.conf; wget -q -O /dev/null https://dl-cdn.alpinelinux.org/alpine/ && echo fetched")
 	expect(t, r, "nameserver 10.0.2.3\nfetched\n", 0)
 }
 
 func TestNetworkNone(t *testing.T) {
+	parallel(t)
 	expect(t, run(t, "--network", "none", alpine, "ls", "/sys/class/net"), "lo\n", 0)
 	r := run(t, "--network", "none", "-p", "8080:80", alpine, "true")
 	if r.code != 125 || !strings.Contains(r.stderr, "--network none") {
@@ -103,6 +108,7 @@ func background(t *testing.T, stdout, stderr io.Writer, args ...string) *exec.Cm
 // after it starts; connections before that are closed, and the test tries
 // again, as a client of a starting server would.
 func TestPublish(t *testing.T) {
+	parallel(t)
 	port := freePort(t)
 	var stderr bytes.Buffer
 	cmd := background(t, io.Discard, &stderr, "-p", "127.0.0.1:"+port+":8080", alpine, "sh", "-c",
@@ -126,6 +132,7 @@ func TestPublish(t *testing.T) {
 }
 
 func TestPublishUpload(t *testing.T) {
+	parallel(t)
 	port := freePort(t)
 	data := make([]byte, 20<<20)
 	rand.Read(data)
@@ -163,6 +170,7 @@ func TestPublishUpload(t *testing.T) {
 }
 
 func TestPublishBusyPort(t *testing.T) {
+	parallel(t)
 	runwhp(t)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

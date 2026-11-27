@@ -180,6 +180,7 @@ func TestTTYInterrupt(t *testing.T) {
 
 // TestTTYNeedsConsole checks the error for -it without a console.
 func TestTTYNeedsConsole(t *testing.T) {
+	parallel(t)
 	r := runWithInput(t, strings.NewReader(""), "-it", alpine, "true")
 	if r.code != 125 || !strings.Contains(r.stderr, "not a TTY") {
 		t.Errorf("exit %d, stderr %q", r.code, r.stderr)

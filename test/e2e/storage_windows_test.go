@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -72,6 +71,7 @@ func waitGone(t *testing.T, rel string) {
 // TestWritableLayerBeyondMemory writes 1 GiB into the container's root with
 // 256 MiB of guest memory and reads it back.
 func TestWritableLayerBeyondMemory(t *testing.T) {
+	parallel(t)
 	h := sha256.New()
 	zeros := make([]byte, 1<<20)
 	for range 1024 {
@@ -97,6 +97,7 @@ func dfKiB(t *testing.T, args ...string) (size, avail int64) {
 }
 
 func TestWritableLayerSize(t *testing.T) {
+	parallel(t)
 	if size, _ := dfKiB(t); size < 60<<20 || size > 64<<20 {
 		t.Errorf("root is %d KiB by default, want about 64 GiB", size)
 	}
@@ -123,6 +124,7 @@ func TestWritableLayerSize(t *testing.T) {
 // for the host's disk: the scratch disk offers no cache flush, and the
 // overlay is volatile.
 func TestFsyncCheap(t *testing.T) {
+	parallel(t)
 	r := run(t, "--debug", alpine, "sh", "-c", "for i in $(seq 200); do echo $i > /f$i; sync /f$i; done; echo done")
 	if r.code != 0 || !strings.Contains(r.stdout, "done") {
 		t.Fatalf("exit %d, stdout %q", r.code, r.stdout)
@@ -167,7 +169,7 @@ func TestRemovedAfterHardStop(t *testing.T) {
 func TestRemovedWhenKilled(t *testing.T) {
 	before := containerDirs(t)
 	var stdout syncBuffer
-	cmd := exec.Command(runwhp(t), runArgs(alpine, "sh", "-c", "echo ready; sleep 30")...)
+	cmd := command(t, runArgs(alpine, "sh", "-c", "echo ready; sleep 30")...)
 	cmd.Stdout = &stdout
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)

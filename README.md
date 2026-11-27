@@ -1755,7 +1755,7 @@ bzImage.
 | [`internal/passwd`](internal/passwd) | User and group resolution |
 | [`guest/buildkitd`](guest/buildkitd) | `runwhp-buildkitd`, BuildKit's daemon as the Engine API's builder runs it, a module of its own: the OCI worker, its gRPC and sessions over vsock, the moby exporter that loads images into runwhp's store, and runwhp's store as BuildKit's image store, through the API |
 | [`guest/init`](guest/init) | `runwhp-init`, PID 1 in the guest: the container's root, its init layer, mounts and cgroup, its process and exec's, the sockets that reach the host's pipes, and the server of its files, written and read as go-archive does, and of image layers' files a guest booted for save runs |
-| [`test/e2e`](test/e2e) | End-to-end tests against WHP, and sockcat, a Unix socket client they build for the guest |
+| [`test/e2e`](test/e2e) | End-to-end tests against WHP, sockcat and locker, a Unix socket client and a lock tool they build for the guest, `matrix.sh`, which runs them in each configuration, and `internal/e2etime`, which summarises their times |
 
 `go test ./...` runs the unit tests anywhere. The end-to-end tests need a
 build, WHP and network access, and run with `RUNWHP_E2E=1`:
@@ -1768,6 +1768,25 @@ They boot whatever runwhp would: the pinned kernel, or the one
 `RUNWHP_KERNEL` names. `RUNWHP_E2E_RUN_FLAGS` adds flags, separated by
 semicolons, to every `runwhp run`, such as `--kernel` and `--module` for the
 WSL kernel; tests of runwhp's own kernel are then skipped.
+
+Most tests run in parallel, `-parallel` at a time, 8 on the test machine.
+Those that time what they test, measure the machine's CPU or bandwidth, or
+look at what is global to the user's store or the machine, run first, one
+at a time. `RUNWHP_E2E_SERIAL=1` runs every test alone.
+
+`test/e2e/matrix.sh`, from Git Bash, builds the tests once and runs them
+in each configuration, the default, `--cpus=1`, `--cpus=16` and WSL's
+kernel, keeping go test's JSON for each in `out\e2e`, and prints each
+run's time, its serial and parallel phases and its slowest tests:
+
+```sh
+RUNWHP_E2E_PARALLEL=8 RUNWHP_E2E_WSL_FLAGS='--kernel=...;--module=...' test/e2e/matrix.sh
+```
+
+`RUNWHP_E2E_CONFIGS` picks configurations, `RUNWHP_E2E_TMP` puts the
+tests' stores elsewhere, nerdctl's tests then running apart with the TMP
+the script was given, and `RUNWHP_E2E_BASE` compares each run with an
+earlier one's JSON. Arguments go to the test binary, as `-test.run=Volume`.
 
 ## Open questions
 

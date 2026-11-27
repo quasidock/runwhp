@@ -6,10 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -20,18 +18,7 @@ import (
 
 // lockerDir builds locker, the tests' POSIX lock and extended attribute
 // tool, for Linux, once, and gives the directory it is in.
-var lockerDir = sync.OnceValues(func() (string, error) {
-	dir, err := os.MkdirTemp("", "runwhp-locker-")
-	if err != nil {
-		return "", err
-	}
-	cmd := exec.Command(filepath.Join(runtime.GOROOT(), "bin", "go.exe"), "build", "-o", filepath.Join(dir, "locker"), "./locker")
-	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("building locker: %v\n%s", err, out)
-	}
-	return dir, nil
-})
+var lockerDir = sync.OnceValues(func() (string, error) { return buildLinux("locker") })
 
 // locker is a bind mount of locker's directory at /t.
 func locker(t *testing.T) string {
@@ -75,6 +62,7 @@ func inspectVolume(t *testing.T, v string) volumeInfo {
 // POSIX locks, extended attributes, names that differ in case alone and
 // owners are the volume's, the same for both.
 func TestSharedVolume(t *testing.T) {
+	parallel(t)
 	v := sharedVolume(t)
 	a := newName(t)
 	detached(t, "--name", a, "-v", v+":/data", "-v", locker(t), alpine, "sh", "-c", "echo from-a > /data/a; sleep 300")
@@ -153,6 +141,7 @@ func TestSharedVolume(t *testing.T) {
 // has is refused, and the volume becomes shared, so that once the holder
 // starts again, both use it at once.
 func TestSharedVolumeAutomatic(t *testing.T) {
+	parallel(t)
 	v := newVolume(t)
 	a := newName(t)
 	detached(t, "--name", a, "-v", v+":/data", alpine, "sh", "-c", "echo from-a > /data/a; sleep 300")
@@ -172,6 +161,7 @@ func TestSharedVolumeAutomatic(t *testing.T) {
 // as Docker Compose makes a project's, then started, share it: making the
 // second boots the first again, onto the volume's server.
 func TestSharedVolumeCreated(t *testing.T) {
+	parallel(t)
 	v := newVolume(t)
 	a, b := newName(t), newName(t)
 	created(t, "--name", a, "-v", v+":/data", alpine, "sh", "-c", "echo from-a > /data/a; sleep 300")
@@ -189,13 +179,14 @@ func TestSharedVolumeCreated(t *testing.T) {
 // has used it for its grace; volume rm stops an idle one at once; and a
 // container stopped with its files reached by cp is a client too.
 func TestSharedVolumeServer(t *testing.T) {
+	parallel(t)
 	v := sharedVolume(t)
 	vol, err := volume.Open(storeDir(t)).Get(v)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(runwhp(t), runArgs("-v", v+":/data", alpine, "sh", "-c", "echo x > /data/f")...)
-	cmd.Env = append(os.Environ(), "RUNWHP_VOLUME_GRACE=1")
+	cmd := command(t, runArgs("-v", v+":/data", alpine, "sh", "-c", "echo x > /data/f")...)
+	cmd.Env = append(cmd.Env, "RUNWHP_VOLUME_GRACE=1")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("run: %v\n%s", err, out)
 	}
@@ -228,6 +219,7 @@ func TestSharedVolumeServer(t *testing.T) {
 // volume with it, which they get I/O errors from; a container started
 // again starts a new server, and what was synced is there.
 func TestSharedVolumeServerKilled(t *testing.T) {
+	parallel(t)
 	v := sharedVolume(t)
 	a := newName(t)
 	detached(t, "--name", a, "-v", v+":/data", alpine, "sh", "-c", "echo kept > /data/kept; sync; sleep 300")
@@ -258,6 +250,7 @@ func TestSharedVolumeServerKilled(t *testing.T) {
 // volume, one of them with replicas, all at once, and scales up a service
 // alone on its volume, starting its container again to share it.
 func TestComposeSharedVolumes(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	p := newComposeProject(t, s, map[string]string{
 		"compose.yaml": composeFile(t, `name: e2eshare

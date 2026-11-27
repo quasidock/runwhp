@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -142,6 +143,7 @@ func lines(s string) []string { return strings.Split(strings.TrimRight(s, "\n"),
 
 // TestDockerRun runs containers with the docker CLI as runwhp's run would.
 func TestDockerRun(t *testing.T) {
+	parallel(t)
 	d := newDockerAPI(t)
 	img := d.image(alpine)
 	if v := d.dok("version", "--format", "{{.Server.APIVersion}} {{.Server.Os}}"); v != "1.56 linux\n" {
@@ -200,6 +202,7 @@ func TestDockerRun(t *testing.T) {
 // TestDockerLifecycle stops, starts, pauses, renames, waits for and
 // removes containers, and follows them in ps, logs, inspect and events.
 func TestDockerLifecycle(t *testing.T) {
+	parallel(t)
 	d := newDockerAPI(t)
 	img := d.image(alpine)
 	since := time.Now().Add(-time.Second).Unix()
@@ -289,6 +292,7 @@ func TestDockerLifecycle(t *testing.T) {
 
 // TestDockerExec runs commands in a running container.
 func TestDockerExec(t *testing.T) {
+	parallel(t)
 	d := newDockerAPI(t)
 	img := d.image(alpine)
 	d.dok("run", "-d", "--name", "ex", img, "sleep", "600")
@@ -351,6 +355,7 @@ func TestDockerExec(t *testing.T) {
 // TestDockerFiles copies files in and out of running and stopped
 // containers, and diffs, exports and commits them.
 func TestDockerFiles(t *testing.T) {
+	parallel(t)
 	d := newDockerAPI(t)
 	img := d.image(alpine)
 	dir := t.TempDir()
@@ -392,7 +397,7 @@ func TestDockerFiles(t *testing.T) {
 // basicAuthRegistry is a registry that wants user and password.
 func basicAuthRegistry(t *testing.T, user, password string) string {
 	t.Helper()
-	reg := registry.New()
+	reg := registry.New(registry.Logger(log.New(io.Discard, "", 0)))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		u, p, ok := r.BasicAuth()
 		if !ok || u != user || p != password {
@@ -409,6 +414,7 @@ func basicAuthRegistry(t *testing.T, user, password string) string {
 // TestDockerImages pulls, lists, tags, removes, saves, loads, imports,
 // builds and pushes images, and logs in to a registry.
 func TestDockerImages(t *testing.T) {
+	parallel(t)
 	d := newDockerAPI(t)
 	there := mirrored(t, alpine)
 	if out := d.dok("pull", there); !strings.Contains(out, "Pull complete") || !strings.Contains(out, "Status: Downloaded newer image") {
@@ -501,8 +507,8 @@ func TestDockerImages(t *testing.T) {
 	d.dok("tag", "built:1", auth+"/b/img:1")
 	d.dok("push", auth+"/b/img:1")
 	// runwhp's own pull finds the credentials docker login stored.
-	cmd := exec.Command(runwhp(t), "pull", auth+"/b/img:1")
-	cmd.Env = append(os.Environ(), "RUNWHP_ROOT="+t.TempDir(), "DOCKER_CONFIG="+d.config)
+	cmd := command(t, "pull", auth+"/b/img:1")
+	cmd.Env = append(cmd.Env, "RUNWHP_ROOT="+t.TempDir(), "DOCKER_CONFIG="+d.config)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Errorf("runwhp pull with docker login's credentials: %v\n%s", err, out)
 	}
@@ -527,6 +533,7 @@ func tarOfFirstLayer(t *testing.T, archive string) io.Reader {
 // TestDockerNetworksVolumes makes networks and volumes, runs containers on
 // them, and publishes a port.
 func TestDockerNetworksVolumes(t *testing.T) {
+	parallel(t)
 	d := newDockerAPI(t)
 	img := d.image(alpine)
 	d.dok("network", "create", "--label", "k=v", "appnet")
@@ -640,6 +647,7 @@ func TestDockerNetworksVolumes(t *testing.T) {
 // API and runwhp's own commands see the same containers, through a
 // restart of the server.
 func TestDockerSystem(t *testing.T) {
+	parallel(t)
 	d := newDockerAPI(t)
 	img := d.image(alpine)
 	d.dok("run", "-d", "--name", "busy", img, "sh", "-c", "while true; do :; done")
@@ -677,11 +685,12 @@ func TestDockerSystem(t *testing.T) {
 // 29.10's, as captured in cmd\runwhp\testdata\dockerapi\docker29: a key
 // Docker gives that runwhp does not is a client's field gone missing.
 func TestDockerAPIShapes(t *testing.T) {
+	parallel(t)
 	d := newDockerAPI(t)
 	img := d.image(alpine)
 	d.dok("network", "create", "--label", "k=v", "shape-net")
 	d.dok("volume", "create", "--label", "k=v", "shape-vol")
-	d.dok("run", "-d", "--name", "shape-run", "--label", "k=v", "--network", "shape-net", "-p", "127.0.0.1:18081:80",
+	d.dok("run", "-d", "--name", "shape-run", "--label", "k=v", "--network", "shape-net", "-p", "127.0.0.1:"+freePort(t)+":80",
 		"-v", "shape-vol:/data", "--health-cmd", "true", "--health-interval", "1s", img, "sleep", "600")
 	d.docker1("run", "--name", "shape-exit", img, "sh", "-c", "exit 3")
 	d.dok("run", "-d", "--name", "shape-ports", "-p", "80", "--expose", "9000", "-P", img, "sh", "-c", "sleep 1000 & exec sleep 999")

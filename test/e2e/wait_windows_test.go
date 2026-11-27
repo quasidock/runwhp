@@ -4,7 +4,6 @@ package e2e
 
 import (
 	"bytes"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +14,7 @@ import (
 // TestWait checks runwhp wait: it prints the exit code of a container once
 // it stops, at once for one that has stopped, one line per container.
 func TestWait(t *testing.T) {
+	parallel(t)
 	a, b := newName(t), newName(t)
 	detached(t, "--name", a, alpine, "sh", "-c", "sleep 3; exit 7")
 	detached(t, "--name", b, alpine, "sh", "-c", "exit 3")
@@ -32,6 +32,7 @@ func TestWait(t *testing.T) {
 // TestWaitRemoved checks that a container run with --rm answers wait before
 // it is removed.
 func TestWaitRemoved(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	detached(t, "--rm", "--name", name, alpine, "sh", "-c", "sleep 1; exit 4")
 	expect(t, cli(t, "wait", name), "4\n", 0)
@@ -40,10 +41,11 @@ func TestWaitRemoved(t *testing.T) {
 // TestWaitSupervisorKilled checks that wait answers with what the store
 // records when the runwhp running the container is killed meanwhile.
 func TestWaitSupervisorKilled(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	detached(t, "--name", name, alpine, "sh", "-c", "echo ready; sleep 300")
 	waitLog(t, name, "ready")
-	cmd := exec.Command(runwhp(t), "wait", name)
+	cmd := command(t, "wait", name)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Start(); err != nil {

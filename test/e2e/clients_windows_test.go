@@ -51,6 +51,7 @@ func (d *dockerAPI) run(dir string, extraEnv []string, name string, args ...stri
 // it reaches the API through Docker's socket in its container, bound to
 // the API's pipe, as testcontainers-go binds the pipe DOCKER_HOST names.
 func TestGoClients(t *testing.T) {
+	parallel(t)
 	if os.Getenv("RUNWHP_E2E_CLIENTS") != "1" {
 		runwhp(t)
 		t.Skip("set RUNWHP_E2E_CLIENTS=1 to run Docker's Go clients")
@@ -70,6 +71,7 @@ func TestGoClients(t *testing.T) {
 // TestDockerPy runs docker-py, found through DOCKER_HOST, then through
 // the docker CLI's current context alone.
 func TestDockerPy(t *testing.T) {
+	parallel(t)
 	python := os.Getenv("RUNWHP_E2E_PYTHON")
 	if python == "" {
 		runwhp(t)
@@ -109,6 +111,7 @@ func TestDockerPy(t *testing.T) {
 // ports, a named volume and two networks; then exec, top, logs, stop and
 // start, run, and down with its volumes and images; and an attached up.
 func TestDockerCompose(t *testing.T) {
+	parallel(t)
 	plugin := os.Getenv("RUNWHP_E2E_COMPOSE_PLUGIN")
 	if plugin == "" {
 		runwhp(t)
@@ -259,6 +262,7 @@ func installComposePlugin(t *testing.T, d *dockerAPI, plugin string) {
 // Docker Compose there, from a compose file; each takes a command, and
 // writes into the workspace the host sees.
 func TestDevcontainerCLI(t *testing.T) {
+	parallel(t)
 	js := os.Getenv("RUNWHP_E2E_DEVCONTAINER")
 	if js == "" {
 		runwhp(t)
@@ -287,14 +291,28 @@ func TestDevcontainerCLI(t *testing.T) {
 	}
 	// docker-outside-of-docker binds Docker's socket into the container,
 	// which reaches the API: the dev container's docker, as its own user
-	// through the feature's proxy, lists it and runs another.
+	// through the feature's proxy, lists it and runs another. Its image
+	// comes from the e2e mirror, rather than from MCR into each store.
 	cases["docker-outside-of-docker"] = map[string]string{
-		".devcontainer/devcontainer.json": `{"image": "mcr.microsoft.com/devcontainers/base:bookworm",
+		".devcontainer/devcontainer.json": `{"image": "` + mirrored(t, "mcr.microsoft.com/devcontainers/base:bookworm") + `",
   "features": {"ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}}}`,
 	}
+	// The cases share the API, each with a workspace of its own, as dev
+	// containers of several folders do, but for docker-outside-of-docker:
+	// the CLI builds every container's features into one fixed tag,
+	// dev_container_feature_content_temp, which two cases with features
+	// building at once on one daemon take from each other.
+	var subtests []subtest
 	for name, files := range cases {
-		t.Run(name, func(t *testing.T) { devcontainerCase(t, d, node, js, name, files) })
+		subtests = append(subtests, subtest{name, func(t *testing.T) {
+			api := d
+			if name == "docker-outside-of-docker" {
+				api = clientsAPI(t)
+			}
+			devcontainerCase(t, api, node, js, name, files)
+		}})
 	}
+	concurrently(t, subtests...)
 }
 
 // devcontainerFeature is a dev container from a Dockerfile with a feature,
@@ -310,6 +328,7 @@ var devcontainerFeature = map[string]string{
 // Containers CLI then builds through BuildKit, the feature's stage FROM
 // the image it built first, which only runwhp's store has.
 func TestDevcontainerBuildx(t *testing.T) {
+	parallel(t)
 	js := os.Getenv("RUNWHP_E2E_DEVCONTAINER")
 	if js == "" {
 		runwhp(t)
@@ -332,7 +351,12 @@ func devcontainerCase(t *testing.T, d *dockerAPI, node, js, name string, files m
 		for _, id := range strings.Fields(d.docker1("ps", "-aq", "--filter", "label=devcontainer.local_folder="+ws).stdout) {
 			d.docker1("rm", "-f", id)
 		}
-		d.run(ws, nil, d.docker, "compose", "-p", strings.ToLower(filepath.Base(ws))+"_devcontainer", "down", "-t", "0")
+		// The project is named for the workspace's folder, 001 as every
+		// case's is, so only the compose case brings it down, while the
+		// others may still run.
+		if name == "compose" {
+			d.run(ws, nil, d.docker, "compose", "-p", strings.ToLower(filepath.Base(ws))+"_devcontainer", "down", "-t", "0")
+		}
 	})
 	up := d.run(ws, nil, node, js, "up", "--workspace-folder", ws, "--docker-path", d.docker, "--log-format", "json")
 	outcome := lastJSONLine(up.stdout)

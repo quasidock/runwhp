@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -34,6 +33,7 @@ func cpus(t *testing.T, n int) string {
 // TestCPUCount checks how many processors the guest sees, and that it sees
 // them as cores of one package sharing a cache, as runwhp describes them.
 func TestCPUCount(t *testing.T) {
+	parallel(t)
 	const script = `nproc; grep -c ^processor /proc/cpuinfo
 cat /sys/devices/system/cpu/cpu0/topology/package_cpus_list /sys/devices/system/cpu/cpu0/topology/core_cpus_list`
 	check := func(r result, n int) {
@@ -56,6 +56,7 @@ cat /sys/devices/system/cpu/cpu0/topology/package_cpus_list /sys/devices/system/
 }
 
 func TestCPUFlag(t *testing.T) {
+	parallel(t)
 	for in, msg := range map[string]string{
 		"0":   "between 1 and",
 		"1.5": "whole number",
@@ -70,6 +71,7 @@ func TestCPUFlag(t *testing.T) {
 
 // TestCPUPinned runs a process on each CPU in turn.
 func TestCPUPinned(t *testing.T) {
+	parallel(t)
 	r := run(t, "--cpus", cpus(t, 4), debian, "sh", "-c",
 		`for c in 0 1 2 3; do taskset -c $c cut -d' ' -f39 /proc/self/stat; done`)
 	expect(t, r, "0\n1\n2\n3\n", 0)
@@ -104,6 +106,7 @@ echo $before $after`
 // container has moved every thread of init there. The container cannot
 // reset the machine itself (TestNoReboot).
 func TestCPUExit(t *testing.T) {
+	parallel(t)
 	expect(t, run(t, "--cpus", cpus(t, 4), debian, "taskset", "-c", "3", "sh", "-c", "echo out; exit 3"), "out\n", 3)
 
 	start := time.Now()
@@ -118,7 +121,7 @@ func TestCPUExit(t *testing.T) {
 // while the secondary CPUs still wait to be started, and checks runwhp stops.
 func TestCPUInterruptDuringBoot(t *testing.T) {
 	n := cpus(t, min(runtime.NumCPU(), 16))
-	cmd := exec.Command(runwhp(t), runArgs("--debug", "--cpus", n, alpine, "sleep", "30")...)
+	cmd := command(t, runArgs("--debug", "--cpus", n, alpine, "sleep", "30")...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP}
 	var stdout, stderr syncBuffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -163,6 +166,7 @@ func tail(s string, n int) string {
 // TestCPUHotplug takes a CPU offline and brings it back, which goes through
 // INIT and SIPI again.
 func TestCPUHotplug(t *testing.T) {
+	parallel(t)
 	r := run(t, "--cpus", cpus(t, 4), alpine, "sh", "-c", `mount -o remount,rw /sys
 echo 0 > /sys/devices/system/cpu/cpu2/online; cat /sys/devices/system/cpu/online
 echo 1 > /sys/devices/system/cpu/cpu2/online; cat /sys/devices/system/cpu/online`)
@@ -171,6 +175,7 @@ echo 1 > /sys/devices/system/cpu/cpu2/online; cat /sys/devices/system/cpu/online
 
 // TestCPUBindConcurrent writes four files to a bind mount at once.
 func TestCPUBindConcurrent(t *testing.T) {
+	parallel(t)
 	dir := shared(t, nil)
 	r := run(t, "--cpus", cpus(t, 4), "-v", dir+":/s", alpine, "sh", "-c",
 		`for i in 1 2 3 4; do (head -c 20971520 /dev/urandom > /s/f$i; sha256sum /s/f$i | cut -d' ' -f1 > /s/f$i.sum) & done; wait`)
@@ -187,6 +192,7 @@ func TestCPUBindConcurrent(t *testing.T) {
 
 // TestCPUNetworkConcurrent downloads from the host four times at once.
 func TestCPUNetworkConcurrent(t *testing.T) {
+	parallel(t)
 	runwhp(t)
 	data := make([]byte, 20<<20)
 	rand.Read(data)
@@ -200,6 +206,7 @@ func TestCPUNetworkConcurrent(t *testing.T) {
 
 // TestCPUStdoutConcurrent writes to stdout from four processes at once.
 func TestCPUStdoutConcurrent(t *testing.T) {
+	parallel(t)
 	r := run(t, "--cpus", cpus(t, 4), alpine, "sh", "-c",
 		`for i in 1 2 3 4; do head -c 5000000 /dev/zero & done; wait`)
 	if r.code != 0 || len(r.stdout) != 20000000 || bytes.Count([]byte(r.stdout), []byte{0}) != 20000000 {
@@ -211,6 +218,7 @@ func TestCPUStdoutConcurrent(t *testing.T) {
 // access itself rather than through WinHvEmulation.dll, which is several
 // times slower: the guest's kernel reaches its devices with plain movs.
 func TestMmioFastPath(t *testing.T) {
+	parallel(t)
 	r := run(t, "--debug", alpine, "sh", "-c", "head -c 1000000 /dev/zero | wc -c")
 	if r.code != 0 || strings.TrimSpace(r.stdout) != "1000000" {
 		t.Fatalf("exit %d, stdout %q", r.code, r.stdout)

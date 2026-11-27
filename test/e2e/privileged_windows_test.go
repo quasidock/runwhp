@@ -14,6 +14,7 @@ import (
 // root of a cgroup namespace of its own at /sys/fs/cgroup, read-only, for
 // the container's process and an exec's alike.
 func TestCgroupView(t *testing.T) {
+	parallel(t)
 	r := run(t, alpine, "sh", "-c", `cat /proc/self/cgroup; grep " /sys/fs/cgroup " /proc/self/mountinfo | cut -d' ' -f4,6; touch /sys/fs/cgroup/x 2>/dev/null && echo writable; mount | grep -c " /sys .*ro,"; ls /dev/fuse 2>/dev/null; true`)
 	if r.code != 0 || r.stdout != "0::/\n/ ro,nosuid,nodev,noexec,relatime\n1\n" {
 		t.Errorf("an unprivileged container's cgroup: %+v", r)
@@ -31,6 +32,7 @@ func TestCgroupView(t *testing.T) {
 // does, execs starting in the container process's cgroup, and pause
 // freezing them all.
 func TestPrivileged(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	detached(t, "--privileged", "--name", name, alpine, "sh", "-c", `
 cat /sys/fs/cgroup/cgroup.controllers

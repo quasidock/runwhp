@@ -36,6 +36,7 @@ const capSysBoot = `echo bounding $(( 0x$(awk '/^CapBnd/{print $2}' /proc/self/s
 // its VM itself, as a Docker container cannot: it lacks CAP_SYS_BOOT, and
 // each fails with EPERM while the container carries on.
 func TestNoReboot(t *testing.T) {
+	parallel(t)
 	script := `
 for c in 'reboot -f' 'halt -f' 'poweroff -f'; do
 	out=$($c 2>&1); echo "$c: $? $out"
@@ -64,6 +65,7 @@ exit 3`
 // leaves it running: busybox's reboot, halt and poweroff without -f signal
 // it, and SIGTERM used to end it and panic the kernel.
 func TestSignalInit(t *testing.T) {
+	parallel(t)
 	script := `
 for s in TERM INT HUP USR1 USR2 PWR; do kill -$s 1 || echo "kill -$s failed"; done
 reboot; halt; poweroff

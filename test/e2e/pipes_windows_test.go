@@ -7,9 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,18 +18,7 @@ import (
 
 // sockcatDir builds sockcat, the tests' Unix socket client, for Linux,
 // once, and gives the directory it is in, to bind into containers.
-var sockcatDir = sync.OnceValues(func() (string, error) {
-	dir, err := os.MkdirTemp("", "runwhp-sockcat-")
-	if err != nil {
-		return "", err
-	}
-	cmd := exec.Command(filepath.Join(runtime.GOROOT(), "bin", "go.exe"), "build", "-o", filepath.Join(dir, "sockcat"), "./sockcat")
-	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("building sockcat: %v\n%s", err, out)
-	}
-	return dir, nil
-})
+var sockcatDir = sync.OnceValues(func() (string, error) { return buildLinux("sockcat") })
 
 func sockcat(t *testing.T) string {
 	t.Helper()
@@ -88,6 +75,7 @@ func echoPipe(t *testing.T, message bool) (name, source string) {
 // connection reaches the pipe, half-closes included, many at once, from
 // exec too, and again after a restart.
 func TestHostPipes(t *testing.T) {
+	parallel(t)
 	_, msg := echoPipe(t, true)
 	_, byteMode := echoPipe(t, false)
 	bin := sockcat(t)
@@ -108,7 +96,7 @@ func TestHostPipes(t *testing.T) {
 	defer cli(t, "delete", "-f", name)
 	execEcho := func(what string) {
 		t.Helper()
-		cmd := exec.Command(runwhp(t), "exec", "-i", name, "/t/sockcat", "/run/echo.sock")
+		cmd := command(t, "exec", "-i", name, "/t/sockcat", "/run/echo.sock")
 		cmd.Stdin = strings.NewReader(what)
 		out, err := cmd.CombinedOutput()
 		if err != nil || string(out) != "got:"+what {
@@ -125,6 +113,7 @@ func TestHostPipes(t *testing.T) {
 // TestHostPipeAbsent warns when nothing serves a pipe yet, and the
 // container's connections to it end, while the container goes on.
 func TestHostPipeAbsent(t *testing.T) {
+	parallel(t)
 	absent := fmt.Sprintf("//./pipe/runwhp-e2e-absent-%d", os.Getpid())
 	r := runWithInput(t, strings.NewReader("x"), "-i", "-v", sockcat(t), "-v", absent+":/run/none.sock", alpine,
 		"sh", "-c", "/t/sockcat /run/none.sock; echo done")
@@ -141,6 +130,7 @@ func TestHostPipeAbsent(t *testing.T) {
 // server that made the container, runs a container attached, with input
 // ended by a half-close, and removes it.
 func TestDockerSocketInContainer(t *testing.T) {
+	parallel(t)
 	d := newDockerAPI(t)
 	img := d.image(alpine)
 	cliImg := d.image("docker:cli")
@@ -181,9 +171,10 @@ const apiSocketAuths = `{"auths":{"registry.example.com":{"auth":"dXNlcjpwYXNz"}
 // compose, on the store's own Engine API, and with Docker Compose through
 // the API: each reaches the API, and finds the docker CLI's credentials.
 func TestComposeAPISocket(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	config := t.TempDir()
-	t.Setenv("DOCKER_CONFIG", config) // start writes its context there, compose reads the credentials
+	setEnv(t, "DOCKER_CONFIG", config) // start writes its context there, compose reads the credentials
 	os.WriteFile(filepath.Join(config, "config.json"), []byte(apiSocketAuths), 0o644)
 	s.ok("docker-api", "start")
 	t.Cleanup(func() { s.cli("", "docker-api", "stop") })

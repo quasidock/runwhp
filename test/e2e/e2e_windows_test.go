@@ -86,7 +86,7 @@ func withFlags(args []string) []string {
 // cli runs runwhp with exactly args.
 func cli(t *testing.T, args ...string) result {
 	t.Helper()
-	cmd := exec.Command(runwhp(t), args...)
+	cmd := command(t, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
@@ -106,7 +106,7 @@ func run(t *testing.T, args ...string) result {
 // runWithInput runs with stdin, or with no stdin (the null device) if nil.
 func runWithInput(t *testing.T, stdin io.Reader, args ...string) result {
 	t.Helper()
-	cmd := exec.Command(runwhp(t), runArgs(args...)...)
+	cmd := command(t, runArgs(args...)...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, &stdout, &stderr
 	err := cmd.Run()
@@ -127,6 +127,7 @@ func expect(t *testing.T, r result, stdout string, code int) {
 }
 
 func TestEcho(t *testing.T) {
+	parallel(t)
 	r := run(t, alpine, "echo", "hello")
 	expect(t, r, "hello\n", 0)
 	if r.stderr != "" && !strings.HasPrefix(r.stderr, "pulling") {
@@ -135,6 +136,7 @@ func TestEcho(t *testing.T) {
 }
 
 func TestStreamsAndExitCode(t *testing.T) {
+	parallel(t)
 	r := run(t, alpine, "sh", "-c", "echo out; echo err >&2; exit 3")
 	expect(t, r, "out\n", 3)
 	if r.stderr != "err\n" {
@@ -143,6 +145,7 @@ func TestStreamsAndExitCode(t *testing.T) {
 }
 
 func TestCommandErrors(t *testing.T) {
+	parallel(t)
 	r := run(t, alpine, "nosuchcmd")
 	expect(t, r, "", 127)
 	if !strings.Contains(r.stderr, "executable file not found") {
@@ -153,6 +156,7 @@ func TestCommandErrors(t *testing.T) {
 }
 
 func TestUserEnvWorkdir(t *testing.T) {
+	parallel(t)
 	expect(t, run(t, "-u", "nobody", alpine, "id"), "uid=65534(nobody) gid=65534(nobody)\n", 0)
 	expect(t, run(t, "-e", "FOO=bar", "-w", "/tmp/x", alpine, "sh", "-c", "echo $FOO; pwd"), "bar\n/tmp/x\n", 0)
 	expect(t, run(t, "--entrypoint", "/bin/echo", alpine, "a", "b"), "a b\n", 0)
@@ -160,10 +164,12 @@ func TestUserEnvWorkdir(t *testing.T) {
 }
 
 func TestMultiLayerImage(t *testing.T) {
+	parallel(t)
 	expect(t, run(t, "python:3.12-slim", "python3", "-c", "print(1)"), "1\n", 0)
 }
 
 func TestParallel(t *testing.T) {
+	parallel(t)
 	runwhp(t)
 	var wg sync.WaitGroup
 	results := make([]result, 3)
@@ -184,11 +190,9 @@ func TestParallel(t *testing.T) {
 // makes a directory opaque, serves it from a localhost registry, and checks
 // the container sees the merged result.
 func TestWhiteouts(t *testing.T) {
+	parallel(t)
 	runwhp(t)
-	base, err := remote.Image(name.MustParseReference(alpine), remote.WithPlatform(v1.Platform{OS: "linux", Architecture: "amd64"}))
-	if err != nil {
-		t.Fatal(err)
-	}
+	base := cachedImage(t, alpine)
 	lower := tarLayer(t, map[string]string{"data/keep": "k", "data/gone": "g", "opq/old": "o"})
 	upper := tarLayer(t, map[string]string{"data/.wh.gone": "", "opq/.wh..wh..opq": "", "opq/new": "n"})
 	img, err := mutate.AppendLayers(base, lower, upper)
@@ -211,6 +215,7 @@ func TestWhiteouts(t *testing.T) {
 }
 
 func TestStdin(t *testing.T) {
+	parallel(t)
 	expect(t, runWithInput(t, strings.NewReader("hello\n"), "-i", alpine, "cat"), "hello\n", 0)
 	expect(t, runWithInput(t, strings.NewReader(""), "-i", alpine, "wc", "-c"), "0\n", 0)
 	// Without -i the process reads the null device, even with input there.
@@ -218,6 +223,7 @@ func TestStdin(t *testing.T) {
 }
 
 func TestStdinLarge(t *testing.T) {
+	parallel(t)
 	data := make([]byte, 10<<20)
 	rand.Read(data)
 	sum := sha256.Sum256(data)
@@ -228,7 +234,7 @@ func TestStdinLarge(t *testing.T) {
 // TestStdinDelayed writes input only once the guest has been idle a while,
 // so the vCPU is halted in the hypervisor when the data arrives.
 func TestStdinDelayed(t *testing.T) {
-	cmd := exec.Command(runwhp(t), runArgs("-i", alpine, "sh", "-c", "read x; echo got $x")...)
+	cmd := command(t, runArgs("-i", alpine, "sh", "-c", "read x; echo got $x")...)
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -238,7 +244,7 @@ func TestStdinDelayed(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(3 * time.Second)
+	time.Sleep(1500 * time.Millisecond) // booted, and idle long enough for its vCPU to halt
 	sent := time.Now()
 	io.WriteString(in, "late\n")
 	in.Close()
@@ -258,7 +264,7 @@ func TestStdinDelayed(t *testing.T) {
 // whole guest and this deadlocked.
 func TestSlowReader(t *testing.T) {
 	const n = 4000000
-	cmd := exec.Command(runwhp(t), runArgs(alpine, "sh", "-c", fmt.Sprintf("head -c %d /dev/zero & sleep 1; echo tick >&2; wait", n))...)
+	cmd := command(t, runArgs(alpine, "sh", "-c", fmt.Sprintf("head -c %d /dev/zero & sleep 1; echo tick >&2; wait", n))...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -300,6 +306,7 @@ func TestSlowReader(t *testing.T) {
 // TestReopenStdio opens the standard streams by name. They used to be the
 // console ports themselves, which can be open only once.
 func TestReopenStdio(t *testing.T) {
+	parallel(t)
 	r := runWithInput(t, strings.NewReader("in\n"), "-i", alpine, "sh", "-c", "cat /dev/stdin; echo a > /dev/stdout; echo b | tee /dev/stderr >/dev/null")
 	expect(t, r, "in\na\n", 0)
 	if r.stderr != "b\n" {
@@ -318,7 +325,7 @@ func interruptible(t *testing.T, stdout *syncBuffer, stderr *bytes.Buffer, args 
 // interruptibleArgv is interruptible for runwhp with exactly argv.
 func interruptibleArgv(t *testing.T, stdout *syncBuffer, stderr *bytes.Buffer, argv []string) (*exec.Cmd, func()) {
 	t.Helper()
-	cmd := exec.Command(runwhp(t), argv...)
+	cmd := command(t, argv...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	if err := cmd.Start(); err != nil {
@@ -368,6 +375,7 @@ func TestInterrupt(t *testing.T) {
 
 // TestInterruptTrapped checks that the container can handle the interrupt.
 func TestInterruptTrapped(t *testing.T) {
+	parallel(t)
 	var stdout syncBuffer
 	var stderr bytes.Buffer
 	cmd, interrupt := interruptible(t, &stdout, &stderr, alpine, "sh", "-c", `trap "echo bye; exit 5" INT; echo ready; sleep 30 & wait`)

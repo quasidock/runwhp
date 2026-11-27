@@ -4,6 +4,8 @@ package e2e
 
 import (
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,7 +24,7 @@ import (
 func countingRegistry(t *testing.T) (host string, uploads *atomic.Int32) {
 	t.Helper()
 	uploads = &atomic.Int32{}
-	reg := registry.New()
+	reg := registry.New(registry.Logger(log.New(io.Discard, "", 0)))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/blobs/uploads") {
 			uploads.Add(1)
@@ -37,6 +39,7 @@ func countingRegistry(t *testing.T) (host string, uploads *atomic.Int32) {
 // TestPush pushes a built image, pulls it back into another store with
 // its ID, and pushes it again, uploading nothing.
 func TestPush(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	base := mirrored(t, alpine)
 	host, uploads := countingRegistry(t)

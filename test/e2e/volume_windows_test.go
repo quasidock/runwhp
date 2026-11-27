@@ -45,6 +45,7 @@ func readHost(t *testing.T, path string) string {
 }
 
 func TestBindReadWrite(t *testing.T) {
+	parallel(t)
 	dir := shared(t, map[string]string{"in.txt": "from the host\n", "sub/deep.txt": "deep\n"})
 	r := run(t, "-v", dir+":/src", alpine, "sh", "-c",
 		"cat /src/in.txt /src/sub/deep.txt && echo from the container > /src/out.txt && mkdir -p /src/new/dir && ls /src")
@@ -58,6 +59,7 @@ func TestBindReadWrite(t *testing.T) {
 }
 
 func TestBindLargeFiles(t *testing.T) {
+	parallel(t)
 	data := make([]byte, 20<<20)
 	rand.Read(data)
 	sum := sha256.Sum256(data)
@@ -78,6 +80,7 @@ func TestBindLargeFiles(t *testing.T) {
 }
 
 func TestBindReadOnly(t *testing.T) {
+	parallel(t)
 	dir := shared(t, map[string]string{"f": "data"})
 	r := run(t, "-v", dir+":/s:ro", alpine, "sh", "-c", "cat /s/f; echo; touch /s/new")
 	expect(t, r, "data\n", 1)
@@ -91,6 +94,7 @@ func TestBindReadOnly(t *testing.T) {
 }
 
 func TestBindFile(t *testing.T) {
+	parallel(t)
 	dir := shared(t, map[string]string{"app.conf": "key=1\n", "hosts": "1.2.3.4 custom\n"})
 	r := run(t,
 		"-v", filepath.Join(dir, "app.conf")+":/new/dir/app.conf",
@@ -107,6 +111,7 @@ func TestBindFile(t *testing.T) {
 }
 
 func TestBindNested(t *testing.T) {
+	parallel(t)
 	outer := shared(t, map[string]string{"o": "outer\n"})
 	inner := shared(t, map[string]string{"i": "inner\n"})
 	// Given inner first: parents are mounted first whatever the order.
@@ -118,6 +123,7 @@ func TestBindNested(t *testing.T) {
 }
 
 func TestBindOwner(t *testing.T) {
+	parallel(t)
 	dir := shared(t, map[string]string{"f": ""})
 	r := run(t, "-u", "1000:1001", "-v", dir+":/s", "-w", "/s", alpine, "sh", "-c",
 		"stat -c '%u:%g %a' . f; echo x > mine; stat -c '%u:%g %a' mine")
@@ -127,6 +133,7 @@ func TestBindOwner(t *testing.T) {
 }
 
 func TestBindGitOwnership(t *testing.T) {
+	parallel(t)
 	dir := shared(t, nil)
 	r := run(t, "-u", "1000", "-e", "HOME=/tmp", "-v", dir+":/repo", "-w", "/repo", "--entrypoint", "sh", gitImage, "-c",
 		"git init -q && git -c user.email=e@x -c user.name=e commit -q --allow-empty -m x && git status --short && echo ok")
@@ -134,6 +141,7 @@ func TestBindGitOwnership(t *testing.T) {
 }
 
 func TestBindMetadataPersists(t *testing.T) {
+	parallel(t)
 	dir := shared(t, map[string]string{"script": "#!/bin/sh\necho ran\n", "owned": ""})
 	expect(t, run(t, "-v", dir+":/s", alpine, "sh", "-c",
 		"chmod 700 /s/script && chown 999:998 /s/owned && chmod 640 /s/owned && ln -s script /s/link && mkfifo /s/fifo"), "", 0)
@@ -143,6 +151,7 @@ func TestBindMetadataPersists(t *testing.T) {
 }
 
 func TestBindRenameAndDelete(t *testing.T) {
+	parallel(t)
 	dir := shared(t, map[string]string{"a": "new", "b": "old", "c": "kept open"})
 	r := run(t, "-v", dir+":/s", alpine, "sh", "-c",
 		"mv /s/a /s/b && cat /s/b && echo && exec 3</s/c && rm /s/c && cat <&3 && echo && ls /s")
@@ -153,9 +162,10 @@ func TestBindRenameAndDelete(t *testing.T) {
 }
 
 func TestBindSeesHostChanges(t *testing.T) {
+	parallel(t)
 	dir := shared(t, map[string]string{"f": "before"})
 	var stdout, stderr bytes.Buffer
-	cmd := exec.Command(runwhp(t), runArgs("-v", dir+":/s", alpine, "sh", "-c",
+	cmd := command(t, runArgs("-v", dir+":/s", alpine, "sh", "-c",
 		`cat /s/f; echo; while [ "$(cat /s/f)" != after ]; do sleep 0.1; done; echo seen`)...)
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Start(); err != nil {
@@ -184,6 +194,7 @@ func TestBindSeesHostChanges(t *testing.T) {
 }
 
 func TestBindJunctionIsNotFollowed(t *testing.T) {
+	parallel(t)
 	outside := shared(t, map[string]string{"secret": "do not read"})
 	dir := shared(t, nil)
 	link := filepath.Join(dir, "out")
@@ -197,6 +208,7 @@ func TestBindJunctionIsNotFollowed(t *testing.T) {
 }
 
 func TestBindMountPoints(t *testing.T) {
+	parallel(t)
 	dir := shared(t, map[string]string{"f": "x"})
 	// alpine's /var/run is a link to /run: the mount lands where it leads.
 	expect(t, run(t, "-v", dir+":/var/run/app", alpine, "ls", "/run/app"), "f\n", 0)
@@ -208,6 +220,7 @@ func TestBindMountPoints(t *testing.T) {
 }
 
 func TestBindSources(t *testing.T) {
+	parallel(t)
 	parent := t.TempDir()
 	missing := filepath.Join(parent, "made", "by", "v")
 	expect(t, run(t, "-v", missing+":/m", alpine, "ls", "/m"), "", 0)
@@ -229,6 +242,7 @@ func TestBindSources(t *testing.T) {
 // TestBindManyFiles makes and lists a tree of many small files, which is
 // mostly lookups and attribute requests.
 func TestBindManyFiles(t *testing.T) {
+	parallel(t)
 	dir := shared(t, nil)
 	r := run(t, "-v", dir+":/s", "-w", "/s", alpine, "sh", "-c", `
 		for d in $(seq 20); do mkdir d$d; for f in $(seq 50); do echo $d$f > d$d/f$f; done; done
@@ -246,6 +260,7 @@ func TestBindManyFiles(t *testing.T) {
 // TestBindDelegated writes to a delegated bind mount, whose writes the guest
 // caches, in small pieces: everything is on the host after the run.
 func TestBindDelegated(t *testing.T) {
+	parallel(t)
 	dir := shared(t, map[string]string{"old.txt": "old\n", "gone.txt": "x"})
 	r := run(t, "-v", dir+":/d:delegated", alpine, "sh", "-c", `
 		head -c 20971520 /dev/urandom > /tmp/data
@@ -284,6 +299,7 @@ func TestBindDelegated(t *testing.T) {
 // TestBindDelegatedClose checks that a file the container closes reaches
 // the host while the container runs.
 func TestBindDelegatedClose(t *testing.T) {
+	parallel(t)
 	dir := shared(t, nil)
 	name := running(t, "-v", dir+":/d:delegated")
 	expect(t, execIn(t, name, "sh", "-c", "echo closed > /d/f"), "", 0)
@@ -300,6 +316,7 @@ func TestBindDelegatedClose(t *testing.T) {
 // TestBindDelegatedMixed mounts a consistent and a delegated share in one
 // container, and a read-only one asked to be delegated, which is not.
 func TestBindDelegatedMixed(t *testing.T) {
+	parallel(t)
 	a := shared(t, map[string]string{"a": "consistent\n"})
 	b := shared(t, map[string]string{"b": "delegated\n"})
 	c := shared(t, map[string]string{"c": "read-only\n"})

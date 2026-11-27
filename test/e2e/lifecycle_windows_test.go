@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -35,7 +34,7 @@ func newName(t *testing.T) string {
 // keep runs a container that is kept after it stops.
 func keep(t *testing.T, args ...string) result {
 	t.Helper()
-	cmd := exec.Command(runwhp(t), keepArgs(args...)...)
+	cmd := command(t, keepArgs(args...)...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
@@ -101,6 +100,7 @@ func layerState(t *testing.T, s stateJSON) ext4.State {
 }
 
 func TestKeptContainer(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	r := keep(t, "--name", name, alpine, "sh", "-c", "echo kept > /kept; sync; exit 3")
 	expect(t, r, "", 3)
@@ -152,6 +152,7 @@ func TestKeptContainer(t *testing.T) {
 }
 
 func TestContainerNames(t *testing.T) {
+	parallel(t)
 	a, b := newName(t), newName(t)
 	expect(t, keep(t, "--name", a, alpine, "true"), "", 0)
 	r := keep(t, "--name", strings.ToUpper(a), alpine, "true")
@@ -188,6 +189,7 @@ func TestContainerNames(t *testing.T) {
 // /etc/resolv.conf over the image's, as Docker does, rather than writing
 // them into the writable layer.
 func TestEtcFiles(t *testing.T) {
+	parallel(t)
 	r := run(t, "--hostname", "box", alpine, "sh", "-c",
 		`cat /etc/hostname; grep -c box /etc/hosts; grep -c nameserver /etc/resolv.conf
 		 grep -cE ' /etc/(hostname|hosts|resolv.conf) ' /proc/mounts
@@ -214,6 +216,7 @@ func TestEtcFiles(t *testing.T) {
 // TestVolumeKeptByContainer checks that a volume a stopped container
 // mounts cannot be removed, as Docker refuses to.
 func TestVolumeKeptByContainer(t *testing.T) {
+	parallel(t)
 	v, name := newVolume(t), newName(t)
 	expect(t, keep(t, "--name", name, "-v", v+":/data", alpine, "true"), "", 0)
 	if r := volumeCmd(t, nil, "", "rm", v); r.code != 1 || !strings.Contains(r.stderr, "in use by container "+name) {
@@ -233,6 +236,7 @@ func TestVolumeKeptByContainer(t *testing.T) {
 // TestFsyncKept checks that fsync in a kept container's writable layer
 // reaches the host, as it would under Docker.
 func TestFsyncKept(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	r := keep(t, "--name", name, "--debug", alpine, "sh", "-c", "for i in $(seq 20); do echo $i > /f$i; sync /f$i; done; echo done")
 	if r.code != 0 || !strings.Contains(r.stdout, "done") {

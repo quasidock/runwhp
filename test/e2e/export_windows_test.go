@@ -13,6 +13,7 @@ import (
 // TestExport writes a container's root file system, running and stopped,
 // with its changes, without its volumes or anonymous volumes' files.
 func TestExport(t *testing.T) {
+	parallel(t)
 	vol := newVolume(t)
 	name := newName(t)
 	detached(t, "--name", name, "-v", vol+":/data", "-v", "/anon", alpine, "sh", "-c",
@@ -44,6 +45,7 @@ func TestExport(t *testing.T) {
 
 // TestDiff lists a container's changes as docker diff does.
 func TestDiff(t *testing.T) {
+	parallel(t)
 	vol := newVolume(t)
 	name := newName(t)
 	if r := keep(t, "--name", name, "-v", vol+":/data", "-v", "/anon", "-w", "/newdir", alpine, "sh", "-c",

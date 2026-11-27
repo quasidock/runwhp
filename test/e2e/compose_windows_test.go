@@ -40,9 +40,9 @@ func newComposeProject(t *testing.T, s *ownStore, files map[string]string) *comp
 }
 
 func (p *composeProject) command(args ...string) *exec.Cmd {
-	cmd := exec.Command(runwhp(p.s.t), append([]string{"compose"}, args...)...)
+	cmd := command(p.s.t, append([]string{"compose"}, args...)...)
 	cmd.Dir = p.dir
-	cmd.Env = append(os.Environ(), "RUNWHP_ROOT="+p.s.root)
+	cmd.Env = append(cmd.Env, "RUNWHP_ROOT="+p.s.root)
 	return cmd
 }
 
@@ -100,6 +100,7 @@ func composeFile(t *testing.T, body string) string {
 // healthcheck, an app built from a Dockerfile that waits for it, a web
 // server publishing a port, a volume and two networks; then takes it down.
 func TestComposeUpDown(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	port := freePort(t)
 	p := newComposeProject(t, s, map[string]string{
@@ -198,6 +199,7 @@ networks:
 
 // TestComposeRecreate changes a project and ups it again.
 func TestComposeRecreate(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	p := newComposeProject(t, s, map[string]string{"compose.yaml": composeFile(t, `name: e2erec
 services:
@@ -238,6 +240,7 @@ services:
 // TestComposeScale scales a service up and down, and finds its replicas by
 // its name.
 func TestComposeScale(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	p := newComposeProject(t, s, map[string]string{"compose.yaml": composeFile(t, `name: e2esc
 services:
@@ -279,6 +282,7 @@ services:
 // TestComposeAttached follows the containers' output as up does without
 // -d, and stops them as it does.
 func TestComposeAttached(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	p := newComposeProject(t, s, map[string]string{"compose.yaml": composeFile(t, attachProject)})
 	r := p.run("up", "--abort-on-container-exit")
@@ -344,6 +348,7 @@ func TestComposeAttached(t *testing.T) {
 
 // TestComposeDepends waits for dependencies as depends_on asks.
 func TestComposeDepends(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	p := newComposeProject(t, s, map[string]string{
 		"ok.yaml": composeFile(t, `name: e2edep
@@ -383,6 +388,7 @@ services:
 
 // TestComposeCommands covers the rest of compose's commands.
 func TestComposeCommands(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	mirrored(t, alpine) // starts the mirror, which names the image to push
 	p := newComposeProject(t, s, map[string]string{
@@ -465,14 +471,14 @@ networks: {back: {}}
 
 	// Without the file, by name.
 	other := t.TempDir()
-	cmd := exec.Command(runwhp(t), "compose", "-p", "e2ecmd", "ps", "--services")
-	cmd.Dir, cmd.Env = other, append(os.Environ(), "RUNWHP_ROOT="+s.root)
+	cmd := command(t, "compose", "-p", "e2ecmd", "ps", "--services")
+	cmd.Dir, cmd.Env = other, append(cmd.Env, "RUNWHP_ROOT="+s.root)
 	out, err := cmd.Output()
 	if err != nil || string(out) != "built\ndb\n" {
 		t.Errorf("ps -p without a file: %q, %v", out, err)
 	}
-	cmd = exec.Command(runwhp(t), "compose", "-p", "e2ecmd", "down", "-v")
-	cmd.Dir, cmd.Env = other, append(os.Environ(), "RUNWHP_ROOT="+s.root)
+	cmd = command(t, "compose", "-p", "e2ecmd", "down", "-v")
+	cmd.Dir, cmd.Env = other, append(cmd.Env, "RUNWHP_ROOT="+s.root)
 	if out, err := cmd.CombinedOutput(); err != nil || !strings.Contains(string(out), " Network e2ecmd_back Removed ") || !strings.Contains(string(out), " Volume e2ecmd_data Removed ") {
 		t.Errorf("down -p without a file: %v\n%s", err, out)
 	}
@@ -484,6 +490,7 @@ networks: {back: {}}
 // TestComposeRefusals refuses what runwhp cannot do, before making
 // anything.
 func TestComposeRefusals(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	p := newComposeProject(t, s, map[string]string{
 		"refused.yaml": composeFile(t, `name: e2eref
@@ -524,8 +531,8 @@ services:
 		t.Errorf("an unknown service: %+v", r)
 	}
 	empty := t.TempDir()
-	cmd := exec.Command(runwhp(t), "compose", "up")
-	cmd.Dir, cmd.Env = empty, append(os.Environ(), "RUNWHP_ROOT="+s.root)
+	cmd := command(t, "compose", "up")
+	cmd.Dir, cmd.Env = empty, append(cmd.Env, "RUNWHP_ROOT="+s.root)
 	if out, _ := cmd.CombinedOutput(); !strings.Contains(string(out), "no configuration file provided: not found") {
 		t.Errorf("no file: %s", out)
 	}

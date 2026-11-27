@@ -113,6 +113,7 @@ func TestDetached(t *testing.T) {
 // TestDetachedToFile gives run -d a file for stdout, which the container
 // writes to after the ID.
 func TestDetachedToFile(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	exe := runwhp(t) // before the file is open: it may skip the test
 	out := filepath.Join(t.TempDir(), "out.txt")
@@ -142,6 +143,7 @@ func TestDetachedToFile(t *testing.T) {
 }
 
 func TestDetachedTTY(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	detached(t, "-t", "--name", name, alpine, "sh", "-c", "tty >/dev/null && echo tty; stty size; echo err >&2")
 	waitStatus(t, name, "stopped", 10*time.Second)
@@ -152,8 +154,9 @@ func TestDetachedTTY(t *testing.T) {
 }
 
 func TestDetachedStdin(t *testing.T) {
+	parallel(t)
 	name := newName(t)
-	cmd := exec.Command(runwhp(t), append([]string{"run", "-d", "-i"}, withFlags([]string{"--name", name, alpine, "wc", "-c"})...)...)
+	cmd := command(t, append([]string{"run", "-d", "-i"}, withFlags([]string{"--name", name, alpine, "wc", "-c"})...)...)
 	cmd.Stdin = strings.NewReader("12345")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("run -d -i: %v, %s", err, out)
@@ -173,6 +176,7 @@ func TestDetachedStdin(t *testing.T) {
 
 // TestCreateStart walks a container through create, start and kill.
 func TestCreateStart(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	id := created(t, "--name", name, alpine, "sh", "-c", "touch /started; echo started; sleep 60")
 	s := stateOf(t, name)
@@ -206,6 +210,7 @@ func TestCreateStart(t *testing.T) {
 
 // TestKillCreated ends a created container without starting it.
 func TestKillCreated(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	created(t, "--name", name, alpine, "touch", "/started")
 	if r := cli(t, "kill", name, "SIGUSR1"); r.code != 0 {
@@ -233,6 +238,7 @@ func TestKillCreated(t *testing.T) {
 }
 
 func TestKillSignals(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	detached(t, "--name", name, alpine, "sh", "-c",
 		`trap 'echo usr1' USR1; trap 'echo hup' HUP; trap 'echo term; exit 3' TERM; echo ready; while :; do sleep 0.1; done`)
@@ -307,6 +313,7 @@ func TestStop(t *testing.T) {
 // TestRestart starts a stopped container again, in a new VM on the same
 // writable layer, with the same hostname.
 func TestRestart(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	script := `n=$(cat /boots 2>/dev/null || echo 0); n=$((n+1)); echo $n > /boots; echo boot $n $(hostname); trap 'exit 0' TERM; while :; do sleep 0.1; done`
 	detached(t, "--name", name, alpine, "sh", "-c", script)
@@ -338,6 +345,7 @@ func TestRestart(t *testing.T) {
 }
 
 func TestDeleteRunning(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	id := detached(t, "--name", name, alpine, "sleep", "60")
 	if r := cli(t, "delete", name); r.code != 1 || !strings.Contains(r.stderr, "-f") {
@@ -367,6 +375,7 @@ func TestDeleteRunning(t *testing.T) {
 // says how it ended, and the next start replays the writable layer's
 // journal, keeping what was synced.
 func TestSupervisorKilled(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	detached(t, "--name", name, alpine, "sh", "-c",
 		`if [ -f /data ]; then echo found $(cat /data); exit 0; fi; echo synced > /data; sync /data; echo ready; while :; do date > /scratch; sleep 0.05; done`)
@@ -398,6 +407,7 @@ func TestSupervisorKilled(t *testing.T) {
 // TestConcurrentStart starts a stopped container from three runwhps at
 // once: one runs it, and all three succeed.
 func TestConcurrentStart(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	expect(t, keep(t, "--name", name, alpine, "true"), "", 0)
 	stopFile := "/stop-" + name
@@ -423,10 +433,11 @@ func TestConcurrentStart(t *testing.T) {
 // TestKillForeground signals a container a foreground run is running,
 // from another runwhp.
 func TestKillForeground(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	var stdout syncBuffer
 	var stderr bytes.Buffer
-	cmd := exec.Command(runwhp(t), keepArgs("--name", name, alpine, "sh", "-c", "trap 'echo usr2; exit 4' USR2; echo ready; while :; do sleep 0.1; done")...)
+	cmd := command(t, keepArgs("--name", name, alpine, "sh", "-c", "trap 'echo usr2; exit 4' USR2; echo ready; while :; do sleep 0.1; done")...)
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -454,6 +465,7 @@ func TestKillForeground(t *testing.T) {
 // TestDetachedOutlivesConsole runs run -d on a pseudo console and closes
 // the console, as closing a terminal window does: the container goes on.
 func TestDetachedOutlivesConsole(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	p := startPTYArgv(t, 24, 80, append([]string{"run", "-d"}, withFlags([]string{"--name", name, alpine, "sleep", "60"})...))
 	if code := p.wait(); code != 0 {
@@ -470,6 +482,7 @@ func TestDetachedOutlivesConsole(t *testing.T) {
 // its process and what it started, with the users the image names, but
 // not init; a paused container's too, and none of a stopped one's.
 func TestTop(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	detached(t, "--name", name, alpine, "sh", "-c", "su nobody -s /bin/sh -c 'exec sleep 1001' & exec sleep 1000")
 	var r result
@@ -522,6 +535,7 @@ func TestTop(t *testing.T) {
 // port is bound to a free one, which port reports and which serves, and
 // is bound again, perhaps elsewhere, when the container starts again.
 func TestRandomPorts(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	detached(t, "--name", name, "-p", "8080", "--expose", "9000", "-P", alpine, "sh", "-c",
 		`echo "boot $(cut -c1-8 /proc/sys/kernel/random/boot_id)" > /msg; nc -lk -p 9000 -e cat /msg & exec nc -lk -p 8080 -e cat /msg`)
@@ -589,6 +603,7 @@ func TestRandomPorts(t *testing.T) {
 // again when it starts again, and that a port taken meanwhile fails the
 // start.
 func TestPublishOnRestart(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	port := freePort(t)
 	detached(t, "--name", name, "-p", port+":8080", alpine, "sh", "-c",

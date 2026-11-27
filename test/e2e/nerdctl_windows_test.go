@@ -115,7 +115,7 @@ func (e *nerdctlEnv) start(containerd string) {
 		e.history += e.log.String()
 	}
 	e.log = &syncBuffer{}
-	cmd := exec.Command(runwhp(e.t), "containerd", "--address", e.address, "--dir", e.dir, "--containerd", containerd)
+	cmd := command(e.t, "containerd", "--address", e.address, "--dir", e.dir, "--containerd", containerd)
 	cmd.Stdout, cmd.Stderr = e.log, e.log
 	if err := cmd.Start(); err != nil {
 		e.t.Fatal(err)

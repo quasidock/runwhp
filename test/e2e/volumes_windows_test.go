@@ -13,7 +13,6 @@ import (
 	"log"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -43,8 +42,8 @@ func newVolume(t *testing.T) string {
 // volumeCmd runs runwhp volume with extra environment variables and stdin.
 func volumeCmd(t *testing.T, env []string, stdin string, args ...string) result {
 	t.Helper()
-	cmd := exec.Command(runwhp(t), append([]string{"volume"}, args...)...)
-	cmd.Env = append(os.Environ(), env...)
+	cmd := command(t, append([]string{"volume"}, args...)...)
+	cmd.Env = append(cmd.Env, env...)
 	cmd.Stdin = strings.NewReader(stdin)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -67,6 +66,7 @@ func volumeState(t *testing.T, v string) ext4.State {
 }
 
 func TestVolumePersists(t *testing.T) {
+	parallel(t)
 	v := newVolume(t)
 	expect(t, run(t, "-v", v+":/data", alpine, "sh", "-c", "ls -A /data; stat -c '%a %u:%g' /data; echo kept > /data/f"), "755 0:0\n", 0)
 	expect(t, run(t, "-v", v+":/elsewhere", alpine, "cat", "/elsewhere/f"), "kept\n", 0)
@@ -113,10 +113,7 @@ func richImage(t *testing.T) string {
 func pushImage(t *testing.T, repo string, layers ...v1.Layer) string {
 	t.Helper()
 	runwhp(t)
-	base, err := remote.Image(name.MustParseReference(alpine), remote.WithPlatform(v1.Platform{OS: "linux", Architecture: "amd64"}))
-	if err != nil {
-		t.Fatal(err)
-	}
+	base := cachedImage(t, alpine)
 	img, err := mutate.AppendLayers(base, layers...)
 	if err != nil {
 		t.Fatal(err)
@@ -140,6 +137,7 @@ func pushImage(t *testing.T, repo string, layers ...v1.Layer) string {
 // the volume gets a copy of them, as with Docker, and keeps its own content
 // from then on.
 func TestVolumeFilledFromImage(t *testing.T) {
+	parallel(t)
 	img := richImage(t)
 	v := newVolume(t)
 	script := `cd /seed
@@ -173,12 +171,14 @@ file hard link pipe sub suid
 }
 
 func TestVolumeReadOnlyAndTwice(t *testing.T) {
+	parallel(t)
 	v := newVolume(t)
 	expect(t, run(t, "-v", v+":/a", "-v", strings.ToUpper(v)+":/b", alpine, "sh", "-c", "echo x > /a/f; cat /b/f"), "x\n", 0)
 	expect(t, run(t, "-v", v+":/r:ro", alpine, "sh", "-c", "cat /r/f; if touch /r/g 2>/dev/null; then echo wrote; else echo refused; fi"), "x\nrefused\n", 0)
 }
 
 func TestVolumeInUse(t *testing.T) {
+	parallel(t)
 	v := newVolume(t)
 	var stdout syncBuffer
 	var stderr bytes.Buffer
@@ -206,6 +206,7 @@ func TestVolumeInUse(t *testing.T) {
 // TestVolumeAfterHardStop stops the VM at once, in the middle of writes:
 // the next run replays the journal, and what was synced is there.
 func TestVolumeAfterHardStop(t *testing.T) {
+	parallel(t)
 	v := newVolume(t)
 	var stdout syncBuffer
 	var stderr bytes.Buffer
@@ -225,6 +226,7 @@ func TestVolumeAfterHardStop(t *testing.T) {
 }
 
 func TestAnonymousVolume(t *testing.T) {
+	parallel(t)
 	dir := shared(t, map[string]string{"main.js": "1"})
 	r := run(t, "-v", dir+":/app", "-v", "/app/node_modules", alpine, "sh", "-c",
 		"echo x > /app/node_modules/dep; ls /app/node_modules; ls /app | tr '\n' ' '")
@@ -240,6 +242,7 @@ func TestAnonymousVolume(t *testing.T) {
 }
 
 func TestTmpfs(t *testing.T) {
+	parallel(t)
 	expect(t, run(t, "--tmpfs", "/t", alpine, "sh", "-c", "cp /bin/busybox /t/bb && /t/bb true 2>/dev/null; echo $?; grep ' /t ' /proc/mounts | grep -o 'nosuid,nodev,noexec'"),
 		"126\nnosuid,nodev,noexec\n", 0)
 	expect(t, run(t, "--tmpfs", "/t:size=1m", alpine, "sh", "-c", "dd if=/dev/zero of=/t/f bs=1k count=2048 2>/dev/null || echo full"), "full\n", 0)
@@ -253,6 +256,7 @@ func TestTmpfs(t *testing.T) {
 
 // TestMountsNested mounts one of each kind inside another.
 func TestMountsNested(t *testing.T) {
+	parallel(t)
 	dir := shared(t, nil)
 	v := newVolume(t)
 	expect(t, run(t, "-v", dir+":/a", "-v", v+":/a/v", "--tmpfs", "/a/v/t", "-v", "/a/anon", alpine, "sh", "-c",
@@ -269,6 +273,7 @@ func TestMountsNested(t *testing.T) {
 }
 
 func TestTooManyVolumes(t *testing.T) {
+	parallel(t)
 	args := []string{}
 	for i := range 60 {
 		args = append(args, "-v", fmt.Sprintf("e2e-never-made-%d:/v%d", i, i))
@@ -283,6 +288,7 @@ func TestTooManyVolumes(t *testing.T) {
 }
 
 func TestVolumeCommands(t *testing.T) {
+	parallel(t)
 	v := newVolume(t)
 	expect(t, volumeCmd(t, nil, "", "create", v), v+"\n", 0)
 	if r := volumeCmd(t, nil, "", "create", v); r.code != 1 || !strings.Contains(r.stderr, "already exists") {

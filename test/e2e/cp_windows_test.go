@@ -8,7 +8,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -32,7 +31,7 @@ func waitExec(t *testing.T, name string, cmd ...string) {
 // cliIn runs runwhp with stdin.
 func cliIn(t *testing.T, stdin []byte, args ...string) result {
 	t.Helper()
-	cmd := exec.Command(runwhp(t), args...)
+	cmd := command(t, args...)
 	cmd.Stdin = bytes.NewReader(stdin)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -83,6 +82,7 @@ const filesScript = "mkdir -p /d/sub && echo f1 > /d/f1 && echo f2 > /d/sub/f2 &
 // TestCp copies into and out of a running container, its volume and its
 // bind mount included, as docker cp does.
 func TestCp(t *testing.T) {
+	parallel(t)
 	host, bind := t.TempDir(), t.TempDir()
 	vol := newVolume(t)
 	name := newName(t)
@@ -167,6 +167,7 @@ func TestCp(t *testing.T) {
 // TestCpStopped copies into and out of a stopped container, whose files a
 // guest booted for the purpose serves, and a created one.
 func TestCpStopped(t *testing.T) {
+	parallel(t)
 	host, bind := t.TempDir(), t.TempDir()
 	vol := newVolume(t)
 	name := newName(t)
@@ -208,11 +209,12 @@ func TestCpStopped(t *testing.T) {
 // TestCpBusy starts a stopped container while a cp holds it: the start is
 // refused, and works once the cp is done.
 func TestCpBusy(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	if r := keep(t, "--name", name, alpine, "true"); r.code != 0 {
 		t.Fatalf("run: %+v", r)
 	}
-	cp := exec.Command(runwhp(t), "cp", "-", name+":/tmp")
+	cp := command(t, "cp", "-", name+":/tmp")
 	stdin, err := cp.StdinPipe()
 	if err != nil {
 		t.Fatal(err)

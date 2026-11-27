@@ -5,7 +5,6 @@ package e2e
 import (
 	"bytes"
 	"encoding/json"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -85,6 +84,7 @@ func TestStats(t *testing.T) {
 }
 
 func TestStatsNetwork(t *testing.T) {
+	parallel(t)
 	port := hostServer(t, make([]byte, 20<<20))
 	name := newName(t)
 	detached(t, "--name", name, "--add-host", hostGateway, alpine, "sh", "-c",
@@ -102,6 +102,7 @@ func TestStatsNetwork(t *testing.T) {
 }
 
 func TestStatsStopped(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	if r := cli(t, keepArgs("--name", name, alpine, "true")...); r.code != 0 {
 		t.Fatalf("run: %+v", r)
@@ -114,8 +115,9 @@ func TestStatsStopped(t *testing.T) {
 // TestStatsForeground asks for the statistics of a container run in the
 // foreground, whose runwhp is the run command itself.
 func TestStatsForeground(t *testing.T) {
+	parallel(t)
 	name := newName(t)
-	cmd := exec.Command(runwhp(t), keepArgs("--name", name, alpine, "sleep", "30")...)
+	cmd := command(t, keepArgs("--name", name, alpine, "sleep", "30")...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {

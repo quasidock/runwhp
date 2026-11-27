@@ -16,7 +16,7 @@ import (
 // (the null device if empty), and returns it with its output.
 func attachCmd(t *testing.T, stdin string, args ...string) (*exec.Cmd, *syncBuffer, *syncBuffer) {
 	t.Helper()
-	cmd := exec.Command(runwhp(t), append([]string{"attach"}, args...)...)
+	cmd := command(t, append([]string{"attach"}, args...)...)
 	var stdout, stderr syncBuffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if stdin != "" {
@@ -42,6 +42,7 @@ func waitOutput(t *testing.T, b *syncBuffer, want string) {
 // TestAttachOutput attaches two runwhps to a container in the background:
 // both see its output from then on, and exit with its exit code.
 func TestAttachOutput(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	detached(t, "--name", name, alpine, "sh", "-c", "for i in $(seq 1 30); do echo line$i; sleep 0.1; done; echo err >&2; exit 6")
 	var wg sync.WaitGroup
@@ -64,8 +65,9 @@ func TestAttachOutput(t *testing.T) {
 // TestAttachForeground attaches to a container run in the foreground by
 // another runwhp: its output, but not its input, which is that runwhp's.
 func TestAttachForeground(t *testing.T) {
+	parallel(t)
 	name := newName(t)
-	cmd := exec.Command(runwhp(t), keepArgs("-i", "--name", name, alpine, "sh", "-c", "echo ready; sleep 2; echo late; exit 4")...)
+	cmd := command(t, keepArgs("-i", "--name", name, alpine, "sh", "-c", "echo ready; sleep 2; echo late; exit 4")...)
 	var stdout syncBuffer
 	cmd.Stdout = &stdout
 	cmd.Stdin = strings.NewReader("")
@@ -83,6 +85,7 @@ func TestAttachForeground(t *testing.T) {
 // TestAttachStdin attaches input to a container run in the background with
 // -i: its input stays open for the next runwhp to attach.
 func TestAttachStdin(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	detached(t, "-i", "--name", name, alpine, "sh", "-c", "echo ready; while read l; do echo got $l; done; echo input ended")
 	waitLog(t, name, "ready")
@@ -117,10 +120,11 @@ func (c *slowCounter) Write(p []byte) (int, error) {
 // it, the container's output waiting for it, as Docker's does; and that the
 // log gets them all too.
 func TestAttachSlow(t *testing.T) {
+	parallel(t)
 	const total = 64 << 20
 	name := newName(t)
 	created(t, "--name", name, alpine, "sh", "-c", "head -c 67108864 /dev/zero; exit 3")
-	cmd := exec.Command(runwhp(t), "start", "-a", name)
+	cmd := command(t, "start", "-a", name)
 	out := &slowCounter{delay: 2 * time.Millisecond}
 	var stderr syncBuffer
 	cmd.Stdout, cmd.Stderr = out, &stderr
@@ -137,6 +141,7 @@ func TestAttachSlow(t *testing.T) {
 // first byte, again once it has stopped, and with -i input that ends the
 // container's once it ends, as create -i takes input once.
 func TestStartAttach(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	created(t, "--name", name, alpine, "sh", "-c", "echo hi; echo there >&2; exit 2")
 	for range 2 {
@@ -150,7 +155,7 @@ func TestStartAttach(t *testing.T) {
 	dir := t.TempDir()
 	stdout, _ := os.Create(filepath.Join(dir, "stdout"))
 	stderr, _ := os.Create(filepath.Join(dir, "stderr"))
-	cmd := exec.Command(runwhp(t), "start", "-a", name)
+	cmd := command(t, "start", "-a", name)
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	err := cmd.Run()
 	stdout.Close()
@@ -163,7 +168,7 @@ func TestStartAttach(t *testing.T) {
 
 	cat := newName(t)
 	created(t, "-i", "--name", cat, alpine, "sh", "-c", "cat; echo input ended")
-	cmd = exec.Command(runwhp(t), "start", "-a", "-i", cat)
+	cmd = command(t, "start", "-a", "-i", cat)
 	cmd.Stdin = strings.NewReader("hello\n")
 	out, err := cmd.Output()
 	if err != nil || string(out) != "hello\ninput ended\n" {

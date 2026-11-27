@@ -12,6 +12,7 @@ import (
 
 // TestCommit makes images of containers, as docker commit does.
 func TestCommit(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	ref := mirrored(t, alpine)
 	s.ok("run", "-d", "--name", "src", "-e", "FOO=bar", "-v", "/anon", ref, "sh", "-c",

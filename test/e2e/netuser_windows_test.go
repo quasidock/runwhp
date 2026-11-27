@@ -76,6 +76,7 @@ func networksOf(t *testing.T, ref string) networkStateJSON {
 }
 
 func TestUserNetworkCommands(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	id := strings.TrimSpace(s.ok("network", "create", "front").stdout)
 	if len(id) != 64 {
@@ -145,6 +146,7 @@ func TestUserNetworkCommands(t *testing.T) {
 }
 
 func TestUserNetworkByName(t *testing.T) {
+	parallel(t)
 	net := newNetwork(t)
 	server := serving(t, "--network", net, "--network-alias", "srv", "--hostname", "srvhost")
 	waitServing(t, net, server)
@@ -186,6 +188,7 @@ func TestUserNetworkByName(t *testing.T) {
 }
 
 func TestUserNetworkIsolation(t *testing.T) {
+	parallel(t)
 	a, b := newNetwork(t), newNetwork(t)
 	// Name them so that a sorts first: it is the primary network.
 	if a > b {
@@ -213,6 +216,7 @@ func TestUserNetworkIsolation(t *testing.T) {
 }
 
 func TestUserNetworkIP(t *testing.T) {
+	parallel(t)
 	net := newNetwork(t)
 	subnet := strings.TrimSuffix(networkSubnet(t, net), "0.0/16")
 	server := serving(t, "--network", net, "--ip", subnet+"7.7")
@@ -243,6 +247,7 @@ func networkSubnet(t *testing.T, net string) string {
 }
 
 func TestUserNetworkConnect(t *testing.T) {
+	parallel(t)
 	a, b := newNetwork(t), newNetwork(t)
 	if a > b {
 		a, b = b, a
@@ -291,11 +296,12 @@ func TestUserNetworkConnect(t *testing.T) {
 }
 
 func TestUserNetworkRestart(t *testing.T) {
+	parallel(t)
 	net := newNetwork(t)
 	name := newName(t)
-	cmd := exec.Command(runwhp(t), append([]string{"run", "-d", "--name", name, "--network", net, "--restart", "always"},
+	cmd := command(t, append([]string{"run", "-d", "--name", name, "--network", net, "--restart", "always"},
 		withFlags([]string{alpine, "sh", "-c", bootCounter("timeout 2 nc -lk -p 5000 -e sh -c 'cat /boots'")})...)...)
-	cmd.Env = append(os.Environ(), "RUNWHP_RESTART_BACKOFF=10ms")
+	cmd.Env = append(cmd.Env, "RUNWHP_RESTART_BACKOFF=10ms")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("run -d: %v %s", err, out)
 	}
@@ -306,6 +312,7 @@ func TestUserNetworkRestart(t *testing.T) {
 }
 
 func TestUserNetworkPeerKilled(t *testing.T) {
+	parallel(t)
 	net := newNetwork(t)
 	victim := serving(t, "--network", net)
 	waitServing(t, net, victim)
@@ -327,6 +334,7 @@ func TestUserNetworkPeerKilled(t *testing.T) {
 }
 
 func TestUserNetworkPublish(t *testing.T) {
+	parallel(t)
 	a, b := newNetwork(t), newNetwork(t)
 	port := freePort(t)
 	name := serving(t, "--network", a, "--network", b, "-p", "127.0.0.1:"+port+":5000")
@@ -363,6 +371,7 @@ func TestUserNetworkThroughput(t *testing.T) {
 }
 
 func TestUserNetworkSystemPrune(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	s.ok("network", "create", "kept")
 	s.ok("network", "create", "gone")

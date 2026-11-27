@@ -14,6 +14,7 @@ import (
 // TestLabels covers labels on containers, from the image, --label-file and
 // --label, list's filters, and labels on networks, volumes and commits.
 func TestLabels(t *testing.T) {
+	parallel(t)
 	s := newOwnStore(t)
 	base := mirrored(t, alpine)
 	dir := t.TempDir()

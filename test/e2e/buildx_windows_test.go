@@ -21,7 +21,7 @@ func buildxAPI(t *testing.T) *dockerAPI {
 		runwhp(t)
 		t.Skip("set RUNWHP_E2E_BUILDX to buildx's docker-buildx.exe to run BuildKit's tests")
 	}
-	t.Setenv("RUNWHP_BUILDKIT_IMAGE", mirrored(t, "moby/buildkit:v0.35.0"))
+	setEnv(t, "RUNWHP_BUILDKIT_IMAGE", mirrored(t, "moby/buildkit:v0.35.0"))
 	d := newDockerAPI(t)
 	installPlugin(t, d, plugin, "docker-buildx.exe")
 	d.image(alpine)
@@ -50,6 +50,7 @@ func installPlugin(t *testing.T, d *dockerAPI, plugin, name string) {
 // a push and its registry cache, two builds at once, and the cache kept
 // across a restart of the server.
 func TestBuildx(t *testing.T) {
+	parallel(t)
 	d := buildxAPI(t)
 	if ls := d.dok("buildx", "ls"); !strings.Contains(ls, "docker") || !strings.Contains(ls, "v0.35.0") {
 		t.Errorf("buildx ls does not show the docker driver with BuildKit v0.35.0:\n%s", ls)
@@ -221,6 +222,7 @@ CMD ["sh", "-c", "cat /token-seen /cache-log /tool-seen"]
 // bake: a service built FROM another's image, which only runwhp's store
 // has, then brought up.
 func TestBuildxCompose(t *testing.T) {
+	parallel(t)
 	plugin := os.Getenv("RUNWHP_E2E_COMPOSE_PLUGIN")
 	if plugin == "" {
 		runwhp(t)
@@ -270,6 +272,7 @@ services:
 // docker-container driver: a privileged moby/buildkit container that buildx
 // reaches with docker exec, and loads its images through docker load.
 func TestBuildxContainerDriver(t *testing.T) {
+	parallel(t)
 	d := buildxAPI(t)
 	img := mirrored(t, "moby/buildkit:v0.35.0")
 	d.dok("buildx", "create", "--name", "bxdc", "--driver", "docker-container", "--driver-opt", "image="+img)
@@ -284,6 +287,7 @@ func TestBuildxContainerDriver(t *testing.T) {
 // TestDockerInDocker runs docker:dind privileged, as Docker's own image
 // for Docker in Docker: its daemon runs containers and builds.
 func TestDockerInDocker(t *testing.T) {
+	parallel(t)
 	d := newDockerAPI(t)
 	dind := d.image("docker:29-dind")
 	d.image(alpine)

@@ -28,6 +28,7 @@ func lastLine(t *testing.T, name string) string {
 }
 
 func TestPause(t *testing.T) {
+	parallel(t)
 	name := counter(t)
 	expect(t, cli(t, "pause", name), name+"\n", 0)
 	if s := stateOf(t, name); s.Status != "paused" {
@@ -77,6 +78,7 @@ func TestPause(t *testing.T) {
 // TestPauseSignals checks that kill and stop reach a paused container, as
 // they do Docker's: it is thawed once the signal is sent.
 func TestPauseSignals(t *testing.T) {
+	parallel(t)
 	name := counter(t)
 	expect(t, cli(t, "pause", name), name+"\n", 0)
 	start := time.Now()
@@ -113,6 +115,7 @@ func TestPauseSignals(t *testing.T) {
 }
 
 func TestPauseCreated(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	created(t, "--name", name, alpine, "true")
 	if r := cli(t, "pause", name); r.code == 0 || !strings.Contains(r.stderr, "is not running") {

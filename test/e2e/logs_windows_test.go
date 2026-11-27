@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -69,10 +68,11 @@ func checkNumbers(t *testing.T, what, s string, last int) int {
 // rotated at 1 MiB with three files kept: logs prints the last of them in
 // order, and logs -f, started before, every one.
 func TestLogRotation(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	id := created(t, "--name", name, "--log-opt", "max-size=1m", "--log-opt", "max-file=3", alpine, "sh", "-c",
 		`for i in $(seq 0 99); do seq $((i*10000+1)) $((i*10000+10000)); sleep 0.05; done`)
-	follow := exec.Command(runwhp(t), "logs", "-f", name)
+	follow := command(t, "logs", "-f", name)
 	var followed, followErr bytes.Buffer
 	follow.Stdout, follow.Stderr = &followed, &followErr
 	if err := follow.Start(); err != nil {
@@ -141,6 +141,7 @@ func TestLogRotation(t *testing.T) {
 // TestLogDefaultRotation checks that a log rotates at 20 MB without being
 // asked to.
 func TestLogDefaultRotation(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	detached(t, "--name", name, alpine, "sh", "-c", "yes 0123456789abcdef0123456789abcdef | head -c 31457280")
 	s := waitStatus(t, name, "stopped", time.Minute)
@@ -161,6 +162,7 @@ func v1Frame(stream byte, s string) []byte {
 // TestLogVersion1 checks that a log written by an older runwhp still
 // prints, and that starting the container again keeps it, before the new.
 func TestLogVersion1(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	detached(t, "--name", name, alpine, "sh", "-c", "echo run $(date +%s%N)")
 	s := waitStatus(t, name, "stopped", time.Minute)
@@ -191,6 +193,7 @@ func TestLogVersion1(t *testing.T) {
 // log of what it printed, and that one made with --log-driver none keeps
 // none.
 func TestForegroundLog(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	r := keep(t, "--name", name, alpine, "sh", "-c", "echo out; echo err >&2; printf partial")
 	if r.code != 0 || r.stdout != "out\npartial" || r.stderr != "err\n" {
@@ -225,6 +228,7 @@ func TestForegroundLog(t *testing.T) {
 // TestLogTimestamps checks logs -t, --since and --until on a container
 // that writes a line every 300 ms.
 func TestLogTimestamps(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	before := time.Now()
 	detached(t, "--name", name, alpine, "sh", "-c", "for i in 1 2 3 4 5; do echo line $i; sleep 0.3; done; echo err >&2")
@@ -270,6 +274,7 @@ func TestLogTimestamps(t *testing.T) {
 
 // TestLogTail checks logs -n.
 func TestLogTail(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	detached(t, "--name", name, alpine, "sh", "-c", "echo one; echo two; sleep 0.3; echo e >&2; sleep 0.3; printf three")
 	waitStatus(t, name, "stopped", time.Minute)
@@ -295,6 +300,7 @@ func TestLogTail(t *testing.T) {
 
 // TestLogFollowTail checks logs -f -n 0, which prints only what comes.
 func TestLogFollowTail(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	detached(t, "--name", name, alpine, "sh", "-c", "echo early; sleep 1.5; echo late")
 	waitLog(t, name, "early")

@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -32,6 +31,7 @@ func execIn(t *testing.T, args ...string) result {
 }
 
 func TestExec(t *testing.T) {
+	parallel(t)
 	name := running(t, "-e", "FROM_RUN=yes", "-w", "/srv")
 	begin := time.Now()
 	r := execIn(t, name, "sh", "-c", "echo out; echo err >&2; exit 3")
@@ -62,6 +62,7 @@ func TestExec(t *testing.T) {
 }
 
 func TestExecNotRunning(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	created(t, "--name", name, alpine, "true")
 	if r := execIn(t, name, "true"); r.code != 125 || !strings.Contains(r.stderr, "not running") {
@@ -75,11 +76,12 @@ func TestExecNotRunning(t *testing.T) {
 }
 
 func TestExecStdin(t *testing.T) {
+	parallel(t)
 	name := running(t)
 	data := make([]byte, 10<<20)
 	rand.Read(data)
 	sum := sha256.Sum256(data)
-	cmd := exec.Command(runwhp(t), "exec", "-i", name, "sh", "-c", "sha256sum | cut -d' ' -f1")
+	cmd := command(t, "exec", "-i", name, "sh", "-c", "sha256sum | cut -d' ' -f1")
 	cmd.Stdin = bytes.NewReader(data)
 	out, err := cmd.Output()
 	if err != nil || strings.TrimSpace(string(out)) != hex.EncodeToString(sum[:]) {
@@ -106,6 +108,7 @@ func TestExecDetach(t *testing.T) {
 
 // TestExecConcurrent runs four commands at once, each streaming 20 MB.
 func TestExecConcurrent(t *testing.T) {
+	parallel(t)
 	name := running(t)
 	h := sha256.New()
 	h.Write(make([]byte, 20<<20))
@@ -115,7 +118,7 @@ func TestExecConcurrent(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			cmd := exec.Command(runwhp(t), "exec", name, "head", "-c", fmt.Sprint(20<<20), "/dev/zero")
+			cmd := command(t, "exec", name, "head", "-c", fmt.Sprint(20<<20), "/dev/zero")
 			out, err := cmd.Output()
 			sum := sha256.Sum256(out)
 			if err != nil || hex.EncodeToString(sum[:]) != want {
@@ -129,6 +132,7 @@ func TestExecConcurrent(t *testing.T) {
 // TestExecEndsWithContainer checks that a command exec started is killed
 // when the container's process exits.
 func TestExecEndsWithContainer(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	detached(t, "--name", name, alpine, "sh", "-c", "echo ready; sleep 1")
 	waitLog(t, name, "ready")
@@ -144,10 +148,11 @@ func TestExecEndsWithContainer(t *testing.T) {
 
 // TestExecForeground runs a command in a container a foreground run runs.
 func TestExecForeground(t *testing.T) {
+	parallel(t)
 	name := newName(t)
 	var stdout syncBuffer
 	var stderr bytes.Buffer
-	cmd := exec.Command(runwhp(t), keepArgs("--name", name, alpine, "sh", "-c", "echo ready; while [ ! -f /stop ]; do sleep 0.1; done; echo stopped")...)
+	cmd := command(t, keepArgs("--name", name, alpine, "sh", "-c", "echo ready; while [ ! -f /stop ]; do sleep 0.1; done; echo stopped")...)
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -167,6 +172,7 @@ func TestExecForeground(t *testing.T) {
 // TestExecInterrupt sends Ctrl+Break to runwhp exec, which passes it on
 // to the command as SIGINT.
 func TestExecInterrupt(t *testing.T) {
+	parallel(t)
 	name := running(t)
 	var stdout syncBuffer
 	var stderr bytes.Buffer
