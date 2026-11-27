@@ -256,12 +256,8 @@ func TestDevcontainerCLI(t *testing.T) {
 	}
 	d := clientsAPI(t)
 	cases := map[string]map[string]string{
-		"image": {".devcontainer/devcontainer.json": `{"image": "alpine:3.20"}`},
-		"feature": {
-			".devcontainer/devcontainer.json": `{"build": {"dockerfile": "Dockerfile"},
-  "features": {"ghcr.io/devcontainers/features/common-utils:2": {"installZsh": false, "installOhMyZsh": false, "upgradePackages": false, "username": "none"}}}`,
-			".devcontainer/Dockerfile": "FROM alpine:3.20\nRUN echo from-dockerfile > /etc/marker\n",
-		},
+		"image":   {".devcontainer/devcontainer.json": `{"image": "alpine:3.20"}`},
+		"feature": devcontainerFeature,
 	}
 	if plugin := os.Getenv("RUNWHP_E2E_COMPOSE_PLUGIN"); plugin != "" {
 		installComposePlugin(t, d, plugin)
@@ -283,48 +279,79 @@ func TestDevcontainerCLI(t *testing.T) {
   "features": {"ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}}}`,
 	}
 	for name, files := range cases {
-		t.Run(name, func(t *testing.T) {
-			ws := buildDir(t, files)
-			t.Cleanup(func() {
-				for _, id := range strings.Fields(d.docker1("ps", "-aq", "--filter", "label=devcontainer.local_folder="+ws).stdout) {
-					d.docker1("rm", "-f", id)
-				}
-				d.run(ws, nil, d.docker, "compose", "-p", strings.ToLower(filepath.Base(ws))+"_devcontainer", "down", "-t", "0")
-			})
-			up := d.run(ws, nil, node, js, "up", "--workspace-folder", ws, "--docker-path", d.docker, "--log-format", "json")
-			outcome := lastJSONLine(up.stdout)
-			if up.code != 0 || outcome["outcome"] != "success" {
-				t.Fatalf("devcontainer up: exit %d, %v\n%s\n%s", up.code, outcome, lastLines(up.stdout, 30), up.stderr)
-			}
-			folder, _ := outcome["remoteWorkspaceFolder"].(string)
-			write := "echo from-the-container > " + folder + "/written"
-			if name == "docker-outside-of-docker" {
-				// The workspace's files are the container's user's, root's,
-				// and not the remote user's, vscode's: see gaps.md.
-				write = "sudo sh -c '" + write + "'"
-			}
-			ex := d.run(ws, nil, node, js, "exec", "--workspace-folder", ws, "--docker-path", d.docker,
-				"sh", "-c", "uname -s; cat /etc/marker 2>/dev/null; "+write)
-			if ex.code != 0 || !strings.Contains(ex.stdout, "Linux") {
-				t.Errorf("devcontainer exec: %+v", ex)
-			}
-			if name == "feature" && !strings.Contains(ex.stdout, "from-dockerfile") {
-				t.Errorf("the Dockerfile's image was not used: %q", ex.stdout)
-			}
-			if b, err := os.ReadFile(filepath.Join(ws, "written")); err != nil || string(b) != "from-the-container\n" {
-				t.Errorf("the workspace as the host sees it: %q, %v", b, err)
-			}
-			if name == "docker-outside-of-docker" {
-				ex := d.run(ws, nil, node, js, "exec", "--workspace-folder", ws, "--docker-path", d.docker,
-					"sh", "-c", "id -un; docker ps --format '{{.Label \"devcontainer.local_folder\"}}'; docker run --rm "+alpine+" echo nested")
-				// The label has the folder as Dev Containers spells it, its
-				// drive letter in lower case.
-				if ex.code != 0 || !strings.Contains(ex.stdout, "vscode\n") || !strings.Contains(strings.ToLower(ex.stdout), strings.ToLower(ws)) ||
-					!strings.Contains(ex.stdout, "nested\n") {
-					t.Errorf("docker in the dev container: %+v", ex)
-				}
-			}
-		})
+		t.Run(name, func(t *testing.T) { devcontainerCase(t, d, node, js, name, files) })
+	}
+}
+
+// devcontainerFeature is a dev container from a Dockerfile with a feature,
+// which Dev Containers builds on the Dockerfile's image.
+var devcontainerFeature = map[string]string{
+	".devcontainer/devcontainer.json": `{"build": {"dockerfile": "Dockerfile"},
+  "features": {"ghcr.io/devcontainers/features/common-utils:2": {"installZsh": false, "installOhMyZsh": false, "upgradePackages": false, "username": "none"}}}`,
+	".devcontainer/Dockerfile": "FROM alpine:3.20\nRUN echo from-dockerfile > /etc/marker\n",
+}
+
+// TestDevcontainerBuildx brings a dev container up from a Dockerfile with
+// a feature with buildx installed, as Docker Desktop installs it: the Dev
+// Containers CLI then builds through BuildKit, the feature's stage FROM
+// the image it built first, which only runwhp's store has.
+func TestDevcontainerBuildx(t *testing.T) {
+	js := os.Getenv("RUNWHP_E2E_DEVCONTAINER")
+	if js == "" {
+		runwhp(t)
+		t.Skip("set RUNWHP_E2E_DEVCONTAINER to the Dev Containers CLI's devcontainer.js")
+	}
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("no node")
+	}
+	d := buildxAPI(t)
+	devcontainerCase(t, d, node, js, "feature", devcontainerFeature)
+}
+
+// devcontainerCase brings a dev container up from files, execs in it, and
+// checks what it sees.
+func devcontainerCase(t *testing.T, d *dockerAPI, node, js, name string, files map[string]string) {
+	t.Helper()
+	ws := buildDir(t, files)
+	t.Cleanup(func() {
+		for _, id := range strings.Fields(d.docker1("ps", "-aq", "--filter", "label=devcontainer.local_folder="+ws).stdout) {
+			d.docker1("rm", "-f", id)
+		}
+		d.run(ws, nil, d.docker, "compose", "-p", strings.ToLower(filepath.Base(ws))+"_devcontainer", "down", "-t", "0")
+	})
+	up := d.run(ws, nil, node, js, "up", "--workspace-folder", ws, "--docker-path", d.docker, "--log-format", "json")
+	outcome := lastJSONLine(up.stdout)
+	if up.code != 0 || outcome["outcome"] != "success" {
+		t.Fatalf("devcontainer up: exit %d, %v\n%s\n%s", up.code, outcome, lastLines(up.stdout, 30), up.stderr)
+	}
+	folder, _ := outcome["remoteWorkspaceFolder"].(string)
+	write := "echo from-the-container > " + folder + "/written"
+	if name == "docker-outside-of-docker" {
+		// The workspace's files are the container's user's, root's,
+		// and not the remote user's, vscode's: see gaps.md.
+		write = "sudo sh -c '" + write + "'"
+	}
+	ex := d.run(ws, nil, node, js, "exec", "--workspace-folder", ws, "--docker-path", d.docker,
+		"sh", "-c", "uname -s; cat /etc/marker 2>/dev/null; "+write)
+	if ex.code != 0 || !strings.Contains(ex.stdout, "Linux") {
+		t.Errorf("devcontainer exec: %+v", ex)
+	}
+	if name == "feature" && !strings.Contains(ex.stdout, "from-dockerfile") {
+		t.Errorf("the Dockerfile's image was not used: %q", ex.stdout)
+	}
+	if b, err := os.ReadFile(filepath.Join(ws, "written")); err != nil || string(b) != "from-the-container\n" {
+		t.Errorf("the workspace as the host sees it: %q, %v", b, err)
+	}
+	if name == "docker-outside-of-docker" {
+		ex := d.run(ws, nil, node, js, "exec", "--workspace-folder", ws, "--docker-path", d.docker,
+			"sh", "-c", "id -un; docker ps --format '{{.Label \"devcontainer.local_folder\"}}'; docker run --rm "+alpine+" echo nested")
+		// The label has the folder as Dev Containers spells it, its
+		// drive letter in lower case.
+		if ex.code != 0 || !strings.Contains(ex.stdout, "vscode\n") || !strings.Contains(strings.ToLower(ex.stdout), strings.ToLower(ws)) ||
+			!strings.Contains(ex.stdout, "nested\n") {
+			t.Errorf("docker in the dev container: %+v", ex)
+		}
 	}
 }
 
