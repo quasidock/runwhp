@@ -121,7 +121,7 @@ func TestOutputHubSlow(t *testing.T) {
 	go cs.write()
 	go cf.write()
 	chunk := bytes.Repeat([]byte("x"), 16<<10)
-	total := 64 << 20
+	total := 16 * attachBacklog
 	for range total / len(chunk) {
 		out.Write(chunk)
 		cs.mu.Lock()

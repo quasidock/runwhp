@@ -17,6 +17,10 @@ import (
 	"github.com/quasidock/runwhp/internal/ext4"
 )
 
+// layerHeldWait is how long openLayer waits for a dead runwhp to close a
+// writable layer; tests shorten it.
+var layerHeldWait = 2 * time.Second
+
 // ScratchPath is where a new scratch disk goes: the store's scratch
 // directory, which sweepStore empties of disks left by runs the machine
 // stopped under.
@@ -50,7 +54,7 @@ func openLayer(path string, size int64, scratch bool) (*disk.File, error) {
 	// The caller holds the container's lock, so whoever else has the layer
 	// open is a runwhp that died and is still closing its handles, which
 	// a killed process closes in no set order.
-	for deadline := time.Now().Add(2 * time.Second); errors.Is(err, disk.ErrInUse) && time.Now().Before(deadline); {
+	for deadline := time.Now().Add(layerHeldWait); errors.Is(err, disk.ErrInUse) && time.Now().Before(deadline); {
 		time.Sleep(50 * time.Millisecond)
 		f, err = disk.Open(path, disk.Exclusive)
 	}

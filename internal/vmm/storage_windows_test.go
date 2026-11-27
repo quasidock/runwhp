@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/quasidock/runwhp/internal/disk"
 	"github.com/quasidock/runwhp/internal/ext4"
@@ -35,6 +36,8 @@ func TestOpenLayerScratch(t *testing.T) {
 }
 
 func TestOpenLayerKept(t *testing.T) {
+	defer func(d time.Duration) { layerHeldWait = d }(layerHeldWait)
+	layerHeldWait = 100 * time.Millisecond
 	path := filepath.Join(t.TempDir(), "rw.ext4")
 	f, err := openLayer(path, 2<<30, false)
 	if err != nil {
