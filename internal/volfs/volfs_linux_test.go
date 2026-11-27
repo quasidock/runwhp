@@ -193,7 +193,7 @@ func TestLocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	whole := fuse.Lock{Start: 0, End: ^uint64(0), Type: fuse.LockWrite}
+	whole := fuse.Lock{Start: 0, End: fuse.LockToEnd, Type: fuse.LockWrite}
 	if err := a.Setlk(root, e.Node, fha, 1, whole, 0, false); err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func TestLocks(t *testing.T) {
 		t.Fatalf("second session's lock: %v, want EAGAIN", err)
 	}
 	got, err := b.Getlk(root, eb.Node, fhb, 1, whole, 0)
-	if err != nil || got.Type != fuse.LockWrite {
+	if err != nil || got.Type != fuse.LockWrite || got.End != fuse.LockToEnd {
 		t.Fatalf("getlk: %+v %v", got, err)
 	}
 	// A range that does not overlap is free.

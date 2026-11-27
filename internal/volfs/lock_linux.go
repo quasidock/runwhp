@@ -49,9 +49,11 @@ func (s *Session) ownerFd(n *node, owner uint64, create bool) (int, error) {
 	return fd, nil
 }
 
+// flockOf is lk as fcntl takes it, which has a length, 0 for the rest of
+// the file, where FUSE has the last byte.
 func flockOf(lk fuse.Lock) unix.Flock_t {
-	fl := unix.Flock_t{Type: int16(lk.Type), Whence: 0, Start: int64(lk.Start)}
-	if lk.End != ^uint64(0) && lk.End >= lk.Start {
+	fl := unix.Flock_t{Type: int16(lk.Type), Whence: 0, Start: int64(min(lk.Start, fuse.LockToEnd))}
+	if lk.End < fuse.LockToEnd && lk.End >= lk.Start {
 		fl.Len = int64(lk.End - lk.Start + 1)
 	}
 	return fl
@@ -73,7 +75,7 @@ func (s *Session) Getlk(c fuse.Context, id, fh, owner uint64, lk fuse.Lock, flag
 	if fl.Type == unix.F_UNLCK {
 		return fuse.Lock{Type: fuse.LockUnlock}, nil
 	}
-	got := fuse.Lock{Start: uint64(fl.Start), End: ^uint64(0), Type: uint32(fl.Type)}
+	got := fuse.Lock{Start: uint64(fl.Start), End: fuse.LockToEnd, Type: uint32(fl.Type)}
 	if fl.Len > 0 {
 		got.End = uint64(fl.Start + fl.Len - 1)
 	}

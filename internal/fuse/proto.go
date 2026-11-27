@@ -178,13 +178,13 @@ const (
 // the kernel sends as a lock on the whole file owned by the open file.
 const LockFlock = 1 << 0
 
-// releaseFlockUnlock, in RELEASE's flags, says the open file held flock(2)
-// locks, which go with it.
-const releaseFlockUnlock = 1 << 0
+// LockToEnd is a Lock's End when the lock runs to the end of the file,
+// however far it grows: the kernel's OFFSET_MAX.
+const LockToEnd = 1<<63 - 1
 
 // Lock is a byte-range lock, as struct fuse_file_lock carries it: End is
-// the last byte locked, and ^uint64(0) means to the end of the file. PID is
-// the locking process's, in the guest that asked.
+// the last byte locked, LockToEnd for the rest of the file. PID is the
+// locking process's, in the guest that asked.
 type Lock struct {
 	Start, End uint64
 	Type       uint32

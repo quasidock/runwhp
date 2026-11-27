@@ -33,7 +33,7 @@ func (f *lockFS) Getlk(c Context, node, fh, owner uint64, lk Lock, flags uint32)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if h, ok := f.holder[node]; ok && h != owner {
-		return Lock{Start: 0, End: ^uint64(0), Type: LockWrite, PID: 0}, nil
+		return Lock{Start: 0, End: uint64(LockToEnd), Type: LockWrite, PID: 0}, nil
 	}
 	return Lock{Type: LockUnlock}, nil
 }
@@ -119,7 +119,7 @@ func TestLocks(t *testing.T) {
 	fs := newLockFS()
 	s := &Server{FS: fs}
 	lk := func(op uint32, owner uint64, typ uint32) []byte {
-		return request(op, 5, uint64(7), owner, uint64(0), ^uint64(0), typ, uint32(77), uint32(0), uint32(0))
+		return request(op, 5, uint64(7), owner, uint64(0), uint64(LockToEnd), typ, uint32(77), uint32(0), uint32(0))
 	}
 	if errno, _, _ := serve(t, s, lk(opSetlk, 1, LockWrite)); errno != 0 {
 		t.Fatalf("setlk: %v", errno)
@@ -128,7 +128,7 @@ func TestLocks(t *testing.T) {
 		t.Fatalf("setlk of a held lock: %v, want EAGAIN", errno)
 	}
 	errno, out, _ := serve(t, s, lk(opGetlk, 2, LockWrite))
-	if errno != 0 || len(out) != 24 || le.Uint32(out[16:]) != LockWrite || le.Uint64(out[8:]) != ^uint64(0) {
+	if errno != 0 || len(out) != 24 || le.Uint32(out[16:]) != LockWrite || le.Uint64(out[8:]) != uint64(LockToEnd) {
 		t.Fatalf("getlk: %v %x", errno, out)
 	}
 	// FLUSH names its owner, whose locks go.
@@ -255,7 +255,7 @@ func TestForwarderWaiters(t *testing.T) {
 	fs := newLockFS()
 	f, _, _ := forward(t, fs, fs.abort)
 	lk := func(op uint32, unique, owner uint64, typ uint32) []byte {
-		return withUnique(request(op, 5, uint64(7), owner, uint64(0), ^uint64(0), typ, uint32(77), uint32(0), uint32(0)), unique)
+		return withUnique(request(op, 5, uint64(7), owner, uint64(0), uint64(LockToEnd), typ, uint32(77), uint32(0), uint32(0)), unique)
 	}
 	if errno, _ := call(t, f, lk(opSetlk, 1, 1, LockWrite)); errno != 0 {
 		t.Fatalf("setlk: %v", errno)
@@ -296,7 +296,7 @@ func TestForwarderFails(t *testing.T) {
 	fs := newLockFS()
 	f, server, served := forward(t, fs, fs.abort)
 	lk := func(op uint32, unique, owner uint64) []byte {
-		return withUnique(request(op, 5, uint64(7), owner, uint64(0), ^uint64(0), uint32(LockWrite), uint32(77), uint32(0), uint32(0)), unique)
+		return withUnique(request(op, 5, uint64(7), owner, uint64(0), uint64(LockToEnd), uint32(LockWrite), uint32(77), uint32(0), uint32(0)), unique)
 	}
 	call(t, f, lk(opSetlk, 1, 1))
 	reply := [][]byte{make([]byte, 64)}
