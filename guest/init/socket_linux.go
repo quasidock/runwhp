@@ -101,18 +101,9 @@ func (f *socketForwarder) forward(c *net.UnixConn) {
 
 // connect opens a connection to the host for the mount's pipe.
 func (f *socketForwarder) connect() (*vsockConn, error) {
-	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	fd, err := f.dialHost()
 	if err != nil {
-		f.warned.Do(func() { logf("socket %s cannot reach the host: vsock: %v", f.target, err) })
 		return nil, err
-	}
-	// A buffer larger than vsock's 256 KiB lets the host send on while
-	// init passes what came before to the client.
-	unix.SetsockoptUint64(fd, unix.AF_VSOCK, unix.SO_VM_SOCKETS_BUFFER_MAX_SIZE, vsockBuffer)
-	unix.SetsockoptUint64(fd, unix.AF_VSOCK, unix.SO_VM_SOCKETS_BUFFER_SIZE, vsockBuffer)
-	if err := unix.Connect(fd, &unix.SockaddrVM{CID: unix.VMADDR_CID_HOST, Port: guestspec.PipePort}); err != nil {
-		unix.Close(fd)
-		return nil, fmt.Errorf("connecting to the host: %w", err)
 	}
 	if err := unix.SetNonblock(fd, true); err != nil {
 		unix.Close(fd)
@@ -134,6 +125,35 @@ func (f *socketForwarder) connect() (*vsockConn, error) {
 		return nil, fmt.Errorf("the host could not connect to %s", f.pipe)
 	}
 	return v, nil
+}
+
+// connectTries bounds how often dialHost tries again after a signal.
+const connectTries = 10
+
+// dialHost connects a vsock socket to the host's pipe port. A signal, as
+// Go's runtime sends its threads to preempt them, interrupts a connect
+// still waiting for the host, and vsock then drops the connection rather
+// than going on with it, so dialHost tries again on a socket of its own.
+func (f *socketForwarder) dialHost() (int, error) {
+	for try := 1; ; try++ {
+		fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+		if err != nil {
+			f.warned.Do(func() { logf("socket %s cannot reach the host: vsock: %v", f.target, err) })
+			return -1, err
+		}
+		// A buffer larger than vsock's 256 KiB lets the host send on
+		// while init passes what came before to the client.
+		unix.SetsockoptUint64(fd, unix.AF_VSOCK, unix.SO_VM_SOCKETS_BUFFER_MAX_SIZE, vsockBuffer)
+		unix.SetsockoptUint64(fd, unix.AF_VSOCK, unix.SO_VM_SOCKETS_BUFFER_SIZE, vsockBuffer)
+		err = unix.Connect(fd, &unix.SockaddrVM{CID: unix.VMADDR_CID_HOST, Port: guestspec.PipePort})
+		if err == nil {
+			return fd, nil
+		}
+		unix.Close(fd)
+		if !errors.Is(err, unix.EINTR) || try == connectTries {
+			return -1, fmt.Errorf("connecting to the host: %w", err)
+		}
+	}
 }
 
 // vsockConn is a connected vsock socket, with a half-close.
