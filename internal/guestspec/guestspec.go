@@ -115,6 +115,12 @@ type Spec struct {
 	// layer's changes: a build step's, as BuildKit leaves a RUN step's
 	// mounts out of its layer.
 	HideMountPoints bool `json:"hideMountPoints,omitempty"`
+	// Privileged gives the container what Docker's --privileged gives one
+	// that a guest of its own can: its cgroup, read-write, with the
+	// controllers enabled for it to delegate, a read-write /sys, and the
+	// devices of FUSE, TUN and the kernel log. CAP_SYS_BOOT stays dropped:
+	// a reboot would end the VM.
+	Privileged bool `json:"privileged,omitempty"`
 	// ClockSync says the host sends its time as init opens the control
 	// port: init sets the clock from it before it starts the process, which
 	// would otherwise see the CMOS stub's whole seconds.

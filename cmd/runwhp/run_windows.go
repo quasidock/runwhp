@@ -67,6 +67,7 @@ type runOptions struct {
 	labelFiles  listFlag
 	stopSignal  string
 	stopTimeout string
+	privileged  bool
 
 	healthCmd, healthInterval, healthTimeout              string
 	healthStartPeriod, healthStartInterval, healthRetries string
@@ -130,6 +131,7 @@ func runFlags(o *runOptions) *flag.FlagSet {
 	fs.Var(&o.labelFiles, "label-file", "")
 	fs.StringVar(&o.stopSignal, "stop-signal", "", "")
 	fs.StringVar(&o.stopTimeout, "stop-timeout", "", "")
+	fs.BoolVar(&o.privileged, "privileged", false, "")
 	fs.StringVar(&o.healthCmd, "health-cmd", "", "")
 	fs.StringVar(&o.healthInterval, "health-interval", "", "")
 	fs.StringVar(&o.healthTimeout, "health-timeout", "", "")
@@ -164,6 +166,8 @@ Flags:
       --label-file FILE  read labels from a file of KEY=VALUE lines (repeatable)
       --stop-signal SIG  the signal stop sends first (default: the image's, or SIGTERM)
       --stop-timeout N   seconds stop waits before SIGKILL, unless told (default 10)
+      --privileged       give the container its cgroup read-write, with controllers to
+                         delegate, /sys read-write, and the FUSE, TUN and kmsg devices
       --health-cmd CMD   check the container's health by running CMD in it with /bin/sh,
                          over the image's HEALTHCHECK; healthy if it exits 0
       --health-interval D  time between checks (default 30s); and --health-timeout D
@@ -371,6 +375,7 @@ type runSpec struct {
 	stopSignal  string            // over the image's
 	stopTimeout *int
 	health      healthOverrides
+	privileged  bool
 
 	// Development flags: the kernel, init and kernel modules to use, and
 	// ext4 layers instead of an image.
@@ -386,7 +391,7 @@ type runSpec struct {
 func parseRunOptions(o *runOptions, entrypointSet bool, args []string) (runSpec, error) {
 	s := runSpec{
 		env: o.env, workdir: o.workdir, user: o.user, hostname: o.hostname,
-		interactive: o.interactive, tty: o.tty, rm: o.rm,
+		interactive: o.interactive, tty: o.tty, rm: o.rm, privileged: o.privileged,
 		kernel: o.kernel, init: o.init, layers: o.layers, modules: o.modules, debug: o.debug,
 		entrypointSet: entrypointSet,
 		lookupEnv:     os.LookupEnv,
@@ -531,6 +536,7 @@ func resolveSpec(ctx context.Context, root string, s *runSpec, policy image.Poli
 		cfg.StopSignal = s.stopSignal
 	}
 	cfg.StopTimeout = s.stopTimeout
+	cfg.Privileged = s.privileged
 	cfg.Args, cfg.Env, cfg.Cwd, cfg.User = process.Args, process.Env, process.Cwd, process.User
 	cfg.Entrypoint, cfg.Cmd = process.Entrypoint, process.Cmd
 

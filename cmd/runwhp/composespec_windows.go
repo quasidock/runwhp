@@ -68,6 +68,7 @@ func specOf(c compose.Container, labels map[string]string) (runSpec, error) {
 		return s, err
 	}
 	s.stopTimeout = c.StopTimeout
+	s.privileged = c.Privileged
 	if h := c.Health; h != nil {
 		s.health = healthOverrides{test: h.Test, interval: h.Interval, timeout: h.Timeout, startPeriod: h.StartPeriod,
 			startInterval: h.StartInterval, retries: h.Retries, disable: h.Disable}

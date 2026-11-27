@@ -120,6 +120,9 @@ type Config struct {
 	// HideMountPoints keeps the mount points of Mounts out of the writable
 	// layer, as a build step's are.
 	HideMountPoints bool `json:"hideMountPoints,omitempty"`
+	// Privileged is --privileged: the container's cgroup read-write, with
+	// controllers to delegate, /sys read-write, and more devices.
+	Privileged bool `json:"privileged,omitempty"`
 
 	// AutoRemove removes the container when it stops, as --rm asks.
 	AutoRemove bool `json:"autoRemove,omitempty"`

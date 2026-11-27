@@ -185,6 +185,7 @@ A container's files:
 | `--no-healthcheck` | off | Run no healthcheck, though the image has one |
 | `--stop-signal` | the image's, else SIGTERM | The signal `stop` sends first |
 | `--stop-timeout` | `10` | Seconds `stop` and `restart` wait before SIGKILL, unless `-t` says |
+| `--privileged` | off | What Docker's `--privileged` gives that a guest of the container's own can: its cgroup at `/sys/fs/cgroup` read-write, with the cpu, cpuset, io, memory and pids controllers to delegate, as docker:dind and BuildKit use them; `/sys` read-write; and `/dev/fuse`, `/dev/net/tun` and `/dev/kmsg`. Not the guest's other devices, which are runwhp's, nor CAP_SYS_BOOT: a reboot would end the VM. See **Cgroups** under [Containers](#containers) |
 | `-i`, `--interactive` | off | Pass stdin to the container. Without it, the container reads `/dev/null`. In the background, without a file or pipe for stdin, the container's input is open to `attach` |
 | `-t`, `--tty` | off | Run the container on a pseudo-terminal of the console's size, with stderr merged into stdout. With `-i`, stdin must be a console, and keys go to the container raw. `-it` works as a shorthand |
 | `--entrypoint` | image's | Replace the entrypoint; `""` removes it. Also drops the image's command, as in Docker |
@@ -289,6 +290,16 @@ without `-f` are refused, with Docker's words, and `list` shows
 sent, so that the signal is taken, as `docker kill` does, and so `stop`,
 `restart` and `delete -f` work as on a running one. A process that leaves
 the cgroup, which a container's root can do, is not paused.
+
+**Cgroups.** The container sees that cgroup at `/sys/fs/cgroup`, as the
+root of a cgroup namespace of its own, as Docker's containers see theirs:
+read-only, or, with `--privileged`, read-write, with the cpu, cpuset, io,
+memory and pids controllers enabled for it to delegate. Tools that run
+containers in a container, docker:dind and BuildKit, then make cgroups of
+their own below it, as on Docker; `pause` freezes those too. Once a
+container has moved its processes into cgroups below its own, as those
+tools do, an `exec`'s process starts in the container process's, as runc
+starts one.
 
 **Who runs a container.** A container has a VM only while a runwhp process
 runs it, holding the record's `lock` file exclusively; whether that file is
@@ -1179,9 +1190,9 @@ longer has are warned of, and `--remove-orphans` removes them.
 
 | | |
 | --- | --- |
-| Taken as `run` takes it | `image`, `build`, `command`, `entrypoint`, `environment`, `env_file`, `ports` (TCP, on 127.0.0.1 unless an address is given, as `-p`, on a free host port without one), `expose`, `extra_hosts`, `networks` with `aliases` and `ipv4_address`, `links` (as aliases), `volumes` (bind, named, anonymous, tmpfs; `consistency: delegated` for [Delegated mounts](#delegated-mounts)), `tmpfs`, `secrets` and `configs` from files (bound read-only), `use_api_socket` (Docker's socket, reaching the store's Engine API, and the docker CLI's credentials, as Docker Compose gives them), `restart`, `deploy.restart_policy`, `deploy.replicas`, `scale`, `mem_limit`, `cpus` and `deploy.resources.limits` (`cpus` rounded up to whole vCPUs), `healthcheck`, `depends_on`, `hostname`, `user`, `working_dir`, `tty`, `stdin_open`, `stop_signal`, `stop_grace_period`, `labels`, `logging` (`local`, `json-file` and `none`; `max-size` and `max-file`), `pull_policy`, `platform: linux/amd64`, `storage_opt: size`, `attach`, `profiles`, `extends`, `include` |
+| Taken as `run` takes it | `image`, `build`, `command`, `privileged`, `entrypoint`, `environment`, `env_file`, `ports` (TCP, on 127.0.0.1 unless an address is given, as `-p`, on a free host port without one), `expose`, `extra_hosts`, `networks` with `aliases` and `ipv4_address`, `links` (as aliases), `volumes` (bind, named, anonymous, tmpfs; `consistency: delegated` for [Delegated mounts](#delegated-mounts)), `tmpfs`, `secrets` and `configs` from files (bound read-only), `use_api_socket` (Docker's socket, reaching the store's Engine API, and the docker CLI's credentials, as Docker Compose gives them), `restart`, `deploy.restart_policy`, `deploy.replicas`, `scale`, `mem_limit`, `cpus` and `deploy.resources.limits` (`cpus` rounded up to whole vCPUs), `healthcheck`, `depends_on`, `hostname`, `user`, `working_dir`, `tty`, `stdin_open`, `stop_signal`, `stop_grace_period`, `labels`, `logging` (`local`, `json-file` and `none`; `max-size` and `max-file`), `pull_policy`, `platform: linux/amd64`, `storage_opt: size`, `attach`, `profiles`, `extends`, `include` |
 | Refused, before anything is made | `network_mode` other than `none` or `bridge`; `devices`, `gpus`, `volumes_from`, `ipc`, `pid` and `uts` of other containers or the host; UDP ports; IPv6 and link-local addresses; network drivers other than `bridge`, `ipam`, `internal` and IPv6 networks; volume drivers and `driver_opts`; a volume two services would mount at once; secrets and configs other than from files; build `ssh`, `additional_contexts`, `cache_to`, other platforms, and git or URL contexts; lifecycle hooks, `provider`, `models` and `jobs` |
-| Ignored, with a warning | `privileged`, `cap_add`, `cap_drop`, `security_opt`, `ulimits`, `sysctls`, `shm_size`, `init`, `userns_mode`, the `oom_*`, `pids_limit`, the CPU shares, sets and quotas, `blkio_config`, `mem_reservation`, `memswap_limit`, `read_only`, `dns`, `dns_search`, `dns_opt`, `domainname`, `mac_address`, `develop`, `deploy.resources.reservations`, other log drivers, build `cache_from` and `privileged` |
+| Ignored, with a warning | `cap_add`, `cap_drop`, `security_opt`, `ulimits`, `sysctls`, `shm_size`, `init`, `userns_mode`, the `oom_*`, `pids_limit`, the CPU shares, sets and quotas, `blkio_config`, `mem_reservation`, `memswap_limit`, `read_only`, `dns`, `dns_search`, `dns_opt`, `domainname`, `mac_address`, `develop`, `deploy.resources.reservations`, other log drivers, build `cache_from` and `privileged` |
 
 Containers run on runwhp's kernel, or `RUNWHP_KERNEL`'s, never with
 `--module`, and with half this machine's memory and up to 4 vCPUs unless a
@@ -1244,8 +1255,8 @@ prints a create's warnings:
 
 | | |
 | --- | --- |
-| Taken | image, command, `--entrypoint`, `-e`, `-w`, `-u`, `--hostname`, `-i`, `-t`, `-l`, `--stop-signal`, `--stop-timeout`, the `--health-*` flags, `-m`, `--cpus` (rounded up to whole vCPUs, with a warning), `--network` (Docker's `bridge` and `default` are runwhp's default network) with `--network-alias` and `--ip`, `-p` (on 127.0.0.1 unless an address is given; without a host port, or with `0`, on a free one), `-P` and `--expose`, `--add-host`, `-v`, `--mount` (Docker's socket and named pipes as [host pipes](#host-pipes)), `--tmpfs`, anonymous volumes, `--restart`, `--rm`, `--security-opt label=...` (SELinux's, which change nothing), `--log-driver json-file` (Docker's default, and the API's: runwhp's own log under Docker's name), `local` or `none` with `--log-opt`, `--storage-opt size` |
-| Refused | `--privileged`, `--cap-add`, `--device`, `--gpus`, `--pid`, `--ipc`, `--uts` and `--userns` of the host, `--network host` and `container:`, `--dns*`, `--link`, `--volumes-from`, volume drivers, `--cpuset-*`, `--cpu-quota`, `--sysctl`, `--security-opt` other than labels, `--runtime` other than runwhp, UDP ports, `--group-add`, `--pids-limit`, `--mac-address`, `--domainname`, IPv6 addresses, relative bind paths, platforms other than `linux/amd64` |
+| Taken | image, command, `--entrypoint`, `-e`, `-w`, `-u`, `--hostname`, `-i`, `-t`, `-l`, `--stop-signal`, `--stop-timeout`, the `--health-*` flags, `-m`, `--cpus` (rounded up to whole vCPUs, with a warning), `--network` (Docker's `bridge` and `default` are runwhp's default network) with `--network-alias` and `--ip`, `-p` (on 127.0.0.1 unless an address is given; without a host port, or with `0`, on a free one), `-P` and `--expose`, `--add-host`, `-v`, `--mount` (Docker's socket and named pipes as [host pipes](#host-pipes)), `--tmpfs`, anonymous volumes, `--restart`, `--rm`, `--privileged`, `--security-opt label=...` (SELinux's, which change nothing) and `seccomp=unconfined`, `apparmor=unconfined` and `no-new-privileges=false` (the container has none of them), `--log-driver json-file` (Docker's default, and the API's: runwhp's own log under Docker's name), `local` or `none` with `--log-opt`, `--storage-opt size` |
+| Refused | `--cap-add`, `--device`, `--gpus`, `--pid`, `--ipc`, `--uts` and `--userns` of the host, `--network host` and `container:`, `--dns*`, `--link`, `--volumes-from`, volume drivers, `--cpuset-*`, `--cpu-quota`, `--sysctl`, `--security-opt` other than labels and `seccomp`, `apparmor` or `no-new-privileges` unconfined, `--runtime` other than runwhp, UDP ports, `--group-add`, `--pids-limit`, `--mac-address`, `--domainname`, IPv6 addresses, relative bind paths, platforms other than `linux/amd64` |
 | Warned of | `--init` (runwhp's init is always there), `--shm-size`, `--oom-score-adj`, `--ulimit`, `--memory-swap`, `--cpu-shares`, `--blkio-weight`, `--cgroupns`, `--read-only` |
 
 A missing image is a 404, as Docker's daemon answers it, and the docker CLI

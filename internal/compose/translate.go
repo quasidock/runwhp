@@ -51,6 +51,7 @@ type Container struct {
 	Health      *Health
 	StopSignal  string
 	StopTimeout *int // seconds
+	Privileged  bool
 	StorageSize string
 	Labels      map[string]string // the service's own
 	LogDriver   string            // local or none
@@ -130,7 +131,7 @@ func Translate(p *types.Project, s types.ServiceConfig, pr *Problems) Container 
 		Entrypoint: s.Entrypoint, EntrypointSet: s.Entrypoint != nil, Command: s.Command,
 		WorkingDir: s.WorkingDir, User: s.User, Hostname: s.Hostname, TTY: s.Tty, StdinOpen: s.StdinOpen,
 		Labels: maps.Clone(map[string]string(s.Labels)), Replicas: s.GetScale(), StopSignal: s.StopSignal,
-		Attach: s.Attach == nil || *s.Attach,
+		Attach: s.Attach == nil || *s.Attach, Privileged: s.Privileged,
 	}
 	for _, k := range sortedKeys(s.Environment) {
 		if v := s.Environment[k]; v != nil {
@@ -188,7 +189,7 @@ func Translate(p *types.Project, s types.ServiceConfig, pr *Problems) Container 
 		key string
 		set bool
 	}{
-		{"privileged", s.Privileged}, {"cap_add", len(s.CapAdd) > 0}, {"cap_drop", len(s.CapDrop) > 0},
+		{"cap_add", len(s.CapAdd) > 0}, {"cap_drop", len(s.CapDrop) > 0},
 		{"security_opt", len(s.SecurityOpt) > 0}, {"ulimits", len(s.Ulimits) > 0}, {"sysctls", len(s.Sysctls) > 0},
 		{"shm_size", s.ShmSize != 0}, {"init", s.Init != nil && *s.Init}, {"userns_mode", s.UserNSMode != ""},
 		{"oom_kill_disable", s.OomKillDisable}, {"oom_score_adj", s.OomScoreAdj != 0}, {"pids_limit", s.PidsLimit != 0},

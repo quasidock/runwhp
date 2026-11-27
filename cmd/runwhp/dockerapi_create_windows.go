@@ -47,7 +47,7 @@ func specFromCreate(req dcontainer.CreateRequest) (runSpec, []string, error) {
 		image: cfg.Image, command: cfg.Cmd,
 		env: cfg.Env, workdir: cfg.WorkingDir, user: cfg.User, hostname: cfg.Hostname,
 		interactive: cfg.OpenStdin, tty: cfg.Tty, rm: hc.AutoRemove,
-		labels: cfg.Labels, stopTimeout: cfg.StopTimeout,
+		labels: cfg.Labels, stopTimeout: cfg.StopTimeout, privileged: hc.Privileged,
 	}
 	// A bare KEY in Env is the client's to resolve; one it did not is
 	// dropped, as no environment of the client's is here.
@@ -167,6 +167,20 @@ func specFromCreate(req dcontainer.CreateRequest) (runSpec, []string, error) {
 	return s, warnings, nil
 }
 
+// unconfinedSecurityOpt reports whether a --security-opt asks for nothing
+// runwhp's containers do not have already: SELinux labels, and no seccomp
+// profile, AppArmor profile or no_new_privileges.
+func unconfinedSecurityOpt(o string) bool {
+	if strings.HasPrefix(o, "label=") || strings.HasPrefix(o, "label:") {
+		return true
+	}
+	switch strings.ReplaceAll(o, ":", "=") {
+	case "seccomp=unconfined", "apparmor=unconfined", "no-new-privileges=false":
+		return true
+	}
+	return false
+}
+
 // refuseUnsupported refuses settings runwhp cannot honour, each named as
 // the docker CLI names it.
 func refuseUnsupported(cfg *dcontainer.Config, hc *dcontainer.HostConfig) error {
@@ -176,7 +190,6 @@ func refuseUnsupported(cfg *dcontainer.Config, hc *dcontainer.HostConfig) error 
 			refused = append(refused, what)
 		}
 	}
-	add(hc.Privileged, "--privileged")
 	add(len(hc.CapAdd) > 0, "--cap-add")
 	add(len(hc.Devices) > 0, "--device")
 	add(len(hc.DeviceRequests) > 0, "--gpus")
@@ -198,8 +211,10 @@ func refuseUnsupported(cfg *dcontainer.Config, hc *dcontainer.HostConfig) error 
 	for _, o := range hc.SecurityOpt {
 		// SELinux labels, as Dev Containers' docker-outside-of-docker
 		// asks label=disable: the guest has no SELinux, and Docker on a
-		// host without it takes them and does nothing.
-		if !strings.HasPrefix(o, "label=") && !strings.HasPrefix(o, "label:") {
+		// host without it takes them and does nothing. Nor has the
+		// container a seccomp profile or AppArmor, which tools that run
+		// containers in containers ask be unconfined.
+		if !unconfinedSecurityOpt(o) {
 			add(true, "--security-opt "+o)
 		}
 	}

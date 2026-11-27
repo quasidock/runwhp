@@ -460,6 +460,8 @@ func (s *apiServer) inspectOf(c *container.Container, size bool) dcontainer.Insp
 		RestartPolicy:   dcontainer.RestartPolicy{Name: dcontainer.RestartPolicyMode(cfg.Restart.Name), MaximumRetryCount: cfg.Restart.MaxRetries},
 		AutoRemove:      cfg.AutoRemove,
 		PublishAllPorts: cfg.PublishAll,
+		Privileged:      cfg.Privileged,
+		CgroupnsMode:    "private",
 		LogConfig:       dcontainer.LogConfig{Type: cfg.LogDriver, Config: map[string]string{}},
 		Runtime:         "runwhp",
 		Isolation:       "",

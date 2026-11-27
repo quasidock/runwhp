@@ -241,9 +241,8 @@ func (s *execServer) run(ctl *os.File, ex *guestspec.Exec) {
 			Ctty:       0,
 		},
 	}
-	cgroup.procAttr(attr.Sys)
 	debugf("runwhp exec %s: %q as %d:%d in %s", e.id, ex.Args, p.user.UID, p.user.GID, p.cwd)
-	pid, done, err := children.start(func() (int, error) { return syscall.ForkExec(p.exe, ex.Args, attr) })
+	pid, done, err := children.start(func() (int, error) { return cgroup.forkExec(p.exe, ex.Args, attr) })
 	streams.started()
 	if err != nil {
 		failed(execFailure(ex.Args[0], err))

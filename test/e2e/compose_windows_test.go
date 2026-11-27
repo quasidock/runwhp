@@ -490,7 +490,7 @@ func TestComposeRefusals(t *testing.T) {
 services:
   host: {image: "%ALPINE%", network_mode: host}
   udp: {image: "%ALPINE%", ports: ["53:53/udp"]}
-  ok: {image: "%ALPINE%", privileged: true}
+  ok: {image: "%ALPINE%", cap_add: [NET_ADMIN]}
 `),
 		"shared.yaml": composeFile(t, `name: e2eref
 services:
@@ -511,7 +511,7 @@ services:
 	})
 	r := p.run("-f", "refused.yaml", "up", "-d")
 	for _, want := range []string{`runwhp: service "host": network_mode host is not supported`, `runwhp: service "udp": port 53/udp cannot be published`,
-		`runwhp: compose: warning: service "ok": privileged is ignored`} {
+		`runwhp: compose: warning: service "ok": cap_add is ignored`} {
 		if !strings.Contains(r.stderr, want) {
 			t.Errorf("no %q in:\n%s", want, r.stderr)
 		}

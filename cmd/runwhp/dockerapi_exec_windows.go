@@ -140,9 +140,8 @@ func (s *apiServer) postExecCreate(w http.ResponseWriter, r *http.Request) error
 	if len(req.Cmd) == 0 {
 		return badRequest("No exec command specified")
 	}
-	if req.Privileged {
-		return badRequest("--privileged is not supported")
-	}
+	// Privileged asks nothing more: an exec's process has every
+	// capability the container's has.
 	switch {
 	case c.State.Status == container.Restarting:
 		return conflict("Container %s is restarting, wait until the container is running", c.ID)

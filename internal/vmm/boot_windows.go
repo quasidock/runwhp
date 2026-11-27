@@ -191,6 +191,7 @@ func bootContainer(ctx context.Context, root string, cfg *container.Config, laye
 		Volumes: len(storage.volumes), Debug: cfg.Debug, Stdin: cfg.Stdin, TTY: cfg.TTY,
 		Networks: network.specs, Resolv: network.resolv, HostnameAddrs: network.hostnameAddrs,
 		Mounts: cfg.Mounts, WaitStart: hooks.waitStart, Serve: opts.serve, HideMountPoints: cfg.HideMountPoints,
+		Privileged: cfg.Privileged,
 	}
 	if opts.serve == "" {
 		spec.Reclaim = reclaimPolicy(logf)

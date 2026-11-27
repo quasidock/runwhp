@@ -211,9 +211,13 @@ func prepareRoot(spec *guestspec.Spec) error {
 		data                   string
 	}
 	const nosuid, nodev, noexec = syscall.MS_NOSUID, syscall.MS_NODEV, syscall.MS_NOEXEC
+	sysFlags := uintptr(nosuid | nodev | noexec | syscall.MS_RDONLY)
+	if spec.Privileged {
+		sysFlags &^= syscall.MS_RDONLY
+	}
 	mounts := []mount{
 		{"proc", "/proc", "proc", nosuid | nodev | noexec, ""},
-		{"sysfs", "/sys", "sysfs", nosuid | nodev | noexec | syscall.MS_RDONLY, ""},
+		{"sysfs", "/sys", "sysfs", sysFlags, ""},
 		{"tmpfs", "/dev", "tmpfs", nosuid, "mode=755,size=65536k"},
 		{"devpts", "/dev/pts", "devpts", nosuid | noexec, "newinstance,ptmxmode=0666,mode=0620,gid=5"},
 		{"tmpfs", "/dev/shm", "tmpfs", nosuid | nodev | noexec, "mode=1777,size=65536k"},
@@ -226,7 +230,7 @@ func prepareRoot(spec *guestspec.Spec) error {
 			return fmt.Errorf("mounting %s on %s: %w", m.fstype, m.target, err)
 		}
 		if m.target == "/dev" {
-			if err := populateDev(in("/dev")); err != nil {
+			if err := populateDev(in("/dev"), spec.Privileged); err != nil {
 				return err
 			}
 		}
@@ -351,18 +355,31 @@ func mountedOver(spec *guestspec.Spec, target string) bool {
 	return false
 }
 
-func populateDev(dev string) error {
-	nodes := []struct {
+// populateDev makes the container's /dev: the usual devices, and, for a
+// privileged container, those of FUSE, TUN and the kernel log, as Docker's
+// --privileged gives the host's. Not the guest's devtmpfs: its disks and
+// console ports are runwhp's, not the container's.
+func populateDev(dev string, privileged bool) error {
+	type node struct {
 		name         string
 		major, minor uint32
-	}{
-		{"null", 1, 3}, {"zero", 1, 5}, {"full", 1, 7}, {"random", 1, 8}, {"urandom", 1, 9}, {"tty", 5, 0},
+		mode         uint32
+	}
+	nodes := []node{
+		{"null", 1, 3, 0o666}, {"zero", 1, 5, 0o666}, {"full", 1, 7, 0o666}, {"random", 1, 8, 0o666}, {"urandom", 1, 9, 0o666}, {"tty", 5, 0, 0o666},
+	}
+	if privileged {
+		nodes = append(nodes, node{"fuse", 10, 229, 0o666}, node{"net/tun", 10, 200, 0o666}, node{"kmsg", 1, 11, 0o644})
 	}
 	old := syscall.Umask(0)
 	defer syscall.Umask(old)
 	for _, n := range nodes {
+		p := filepath.Join(dev, n.name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			return err
+		}
 		devnum := int(n.major<<8 | n.minor)
-		if err := syscall.Mknod(filepath.Join(dev, n.name), syscall.S_IFCHR|0o666, devnum); err != nil {
+		if err := syscall.Mknod(p, syscall.S_IFCHR|n.mode, devnum); err != nil {
 			return fmt.Errorf("creating /dev/%s: %w", n.name, err)
 		}
 	}

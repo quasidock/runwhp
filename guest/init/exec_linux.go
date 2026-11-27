@@ -89,12 +89,14 @@ func runProcess(spec *guestspec.Spec, user passwd.User, ports map[string]*os.Fil
 		},
 	}
 	cgroup.procAttr(attr.Sys)
+	attr.Sys.Unshareflags = cgroup.unshareFlags()
 	debugf("exec %q as %d:%d in %s (stdin %v, tty %v)", spec.Args, user.UID, user.GID, cwd, spec.Stdin, spec.TTY)
 	pid, done, err := children.start(func() (int, error) { return syscall.ForkExec(exe, spec.Args, attr) })
 	streams.started()
 	if err != nil {
 		return guestspec.Status{}, execFailure(spec.Args[0], err)
 	}
+	mainPid.Store(int32(pid))
 	ctl.start(pid)
 	ctl.send(guestspec.Event{Started: true, Pid: pid})
 	execs := startExecServer(spec)

@@ -328,12 +328,18 @@ services:
     deploy: {resources: {reservations: {memory: 1g}}}
 `}, LoadOptions{})
 	var pr Problems
-	Translate(p, p.Services["a"], &pr)
+	c := Translate(p, p.Services["a"], &pr)
 	if err := pr.Err(); err != nil {
 		t.Fatal(err)
 	}
+	if !c.Privileged {
+		t.Error("privileged was not taken")
+	}
 	all := strings.Join(pr.Warnings, "\n")
-	for _, want := range []string{"privileged is ignored", "cap_add is ignored", "init is ignored", "dns is ignored", "read_only is ignored",
+	if strings.Contains(all, "privileged") {
+		t.Errorf("privileged warned of: %s", all)
+	}
+	for _, want := range []string{"cap_add is ignored", "init is ignored", "dns is ignored", "read_only is ignored",
 		"logging driver syslog is runwhp's local log here", "deploy.resources.reservations is ignored"} {
 		if !strings.Contains(all, want) {
 			t.Errorf("no warning saying %q in:\n%s", want, all)

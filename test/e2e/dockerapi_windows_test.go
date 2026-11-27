@@ -181,7 +181,6 @@ func TestDockerRun(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{"--privileged"}, "--privileged"},
 		{[]string{"--network", "host"}, "--network host"},
 		{[]string{"--dns", "1.1.1.1"}, "--dns"},
 		{[]string{"-p", "53:53/udp"}, "only tcp"},

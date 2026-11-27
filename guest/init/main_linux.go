@@ -150,6 +150,7 @@ func start(begin time.Time, ctl *controller) (guestspec.Status, error) {
 	// the cgroup hierarchy for itself.
 	mem := openMemFiles()
 	ctl.mem.Store(mem)
+	bindCgroup(&spec)
 	if err := enterRoot(); err != nil {
 		return none, err
 	}

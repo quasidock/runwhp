@@ -229,7 +229,7 @@ func TestSpecFromCreateRefusals(t *testing.T) {
 		edit func(*dcontainer.CreateRequest)
 		want string
 	}{
-		{"privileged", func(r *dcontainer.CreateRequest) { r.HostConfig.Privileged = true }, "--privileged"},
+		{"seccomp profile", func(r *dcontainer.CreateRequest) { r.HostConfig.SecurityOpt = []string{"seccomp=/p.json"} }, "--security-opt seccomp=/p.json"},
 		{"cap-add", func(r *dcontainer.CreateRequest) { r.HostConfig.CapAdd = []string{"NET_ADMIN"} }, "--cap-add"},
 		{"host network", func(r *dcontainer.CreateRequest) { r.HostConfig.NetworkMode = "host" }, "--network host"},
 		{"container network", func(r *dcontainer.CreateRequest) { r.HostConfig.NetworkMode = "container:x" }, "container:x"},
@@ -242,10 +242,10 @@ func TestSpecFromCreateRefusals(t *testing.T) {
 			r.HostConfig.RestartPolicy = dcontainer.RestartPolicy{Name: "always"}
 		}, "--restart and --rm"},
 		{"no image", func(r *dcontainer.CreateRequest) { r.Config.Image = "" }, "no image"},
-		{"seccomp", func(r *dcontainer.CreateRequest) {
-			r.HostConfig.SecurityOpt = []string{"label=disable", "seccomp=unconfined"}
+		{"unconfined and other", func(r *dcontainer.CreateRequest) {
+			r.HostConfig.SecurityOpt = []string{"label=disable", "seccomp=unconfined", "apparmor:unconfined", "systempaths=unconfined"}
 		},
-			"--security-opt seccomp=unconfined is"},
+			"--security-opt systempaths=unconfined is"},
 	} {
 		req := createRun(t)
 		tc.edit(&req)
