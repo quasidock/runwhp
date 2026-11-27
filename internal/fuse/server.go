@@ -1,6 +1,7 @@
 package fuse
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"sort"
@@ -51,6 +52,57 @@ type FileSystem interface {
 	Setxattr(c Context, node uint64, name string, value []byte, flags uint32) error
 }
 
+// Xattrs is implemented by file systems that keep extended attributes.
+// Getxattr and Listxattr return the whole value, or the names, each ended by
+// a NUL; the server answers the kernel's size probes and ERANGE from it.
+// Without Xattrs, the kernel learns from ENOSYS not to ask again.
+type Xattrs interface {
+	Getxattr(c Context, node uint64, name string) ([]byte, error)
+	Listxattr(c Context, node uint64) ([]byte, error)
+	Removexattr(c Context, node uint64, name string) error
+}
+
+// Locker is implemented by file systems that keep POSIX and flock(2) locks
+// themselves, so that every guest using them sees the same locks. Only then
+// does the server offer the kernel to send it lock requests: once offered,
+// the kernel keeps no locks of its own, and fails a lock request the file
+// system cannot serve.
+//
+// owner is the kernel's lock owner: a process's files table for POSIX
+// locks, or the open file for flock's, which come with LockFlock in flags.
+// Setlk with wait blocks until the lock is granted; the kernel cannot
+// interrupt it.
+type Locker interface {
+	Getlk(c Context, node, fh, owner uint64, lk Lock, flags uint32) (Lock, error)
+	Setlk(c Context, node, fh, owner uint64, lk Lock, flags uint32, wait bool) error
+	// FlushOwner drops owner's POSIX locks on node, as close(2) of any of
+	// its descriptors for the file does. It is called on FLUSH.
+	FlushOwner(node, fh, owner uint64)
+}
+
+// Allocator is implemented by file systems that take fallocate(2).
+type Allocator interface {
+	Fallocate(c Context, node, fh uint64, off, length uint64, mode uint32) error
+}
+
+// Seeker is implemented by file systems that answer lseek(2)'s SEEK_DATA
+// and SEEK_HOLE.
+type Seeker interface {
+	Lseek(c Context, node, fh uint64, off uint64, whence uint32) (uint64, error)
+}
+
+// RangeCopier is implemented by file systems that copy between files
+// themselves, as copy_file_range(2) asks.
+type RangeCopier interface {
+	CopyFileRange(c Context, nodeIn, fhIn, offIn, nodeOut, fhOut, offOut, length uint64, flags uint64) (uint64, error)
+}
+
+// Syncer is implemented by file systems that can write everything back at
+// once, as syncfs(2) asks.
+type Syncer interface {
+	Syncfs(c Context) error
+}
+
 // Slower is implemented by file systems some of whose files may take long
 // to reach, such as cloud files that Windows fetches from the network before
 // they can be opened or read.
@@ -79,6 +131,13 @@ type Server struct {
 	// those files may go unseen. The file system must let files opened only
 	// for writing be read: the kernel fills the pages it writes in part.
 	Writeback bool
+	// NoKeepCache drops a file's cached pages each time it is opened, so a
+	// guest reads what other guests wrote before the open, rather than
+	// trusting its cache until the file's size or mtime is seen to change.
+	NoKeepCache bool
+	// TimeGran is the granularity of the file system's times, in
+	// nanoseconds. Zero means 100, as NTFS and ReFS keep them.
+	TimeGran uint32
 
 	counts  [maxOpcode]atomic.Uint64
 	nanos   [maxOpcode]atomic.Int64 // time spent serving each opcode
@@ -90,6 +149,14 @@ func (s *Server) logf(format string, a ...any) {
 	if s.Logf != nil {
 		s.Logf(format, a...)
 	}
+}
+
+// keepCache returns the open flags that keep a file's cached pages.
+func (s *Server) keepCache() uint32 {
+	if s.NoKeepCache {
+		return 0
+	}
+	return fopenKeepCache
 }
 
 func (s *Server) timeout() time.Duration {
@@ -289,7 +356,7 @@ func (s *Server) handle(c Context, op uint32, node uint64, r *reader, room int) 
 			fh, err = s.FS.Open(c, node, flags)
 			// The page cache survives across opens; with AUTO_INVAL_DATA
 			// the kernel drops it when the file's size or mtime changes.
-			openFlags = fopenKeepCache
+			openFlags = s.keepCache()
 		} else {
 			fh, err = s.FS.Opendir(c, node)
 		}
@@ -313,7 +380,7 @@ func (s *Server) handle(c Context, op uint32, node uint64, r *reader, room int) 
 		}
 		w.entry(&e, t, t)
 		w.u64(fh)
-		w.u32(fopenKeepCache)
+		w.u32(s.keepCache())
 		w.u32(0)
 		return w.b, nil
 	case opWrite:
@@ -345,6 +412,8 @@ func (s *Server) handle(c Context, op uint32, node uint64, r *reader, room int) 
 		w.pad(4 + 24)
 		return w.b, nil
 	case opRelease, opReleasedir:
+		// The open file's flock(2) locks, which RELEASE's flags mention,
+		// go with its handle.
 		fh := r.u64()
 		if r.bad {
 			return nil, EINVAL
@@ -357,10 +426,131 @@ func (s *Server) handle(c Context, op uint32, node uint64, r *reader, room int) 
 		return nil, nil
 	case opFlush:
 		fh := r.u64()
+		r.skip(8) // unused, padding
+		owner := r.u64()
 		if r.bad {
 			return nil, EINVAL
 		}
+		if l, ok := s.FS.(Locker); ok {
+			l.FlushOwner(node, fh, owner)
+		}
 		return nil, s.FS.Flush(c, node, fh)
+	case opGetxattr, opListxattr:
+		x, ok := s.FS.(Xattrs)
+		if !ok {
+			return nil, ENOSYS
+		}
+		size := r.u32()
+		r.skip(4)
+		var v []byte
+		var err error
+		if op == opGetxattr {
+			name := r.name()
+			if r.bad {
+				return nil, EINVAL
+			}
+			v, err = x.Getxattr(c, node, name)
+		} else {
+			if r.bad {
+				return nil, EINVAL
+			}
+			v, err = x.Listxattr(c, node)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if size == 0 {
+			// A probe for the size: fuse_getxattr_out.
+			w.u32(uint32(len(v)))
+			w.u32(0)
+			return w.b, nil
+		}
+		if len(v) > int(size) {
+			return nil, ERANGE
+		}
+		return v, nil
+	case opRemovexattr:
+		x, ok := s.FS.(Xattrs)
+		if !ok {
+			return nil, ENOSYS
+		}
+		name := r.name()
+		if r.bad {
+			return nil, EINVAL
+		}
+		return nil, x.Removexattr(c, node, name)
+	case opGetlk, opSetlk, opSetlkw:
+		l, ok := s.FS.(Locker)
+		if !ok {
+			return nil, ENOSYS
+		}
+		fh, owner := r.u64(), r.u64()
+		lk := Lock{Start: r.u64(), End: r.u64(), Type: r.u32(), PID: r.u32()}
+		flags := r.u32()
+		if r.bad {
+			return nil, EINVAL
+		}
+		if op != opGetlk {
+			return nil, l.Setlk(c, node, fh, owner, lk, flags, op == opSetlkw)
+		}
+		got, err := l.Getlk(c, node, fh, owner, lk, flags)
+		if err != nil {
+			return nil, err
+		}
+		w.u64(got.Start)
+		w.u64(got.End)
+		w.u32(got.Type)
+		w.u32(got.PID)
+		return w.b, nil
+	case opFallocate:
+		a, ok := s.FS.(Allocator)
+		if !ok {
+			return nil, ENOSYS
+		}
+		fh, off, length, mode := r.u64(), r.u64(), r.u64(), r.u32()
+		if r.bad {
+			return nil, EINVAL
+		}
+		return nil, a.Fallocate(c, node, fh, off, length, mode)
+	case opLseek:
+		sk, ok := s.FS.(Seeker)
+		if !ok {
+			return nil, ENOSYS
+		}
+		fh, off, whence := r.u64(), r.u64(), r.u32()
+		if r.bad {
+			return nil, EINVAL
+		}
+		got, err := sk.Lseek(c, node, fh, off, whence)
+		if err != nil {
+			return nil, err
+		}
+		w.u64(got)
+		return w.b, nil
+	case opCopyRange:
+		rc, ok := s.FS.(RangeCopier)
+		if !ok {
+			return nil, ENOSYS
+		}
+		fhIn, offIn := r.u64(), r.u64()
+		nodeOut, fhOut, offOut := r.u64(), r.u64(), r.u64()
+		length, flags := r.u64(), r.u64()
+		if r.bad {
+			return nil, EINVAL
+		}
+		n, err := rc.CopyFileRange(c, node, fhIn, offIn, nodeOut, fhOut, offOut, length, flags)
+		if err != nil {
+			return nil, err
+		}
+		w.u32(uint32(n))
+		w.u32(0)
+		return w.b, nil
+	case opSyncfs:
+		sy, ok := s.FS.(Syncer)
+		if !ok {
+			return nil, ENOSYS
+		}
+		return nil, sy.Syncfs(c)
 	case opFsync:
 		fh, flags := r.u64(), r.u32()
 		if r.bad {
@@ -413,11 +603,14 @@ func (s *Server) init(r *reader) ([]byte, error) {
 	if s.Writeback {
 		want |= initWritebackCache
 	}
+	if _, ok := s.FS.(Locker); ok {
+		want |= initPosixLocks | initFlockLocks
+	}
 	w.u32(flags & want)
 	w.u16(64)                  // max_background
 	w.u16(48)                  // congestion_threshold
 	w.u32(MaxPages * pageSize) // max_write
-	w.u32(100)                 // time_gran: NTFS and ReFS keep times in 100 ns units
+	w.u32(cmp.Or(s.TimeGran, 100))
 	w.u16(MaxPages)
 	w.u16(0) // map_alignment
 	w.pad(64 - len(w.b))

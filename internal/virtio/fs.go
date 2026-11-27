@@ -25,6 +25,20 @@ type FsHandler interface {
 	Serve(req []byte, reply [][]byte) uint32
 }
 
+// FsAsyncHandler is implemented by FsHandlers that pass requests on, to be
+// served elsewhere, rather than serve them on the goroutine that calls
+// them. ServeAsync takes one request, as Serve does, and returns at once;
+// done is called, once, with the length of the reply written into reply.
+// The device calls ServeAsync on the vCPU that sent the request, and holds
+// no worker while it waits, so requests that wait long, such as a lock
+// request, hold up no other.
+//
+// If the handler also has an Abort method, Drain calls it once the guest
+// has stopped: it must answer every request still waiting.
+type FsAsyncHandler interface {
+	ServeAsync(req []byte, reply [][]byte, done func(written uint32))
+}
+
 // InlineHandler is implemented by handlers that know which requests may take
 // long. Inline reports whether req may be served on the vCPU that sent it;
 // those it refuses go to a worker.
@@ -112,6 +126,20 @@ func (f *Fs) Notify(t *Transport, qi int) {
 // a worker all the same, so as not to hold up the vCPU.
 func (f *Fs) NotifyDeferred(t *Transport, qi int) func() {
 	chains := f.take(t, qi)
+	if _, ok := f.Handler.(FsAsyncHandler); ok {
+		// Starting a request only passes it on, so the vCPU starts them
+		// all.
+		if len(chains) == 0 {
+			return nil
+		}
+		f.inflight.Add(len(chains))
+		return func() {
+			for _, ch := range chains {
+				f.Inline.Add(1)
+				f.serve(ch)
+			}
+		}
+	}
 	first := -1
 	for i, ch := range chains {
 		if first < 0 && f.inline(ch.req) {
@@ -199,6 +227,15 @@ func (f *Fs) worker() {
 
 // serve handles a request counted in flight and returns it to the driver.
 func (f *Fs) serve(ch fsChain) {
+	if h, ok := f.Handler.(FsAsyncHandler); ok {
+		h.ServeAsync(ch.req, ch.reply, func(written uint32) {
+			f.Requests.Add(1)
+			f.BytesIn.Add(uint64(len(ch.req)))
+			f.BytesOut.Add(uint64(written))
+			f.complete(ch, written)
+		})
+		return
+	}
 	var written uint32
 	if f.Handler != nil {
 		written = f.Handler.Serve(ch.req, ch.reply)
@@ -227,6 +264,9 @@ func (f *Fs) complete(ch fsChain, written uint32) {
 // idle, that is, no longer writing to guest memory.
 func (f *Fs) Drain(ctx context.Context) bool {
 	f.init()
+	if a, ok := f.Handler.(interface{ Abort() }); ok {
+		a.Abort()
+	}
 	done := make(chan struct{})
 	go func() {
 		f.inflight.Wait()

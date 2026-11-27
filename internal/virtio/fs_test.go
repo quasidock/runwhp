@@ -258,3 +258,86 @@ func TestFsDrain(t *testing.T) {
 		}
 	}
 }
+
+// asyncFunc is an FsAsyncHandler whose requests wait until released, or
+// until Abort.
+type asyncFunc struct {
+	mu      sync.Mutex
+	waiting []func(uint32)
+	aborted bool
+}
+
+func (h *asyncFunc) ServeAsync(req []byte, reply [][]byte, done func(uint32)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.aborted {
+		done(0)
+		return
+	}
+	h.waiting = append(h.waiting, done)
+}
+
+func (h *asyncFunc) release(n int) {
+	h.mu.Lock()
+	w := h.waiting[:n]
+	h.waiting = h.waiting[n:]
+	h.mu.Unlock()
+	for _, done := range w {
+		done(1)
+	}
+}
+
+func (h *asyncFunc) Abort() {
+	h.mu.Lock()
+	w := h.waiting
+	h.waiting, h.aborted = nil, true
+	h.mu.Unlock()
+	for _, done := range w {
+		done(0)
+	}
+}
+
+func (h *asyncFunc) count() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.waiting)
+}
+
+// Asynchronous requests are all started by the kick, hold no worker while
+// they wait, complete when their handler says, and are answered by Abort
+// when the device drains.
+func TestFsAsync(t *testing.T) {
+	h := &asyncFunc{}
+	f := &Fs{Tag: "t", Handler: h, Workers: 1}
+	d := newDriver(t, f)
+	const n = 5
+	for range n {
+		a, r := d.alloc(1), d.alloc(4)
+		d.add(fsRequestQueue, buf{a, 1, false}, buf{r, 4, true})
+	}
+	d.kick(fsRequestQueue)
+	if c := h.count(); c != n {
+		t.Fatalf("%d requests started by the kick, want %d", c, n)
+	}
+	if f.Inline.Load() != n {
+		t.Errorf("%d started inline, want %d", f.Inline.Load(), n)
+	}
+	h.release(2)
+	if used := d.collectN(fsRequestQueue, 2); used[0].len != 1 || used[1].len != 1 {
+		t.Fatalf("used %+v", used)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if !f.Drain(ctx) {
+		t.Fatal("Drain reported busy: Abort did not answer the waiting requests")
+	}
+	if c := h.count(); c != 0 {
+		t.Fatalf("%d requests still waiting after Drain", c)
+	}
+}
+
+func (h *asyncFunc) Serve(req []byte, reply [][]byte) uint32 {
+	got := make(chan uint32, 1)
+	h.ServeAsync(req, reply, func(n uint32) { got <- n })
+	return <-got
+}

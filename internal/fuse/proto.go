@@ -45,20 +45,48 @@ const (
 	opRelease     = 18
 	opFsync       = 20
 	opSetxattr    = 21
+	opGetxattr    = 22
+	opListxattr   = 23
+	opRemovexattr = 24
 	opFlush       = 25
 	opInit        = 26
 	opOpendir     = 27
 	opReaddir     = 28
 	opReleasedir  = 29
 	opFsyncdir    = 30
+	opGetlk       = 31
+	opSetlk       = 32
+	opSetlkw      = 33
 	opCreate      = 35
 	opInterrupt   = 36
 	opDestroy     = 38
 	opBatchForget = 42
+	opFallocate   = 43
 	opReaddirplus = 44
 	opRename2     = 45
+	opLseek       = 46
+	opCopyRange   = 47
+	opSyncfs      = 50
 	maxOpcode     = 64
 )
+
+// OpSetlkw is SETLKW's opcode: a lock request that waits until it can be
+// granted, which a server must not count against the requests it serves at
+// once, or the request that would release the lock may never be served.
+const OpSetlkw = opSetlkw
+
+// Opcode returns a FUSE request's opcode, or 0 if req is too short.
+func Opcode(req []byte) uint32 {
+	if len(req) < inHeaderLen {
+		return 0
+	}
+	return le.Uint32(req[4:])
+}
+
+// replyless reports whether requests with opcode op get no reply.
+func replyless(op uint32) bool {
+	return op == opForget || op == opBatchForget || op == opInterrupt
+}
 
 var opNames = map[uint32]string{
 	opLookup: "lookup", opForget: "forget", opGetattr: "getattr", opSetattr: "setattr", opReadlink: "readlink",
@@ -82,7 +110,9 @@ func opName(op uint32) string {
 // INIT flags.
 const (
 	initAsyncRead       = 1 << 0
+	initPosixLocks      = 1 << 1
 	initAtomicOTrunc    = 1 << 3
+	initFlockLocks      = 1 << 10
 	initBigWrites       = 1 << 5
 	initAutoInvalData   = 1 << 12
 	initDoReaddirplus   = 1 << 13
@@ -123,7 +153,32 @@ const (
 const (
 	RenameNoreplace = 1 << 0
 	RenameExchange  = 1 << 1
+	RenameWhiteout  = 1 << 2
 )
+
+// Lock types, as in fcntl(2).
+const (
+	LockRead   = 0 // F_RDLCK
+	LockWrite  = 1 // F_WRLCK
+	LockUnlock = 2 // F_UNLCK
+)
+
+// LockFlock, in a lock request's flags, says the lock is flock(2)'s, which
+// the kernel sends as a lock on the whole file owned by the open file.
+const LockFlock = 1 << 0
+
+// releaseFlockUnlock, in RELEASE's flags, says the open file held flock(2)
+// locks, which go with it.
+const releaseFlockUnlock = 1 << 0
+
+// Lock is a byte-range lock, as struct fuse_file_lock carries it: End is
+// the last byte locked, and ^uint64(0) means to the end of the file. PID is
+// the locking process's, in the guest that asked.
+type Lock struct {
+	Start, End uint64
+	Type       uint32
+	PID        uint32
+}
 
 // File type bits of a mode, as in st_mode.
 const (
@@ -166,7 +221,9 @@ const (
 	EPERM        Errno = 1
 	ENOENT       Errno = 2
 	EIO          Errno = 5
+	E2BIG        Errno = 7
 	EBADF        Errno = 9
+	EAGAIN       Errno = 11
 	EACCES       Errno = 13
 	EBUSY        Errno = 16
 	EEXIST       Errno = 17
@@ -179,18 +236,22 @@ const (
 	EROFS        Errno = 30
 	EMLINK       Errno = 31
 	ERANGE       Errno = 34
+	EDEADLK      Errno = 35
 	ENAMETOOLONG Errno = 36
+	ENOLCK       Errno = 37
 	ENOSYS       Errno = 38
 	ENOTEMPTY    Errno = 39
 	ELOOP        Errno = 40
 	ENODATA      Errno = 61
 	EPROTO       Errno = 71
 	EOPNOTSUPP   Errno = 95
+	ENOTSUP      Errno = EOPNOTSUPP
 	ESTALE       Errno = 116
 )
 
 var errnoNames = map[Errno]string{
-	EPERM: "EPERM", ENOENT: "ENOENT", EIO: "EIO", EBADF: "EBADF", EACCES: "EACCES", EBUSY: "EBUSY",
+	EPERM: "EPERM", ENOENT: "ENOENT", EIO: "EIO", E2BIG: "E2BIG", EBADF: "EBADF", EAGAIN: "EAGAIN",
+	EACCES: "EACCES", EBUSY: "EBUSY", EDEADLK: "EDEADLK", ENOLCK: "ENOLCK",
 	EEXIST: "EEXIST", EXDEV: "EXDEV", ENOTDIR: "ENOTDIR", EISDIR: "EISDIR", EINVAL: "EINVAL", EFBIG: "EFBIG",
 	ENOSPC: "ENOSPC", EROFS: "EROFS", EMLINK: "EMLINK", ERANGE: "ERANGE", ENAMETOOLONG: "ENAMETOOLONG",
 	ENOSYS: "ENOSYS", ENOTEMPTY: "ENOTEMPTY", ELOOP: "ELOOP", ENODATA: "ENODATA", EPROTO: "EPROTO",
