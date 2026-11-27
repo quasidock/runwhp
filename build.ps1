@@ -36,7 +36,16 @@ $env:GOOS = 'linux'; $env:GOARCH = 'amd64'; $env:CGO_ENABLED = '0'
 try {
     go build -trimpath -ldflags='-s -w' -o out/runwhp-init ./guest/init
     if ($LASTEXITCODE) { exit $LASTEXITCODE }
+    # BuildKit's daemon for the Engine API's builder, a module of its own,
+    # so that BuildKit's dependencies move none of runwhp.exe's.
+    Push-Location guest/buildkitd
+    try {
+        go build -trimpath -ldflags='-s -w' -o ../../out/runwhp-buildkitd .
+        if ($LASTEXITCODE) { exit $LASTEXITCODE }
+    } finally {
+        Pop-Location
+    }
 } finally {
     Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED
 }
-Write-Host 'built out\runwhp.exe, out\runwhp-compose.exe, out\containerd-shim-runwhp-v1.exe and out\runwhp-init'
+Write-Host 'built out\runwhp.exe, out\runwhp-compose.exe, out\containerd-shim-runwhp-v1.exe, out\runwhp-init and out\runwhp-buildkitd'
