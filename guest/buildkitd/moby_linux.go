@@ -81,10 +81,19 @@ func (i *mobyInstance) Export(ctx context.Context, src *exporter.Source, buildIn
 	}
 	desc := ref.Descriptor()
 
-	provider, err := i.provider(ctx, src, buildInfo)
-	if err != nil {
-		return fail(err)
+	// The image's ID in runwhp's store, as in Docker's without the
+	// containerd image store: its linux/amd64 config's digest.
+	config := resp[exptypes.ExporterImageConfigDigestKey]
+	if config == "" {
+		m, err := images.Manifest(ctx, i.e.content, desc, platforms.Only(localPlatform))
+		if err != nil {
+			return fail(fmt.Errorf("finding the image's configuration: %w", err))
+		}
+		config = m.Config.Digest.String()
+		resp[exptypes.ExporterImageConfigDigestKey] = config
 	}
+	resp[exptypes.ExporterImageDigestKey] = config
+
 	var names []string
 	for _, n := range strings.Split(resp[exptypes.ExporterImageNameKey], ",") {
 		// A dangling image's name is its digest: runwhp's store lists it
@@ -92,6 +101,26 @@ func (i *mobyInstance) Export(ctx context.Context, src *exporter.Source, buildIn
 		if n != "" && !strings.Contains(n, "@") {
 			names = append(names, n)
 		}
+	}
+	// An image the store has already, as a build from the cache makes
+	// again, is only named.
+	if info, err := i.e.api.inspect(ctx, config); err == nil && info.ID == config {
+		named := progress.OneOff(ctx, "naming the image in runwhp's store")
+		var err error
+		for _, n := range names {
+			if err = i.e.api.tag(ctx, config, n); err != nil {
+				break
+			}
+		}
+		if err := named(err); err != nil {
+			return fail(fmt.Errorf("naming the image in runwhp's store: %w", err))
+		}
+		return resp, finalize, ref, nil
+	}
+
+	provider, err := i.provider(ctx, src, buildInfo)
+	if err != nil {
+		return fail(err)
 	}
 	loaded := progress.OneOff(ctx, "loading the image into runwhp's store")
 	pr, pw := io.Pipe()
@@ -104,19 +133,6 @@ func (i *mobyInstance) Export(ctx context.Context, src *exporter.Source, buildIn
 	if err := loaded(err); err != nil {
 		return fail(fmt.Errorf("loading the image into runwhp's store: %w", err))
 	}
-
-	// The image's ID in runwhp's store, as in Docker's without the
-	// containerd image store: its linux/amd64 config's digest.
-	config := resp[exptypes.ExporterImageConfigDigestKey]
-	if config == "" {
-		m, err := images.Manifest(ctx, provider, desc, platforms.Only(localPlatform))
-		if err != nil {
-			return fail(fmt.Errorf("finding the image's configuration: %w", err))
-		}
-		config = m.Config.Digest.String()
-		resp[exptypes.ExporterImageConfigDigestKey] = config
-	}
-	resp[exptypes.ExporterImageDigestKey] = config
 	return resp, finalize, ref, nil
 }
 

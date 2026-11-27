@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/distribution/reference"
 )
 
 // dockerAPI is runwhp's Engine API, as the builder reaches it: through
@@ -72,6 +74,24 @@ func (a *dockerAPI) save(ctx context.Context, name string) (io.ReadCloser, error
 		return nil, err
 	}
 	return resp.Body, nil
+}
+
+// tag names the image id ref, as docker tag does.
+func (a *dockerAPI) tag(ctx context.Context, id, ref string) error {
+	named, err := reference.ParseNormalizedNamed(ref)
+	if err != nil {
+		return err
+	}
+	q := url.Values{"repo": {named.Name()}, "tag": {"latest"}}
+	if t, ok := named.(reference.Tagged); ok {
+		q.Set("tag", t.Tag())
+	}
+	resp, err := a.do(ctx, http.MethodPost, "/images/"+escapeRef(id)+"/tag?"+q.Encode(), nil, "")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return apiError(resp)
 }
 
 // load loads an archive into the store, and returns once it is there, or
