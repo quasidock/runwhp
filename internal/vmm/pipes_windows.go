@@ -18,8 +18,10 @@ import (
 )
 
 // pipeDialTimeout bounds how long a connection from the guest waits for
-// its pipe, a busy one's server included.
-var pipeDialTimeout = 2 * time.Second
+// its pipe, a busy one's server included. A pipe with no server fails at
+// once. It is Docker's client's own, as a busy machine's server makes 100
+// connections at once wait past 2 s for their instances.
+var pipeDialTimeout = 10 * time.Second
 
 // pipeWarnEvery spaces the log's lines about a pipe that cannot be
 // reached, which a client trying again and again would otherwise fill.
