@@ -792,3 +792,44 @@
 - **`os.Stat` of a named pipe does not connect to it**: one that does not
   exist gives "cannot find the file", and one that does, busy or not,
   another error, so it tells them apart without taking an instance.
+- **buildx's docker driver**, v0.39.0, is the default builder of a docker
+  context only if a `POST /grpc` with `Upgrade: h2c` is answered 101 at
+  once: it probes it, and otherwise makes a builder of its own with the
+  docker-container driver, `buildx_buildkit_default`, a privileged
+  `moby/buildkit:buildx-stable-1` container, and remembers that in
+  `DOCKER_CONFIG\buildx`. It then dials `/grpc` for BuildKit's control and
+  gateway APIs, one HTTP/2 connection for every call, and `/session` for
+  each build's session, with `X-Docker-Expose-Session-*` headers that
+  BuildKit's session manager takes as they are, the session's gRPC
+  methods among them.
+- **What buildx asks of Docker's BuildKit**: the default output, and
+  `--load`, become the `moby` exporter, which BuildKit's own daemon has
+  not, `--push` the same with `push=true`, which buildx expects it to
+  push itself once the worker has a `org.mobyproject.buildkit.worker.snapshotter`
+  label, as the OCI worker's has; that label also turns on the OCI and
+  docker exporters, cache export and multi-platform builds. Every build
+  asks `image-resolve-mode=PreferLocal`, so that FROM finds the daemon's
+  images first, unless `--pull`.
+- **BuildKit's worker has an image store hook**, `WorkerOpt.ImageStore`,
+  that its resolver asks before a registry in PreferLocal mode, by
+  `name:tag`, trusting the target it gets: an image of runwhp's store,
+  imported into BuildKit's content store from the API's save, under a
+  lease, serves a FROM with no registry.
+- **BuildKit's image exporter, with `store=false`**, commits the image
+  and hands back a descriptor whose lease holds the image's content, and
+  pushes from its finalize step: an exporter wrapping it can write the
+  image elsewhere as it likes. containerd's archive exporter writes an
+  OCI layout with each name as `io.containerd.image.name`, which runwhp's
+  load reads.
+- **Nested cgroups**: once a container enables controllers in its own
+  cgroup's `cgroup.subtree_control`, as docker:dind's entrypoint and
+  BuildKit with `BUILDKIT_SETUP_CGROUPV2_ROOT=1` do after moving their
+  processes into a child, `clone3(CLONE_INTO_CGROUP)` into it fails with
+  EBUSY, and an exec has to go into a leaf, as runc puts one into the
+  container process's cgroup. Go's `Unshareflags` unshare after the clone
+  into the cgroup, so a cgroup namespace unshared there is rooted at it.
+- **docker:dind 29.10 and moby/buildkit 0.35.0 run in a runwhp guest**
+  with only the container's cgroup read-write and its controllers
+  delegated: runc's seccomp profile, device eBPF filter and namespaces
+  need nothing else of the guest's kernel, and dockerd picks overlayfs
+  and cgroup v2 on a volume.

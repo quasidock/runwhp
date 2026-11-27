@@ -165,10 +165,33 @@
 - Execs, attaches, log follows and event streams the API serves end with
   the server; the containers do not, nor the processes of execs started
   with `-d`, though their inspect no longer learns how they end.
-- With buildx installed, Docker Compose and Dev Containers build through
-  BuildKit, which runwhp does not serve: Docker Compose then needs
-  `DOCKER_BUILDKIT=0`, and Dev Containers cannot build an image. Without
-  it, both use the classic builder, which runwhp serves.
+- The API's BuildKit keeps a cache of its own, apart from `runwhp
+  build`'s: an image built by one is built again by the other. `system df`
+  and `builder prune` without buildx count only the classic builder's;
+  `docker buildx du` and `prune` BuildKit's, and only while the builder
+  runs, as they start it.
+- An image built with BuildKit crosses into runwhp's store whole, its
+  layers uncompressed, as a load, and a FROM from the store crosses back
+  through `save`, about 0.2 s before the first byte, the first time a
+  build uses it: where Docker's BuildKit and its images share one store,
+  here they are two.
+- The builder is one per store's API server, a guest with the host's
+  logical processors and half its memory, for every build at once: Docker's
+  BuildKit is its daemon's. Its first build pulls `moby/buildkit` from
+  Docker Hub, and boots it, a few seconds; an idle builder holds what its
+  page cache keeps, until the server stops.
+- The builder's cache limits are set from the room free on the store's
+  disk as the builder starts, and do not follow it as it changes.
+- A FROM image in runwhp's store wins over its registry, as with Docker,
+  even when the registry has a newer one, unless `--pull`; a store's
+  image of another platform than a build's is not found, and BuildKit
+  pulls it.
+- Only the linux/amd64 image of a multi-platform build is loaded into the
+  store; ssh mounts, `# syntax=` frontends and multi-platform builds are
+  untried.
+- A privileged container has no CAP_SYS_BOOT, none of the guest's devices
+  but FUSE, TUN and the kernel log, and no host devices, `--device` or
+  `--cap-add`: the VM is the container's, not the host's.
 - The API reports runwhp's own log as `json-file`, Docker's default, as
   docker-py looks for it; it is not Docker's JSON-lines file, so tools
   that read Docker's log files themselves, rather than through the API,
@@ -180,11 +203,10 @@
   Docker's lists the host's, and takes `ps` options `-ef` and `aux`
   alone. It runs no `ps`: init reads its `/proc`.
 - The API has no `update` (but an empty one), image search,
-  `attach/ws`, checkpoints, plugins or swarm, and no BuildKit session:
-  `docker build` uses the classic builder's endpoint, warning that it is
-  deprecated, and `docker buildx` cannot build through runwhp. A build's
-  secrets and ssh, `--cache-from`, `--output` and a git or URL context are
-  refused.
+  `attach/ws`, checkpoints, plugins or swarm. A classic build, as
+  `docker build` makes without buildx, refuses secrets and ssh,
+  `--cache-from`, `--output` and a git or URL context; with buildx,
+  BuildKit takes them.
 - A container made without a name, before iteration 21, goes by its short
   ID. One-character names are refused, as Docker 29 refuses them.
 - `docker stop` and `docker wait --condition` on a created container
@@ -370,7 +392,9 @@
   read an image's files through one.
 - `runwhp containerd` runs in the foreground, and nothing starts it at
   logon. Containers outlive it; ended, they wait for it to start again to
-  be removed.
+  be removed. With its root on a ReFS volume, runwhp's snapshotter exits
+  before it serves, for reasons not yet known; on NTFS, as under
+  `%LOCALAPPDATA%` by default, it runs.
 - The shim boots runwhp's kernel, or `RUNWHP_KERNEL`'s, never with
   `--module`, so not WSL's.
 - The shim's containers are records in a runwhp store of their own, which

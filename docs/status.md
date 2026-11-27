@@ -1,5 +1,23 @@
 # Status
 
+- **Iteration 23** (2026-11-27): BuildKit, through buildx. With buildx
+  installed, `docker build`, `docker buildx build`, Docker Compose's
+  `buildx bake` and Dev Containers build through the Engine API's `/grpc`
+  and `/session`, as against Docker, with BuildKit v0.35.0 in a builder the
+  server starts: a privileged container of `moby/buildkit`, running
+  `runwhp-buildkitd`, BuildKit's daemon built for runwhp, with what
+  Docker's embedded BuildKit adds: the `moby` exporter, which loads the
+  image into runwhp's store, and the store's images as FROM's. Outputs,
+  pushes, the registry cache, secrets, cache and bind mounts and parallel
+  stages work as BuildKit's do. `--privileged` is taken: the container's cgroup
+  read-write with controllers to delegate, `/sys` read-write and FUSE,
+  TUN and kmsg, so docker:dind runs and builds, as does buildx's
+  docker-container driver; every container now sees its cgroup at
+  `/sys/fs/cgroup` in a namespace of its own, as Docker's do. An attached
+  client that falls behind holds the container's output up, as Docker's
+  do, rather than being cut off. See
+  [BuildKit](../README.md#docker-engine-api) and
+  [Iteration 23 results](#iteration-23-results).
 - **Iteration 22** (2026-11-27): containers drive Docker's API, and
   reach any named pipe of the host. A pipe bound into a container, with
   `-v //./pipe/NAME:PATH` or `--mount`, is a Unix socket there: init
@@ -2029,3 +2047,83 @@ the WSL kernel with its vsock modules passed with `--module`, Docker's
 tools included. VS Code's "Reopen in Container", with
 docker-outside-of-docker, and `docker run -it` in a console, are still to
 be tried by hand.
+
+## Iteration 23 results
+
+Measured on the test machine with runwhp's kernel, from Git Bash, with
+the store on NTFS (`C:`), over five runs. "Iteration 22" is that
+iteration's build, run in turn with this one. buildx is v0.39.0, the
+docker CLI docker.exe 29.9.3; Docker is Docker 29.10 with buildx 0.39.1
+in WSL on the same machine.
+
+runwhp's own commands cost what they did: the cgroup namespace and the
+bind of `/sys/fs/cgroup` cost a run nothing measurable, nor does
+`--privileged`:
+
+| Measurement | Iteration 22 | Iteration 23 |
+| --- | --- | --- |
+| `run --rm alpine:3.20 true`, `-m 512m` | 201-208 ms | 196-204 ms |
+| the same, default memory | 259-277 ms | 263-273 ms |
+| the same, `-m 512m --privileged` | | 199-210 ms |
+| `runwhp help` | 66-72 ms | 65-70 ms |
+
+Builds of the same context, `FROM alpine:3.20`, `RUN apk add --no-cache
+curl` and a `COPY` of 50 files, with buildx through the API, the classic
+builder through the API (`DOCKER_BUILDKIT=0`), runwhp's own, and Docker's
+BuildKit in WSL:
+
+| Measurement | buildx → runwhp | classic → runwhp | `runwhp build` | Docker |
+| --- | --- | --- | --- | --- |
+| from the cache | 801-860 ms | 211-238 ms | 80-84 ms | 270-277 ms |
+| the same, the builder booting first | 1674-1812 ms | | | |
+| `--no-cache` | 3.7-6.5 s | 2.8-4.0 s | 2.6-5.5 s | 3.0-5.3 s |
+
+`--no-cache` varies with the network, `apk add` fetching from Alpine's
+mirrors. A cached build through buildx starts the plugin, about 230 ms
+before it sends anything, then a session, the context's checks, a solve
+and an export over vsock, each a round trip through the container's
+runwhp; an image the store has already is only tagged, where loading it
+again took 0.3 s, which this iteration's last commit saved. The first
+build after the server starts boots the builder, about 0.9 s.
+
+200 MB attached to `docker run`, as fast as `head -c` writes it, to a
+file: 1365-1612 ms, against 1538-1934 ms with iteration 22's server; a
+reader that keeps up was not cut off then either. One that stops reading,
+which was cut off at 4 MiB, now holds the container up and gets every
+byte, 64 MiB in the tests.
+
+runwhp.exe is 24.2 MB, 0.1 MB more than in iteration 22, runwhp-compose.exe
+27.6 MB, runwhp-init 3.3 MB, and runwhp-buildkitd 37.9 MB.
+
+The new tests cover:
+
+- **Attaches:** a slow reader getting 64 MiB, the output waiting for it
+  without a lock held; detach, a failed connection and the guest stopping
+  each letting the output go; end to end with `start -a` and `docker run`.
+- **Privileged:** an unprivileged container's cgroup at `/sys/fs/cgroup`,
+  read-only, `0::/` for its process and an exec's; a privileged one's
+  controllers, devices and `/sys`, an exec once the container has moved
+  into a child cgroup, as docker:dind does, starting in that child, and
+  pause freezing it; the API and compose taking `--privileged` and
+  unconfined security options.
+- **The API's BuildKit:** the h2c upgrade answered at once and carried
+  with the bytes the client sent first; the session's headers; the
+  builder kept out of prunes and lists.
+- **End to end, with buildx:** images loaded and run by docker and
+  runwhp, with the ID `--iidfile` gives; `docker build` forwarded to
+  buildx; stages, arguments and `--network=none`; secret, cache and
+  bind-from mounts; FROM an image only runwhp's store has, and `--pull`
+  refusing it; local, tar, oci and docker outputs; a push and a registry
+  cache from the builder to the test's registry; two builds at once; the
+  cache kept across a restart of the server; Docker Compose building a
+  service FROM another's image through bake; the Dev Containers CLI
+  building a Dockerfile with a feature; buildx's docker-container driver;
+  and docker:dind running and building.
+
+The whole suite passes with 1, 4 and 16 vCPUs on runwhp's kernel, and on
+the WSL kernel with its vsock modules passed with `--module`, Docker's
+tools and buildx included; the builder boots runwhp's kernel in each. Its
+stores were on ReFS (`E:`), as `C:` had little room, but for nerdctl's,
+whose containerd snapshotter does not start on a ReFS root, and which
+pass on NTFS. VS Code's "Reopen in Container" with buildx, and `docker
+run -it` in a console, are still to be tried by hand.

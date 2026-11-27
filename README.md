@@ -27,8 +27,10 @@ its own, and pushed to registries. `runwhp compose` runs compose.yaml
 projects as Docker Compose does, each container in a runwhp of its own,
 with Docker's labels, healthchecks and filters. `runwhp docker-api` serves
 Docker's Engine API, so that the docker CLI runs containers, builds and
-pushes images, and manages networks and volumes through runwhp, as do
-Docker Compose, Testcontainers, Docker's SDKs and Dev Containers; a
+pushes images, with BuildKit when buildx is installed, and manages
+networks and volumes through runwhp, as do Docker Compose, Testcontainers,
+Docker's SDKs and Dev Containers; privileged containers run Docker in
+Docker and BuildKit's own builders; a
 container can drive it too, through Docker's socket, as any named pipe of
 the host can be bound into a container as a Unix socket. Stock
 nerdctl runs Linux containers on it too, through a containerd of the
@@ -1298,11 +1300,55 @@ and converts: `Pulling fs layer`, `Downloading`, `Pull complete`, or
 `Already exists`. A client's credentials, its `X-Registry-Auth`, go with its
 pull or push; `docker login` checks them against the registry, then stores
 them in Docker's `config.json`, where runwhp's own pulls and pushes find
-them too. `docker build` uses the classic builder's endpoint: the docker
-CLI sends the context, which a job extracts and builds as `runwhp build`
-does, and gets the same image ID; the static `docker.exe` has no buildx, and
-runwhp has no BuildKit session. `GET /distribution/NAME/json`, the SDKs'
+them too. Without buildx, `docker build` uses the classic builder's
+endpoint: the docker CLI sends the context, which a job extracts and
+builds as `runwhp build` does, and gets the same image ID; with buildx, it
+builds with BuildKit. `GET /distribution/NAME/json`, the SDKs'
 distribution inspect, looks an image up in its registry without pulling it.
+
+**BuildKit.** With the buildx plugin installed, as Docker Desktop installs
+it, `docker build`, `docker buildx build`, `docker compose build`, which
+runs `buildx bake`, and Dev Containers build with BuildKit, through
+buildx's docker driver, as against Docker. The API serves `/grpc` and
+`/session` as Docker's daemon does for it, and carries each connection to
+BuildKit v0.35.0's daemon in the builder, a privileged container of the
+server's, `runwhp_buildkit`:
+
+- **The builder** is made from `moby/buildkit:v0.35.0`, pinned by digest,
+  for its runc, git and emulators, and runs runwhp's own build of BuildKit's
+  daemon, `runwhp-buildkitd`, from beside runwhp.exe. The server makes and
+  starts it at the first build, pulling its image the first time, and
+  stops it as it stops; it boots again at the next build, on
+  the same cache. It is the server's, as Docker's BuildKit is no container:
+  `docker ps`, `runwhp list`, events and prunes leave it out, though `logs`,
+  `inspect` and `exec` take its name.
+- **The cache** is BuildKit's own, on the volume `runwhp_buildkit`, sparse,
+  with BuildKit's default limits for the room free on the store's disk as
+  the builder starts, at most half of it and 100 GB. It is not `runwhp
+  build`'s: `docker buildx du` and `docker buildx prune`, or `docker
+  builder prune` with buildx, are BuildKit's; `system df`, and `builder
+  prune` without buildx, the classic builder's.
+- **Images built** go to runwhp's store, as with Docker: the default output
+  and `--load` load the image, its layers uncompressed, through the API, and
+  `--iidfile` and `--metadata-file` give its ID in the store, its config's
+  digest. `--push`, `--output type=local|tar|oci|docker`, the registry
+  cache, secrets, `RUN --mount=type=cache` and `type=bind,from=`,
+  `--network=none` and builds at once are tested, and work as BuildKit's
+  do; ssh mounts, `# syntax=` frontends and multi-platform builds are
+  untried. Only the linux/amd64 image of a multi-platform build would be
+  loaded.
+- **FROM** finds an image in runwhp's store first, built, loaded or
+  pulled, as Docker's BuildKit finds Docker's, unless `--pull`, and fetches
+  it into BuildKit's content store, through `save`, the first time a build
+  uses it; a FROM missing from the store is pulled from its registry by
+  BuildKit.
+- **RUN** has the builder's network, runwhp's own, with
+  `host.docker.internal` reaching the host, and `--add-host
+  NAME:host-gateway` the host's loopback.
+
+buildx's docker-container driver works too, its builder a privileged
+`moby/buildkit` container of its own, as does Docker in Docker, `docker:dind`
+with `--privileged`.
 
 #### Docker's tools
 
@@ -1312,11 +1358,12 @@ context, or, with `docker-api start --docker-engine`, Docker's own pipe:
 
 | Tool | Tested | What to know |
 | --- | --- | --- |
-| Docker Compose, the plugin | 5.7.1 | Put `docker-compose.exe` in `%USERPROFILE%\.docker\cli-plugins` as `docker-compose.exe`, or in `DOCKER_CONFIG`'s. Without buildx it builds with the classic builder, saying so, as runwhp serves; with buildx installed it would want BuildKit, which runwhp does not serve: set `DOCKER_BUILDKIT=0`. `ports: ["80"]` gets a free host port. `use_api_socket` reaches the API, with the docker CLI's credentials. A project it makes shows in `runwhp compose ps`, and the reverse |
+| buildx | 0.39.0 | Put `docker-buildx.exe` in `%USERPROFILE%\.docker\cli-plugins`, or in `DOCKER_CONFIG`'s. Its default builder is the API's, with the docker driver; see **BuildKit** above |
+| Docker Compose, the plugin | 5.7.1 | Put `docker-compose.exe` in `%USERPROFILE%\.docker\cli-plugins` as `docker-compose.exe`, or in `DOCKER_CONFIG`'s. With buildx it builds through `buildx bake`, with BuildKit; without, with the classic builder, saying so. `ports: ["80"]` gets a free host port. `use_api_socket` reaches the API, with the docker CLI's credentials. A project it makes shows in `runwhp compose ps`, and the reverse |
 | testcontainers-go | 0.45.0 | Its reaper, Ryuk 0.14.0, runs as with Docker: it binds the pipe testcontainers-go reached the API on as Docker's socket, which reaches the API from its container as a [host pipe](#host-pipes), and removes the containers, networks, volumes and images a session left once it ends. It reads `DOCKER_HOST`, or `tc.host` in `~/.testcontainers.properties`, or finds `docker_engine` with `--docker-engine`, not docker contexts. Its modules, wait strategies, files and networks work |
 | Docker's Go SDK, `github.com/moby/moby/client` | v0.6.2 | `client.FromEnv` reads `DOCKER_HOST`, not contexts |
 | docker-py | 7.2.0, with pywin32 | `docker.from_env()` reads `DOCKER_HOST`, or since 7.2 the current context. `containers.run` gives a run's output, as the API reports runwhp's log as `json-file` |
-| Dev Containers | the CLI 0.90.0, which VS Code's extension bundles | From an image, a Dockerfile with features, built with the classic builder, or a compose file. The `docker-outside-of-docker` feature works: the dev container's docker drives runwhp's API, its user's through the feature's proxy. In VS Code, point the extension at runwhp with `docker.context`, or start the API with `--docker-engine`. A volume two dev containers mount at once is refused, as a runwhp volume is one running container's. A `remoteUser` other than the container's user cannot write to the workspace; see [Known gaps](docs/gaps.md) |
+| Dev Containers | the CLI 0.90.0, which VS Code's extension bundles | From an image, a Dockerfile with features, built with BuildKit when buildx is installed and with the classic builder otherwise, or a compose file. The `docker-outside-of-docker` feature works: the dev container's docker drives runwhp's API, its user's through the feature's proxy. In VS Code, point the extension at runwhp with `docker.context`, or start the API with `--docker-engine`. A volume two dev containers mount at once is refused, as a runwhp volume is one running container's. A `remoteUser` other than the container's user cannot write to the workspace; see [Known gaps](docs/gaps.md) |
 
 Testcontainers for Java and .NET, and Docker's other SDKs, are untried.
 
@@ -1629,6 +1676,7 @@ bzImage.
 | [`kernel`](kernel) | The kernel's configuration and build; [`kernel/push`](kernel/push) publishes it |
 | [`internal/guestspec`](internal/guestspec) | The contract between host and guest: the spec, control messages and events, exec's and the file servers' protocols |
 | [`internal/passwd`](internal/passwd) | User and group resolution |
+| [`guest/buildkitd`](guest/buildkitd) | `runwhp-buildkitd`, BuildKit's daemon as the Engine API's builder runs it, a module of its own: the OCI worker, its gRPC and sessions over vsock, the moby exporter that loads images into runwhp's store, and runwhp's store as BuildKit's image store, through the API |
 | [`guest/init`](guest/init) | `runwhp-init`, PID 1 in the guest: the container's root, its init layer, mounts and cgroup, its process and exec's, the sockets that reach the host's pipes, and the server of its files, written and read as go-archive does, and of image layers' files a guest booted for save runs |
 | [`test/e2e`](test/e2e) | End-to-end tests against WHP, and sockcat, a Unix socket client they build for the guest |
 
@@ -1654,16 +1702,16 @@ WSL kernel; tests of runwhp's own kernel are then skipped.
 - Should the Engine API start at logon? It serves Docker's own
   `\\.\pipe\docker_engine` when started with `--docker-engine`. And now
   that Docker Compose works through the API, should it take over from
-  `runwhp compose`, or BuildKit's session be served for buildx, which
-  Docker Compose and Dev Containers use when it is installed?
+  `runwhp compose`?
 - How should host files with no owner of their own show, so that Dev
   Containers' `remoteUser` can write to its workspace, as it can on a
   Linux host, where Dev Containers gives that user the files' owner's
   UID?
-- Should `build` also run BuildKit itself, in a guest, for what its own
-  builder lacks: `bind,from=` and ssh mounts, cache export and import,
-  stages built at once, and steps that share one guest rather than boot
-  one each?
+- The Engine API's builds run BuildKit itself, in a guest. Should
+  `runwhp build` and `runwhp compose build` build through it too, for what
+  runwhp's own builder lacks, `bind,from=` and ssh mounts, cache export
+  and import, stages built at once, steps that share one guest, rather
+  than keep a builder of their own?
 - Is a one-time administrator step acceptable on machines where the hypervisor
   is off, or must there be a fallback that needs none?
 - virtio-mmio with generated ACPI, as spiked, or virtio over PCI with MSI-X,
