@@ -135,6 +135,11 @@ func TestDockerCompose(t *testing.T) {
     command: ["sh", "-c", "echo fixed > /i && exec nc -lk -p 80 -e cat /i"]
     ports: ["127.0.0.1:` + fixed + `:80"]
     networks: [front]
+  backup:
+    image: alpine:3.20
+    command: ["sh", "-c", "while [ ! -e /data/ready ]; do sleep 0.2; done; echo saw ready; exec sleep 1000"]
+    volumes: [dbdata:/data:ro]
+    deploy: {replicas: 2}
 volumes:
   dbdata: {}
 networks:
@@ -171,9 +176,18 @@ networks:
 		t.Errorf("web at %s: %q", fixed, got)
 	}
 	ps := ok("ps")
-	for _, want := range []string{"rwc-app-1", "rwc-db-1", "rwc-web-1", "(healthy)", addr + "->80/tcp"} {
+	for _, want := range []string{"rwc-app-1", "rwc-db-1", "rwc-web-1", "rwc-backup-1", "rwc-backup-2", "(healthy)", addr + "->80/tcp"} {
 		if !strings.Contains(ps, want) {
 			t.Errorf("ps lacks %q:\n%s", want, ps)
+		}
+	}
+	// db and backup's replicas share dbdata: Compose made each container
+	// before starting any, and the volume became shared as it did.
+	for deadline := time.Now().Add(15 * time.Second); ; time.Sleep(200 * time.Millisecond) {
+		if out := ok("logs", "backup"); strings.Count(out, "saw ready") == 2 {
+			break
+		} else if time.Now().After(deadline) {
+			t.Fatalf("backup's replicas never saw db's file on the volume they share:\n%s", out)
 		}
 	}
 	if out := ok("exec", "-T", "app", "nc", "web", "80"); out != "fixed\n" {

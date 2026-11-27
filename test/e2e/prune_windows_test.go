@@ -22,6 +22,8 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
+
+	"github.com/quasidock/runwhp/internal/volume"
 )
 
 const busybox = "busybox:1.36"
@@ -50,13 +52,26 @@ func newOwnStore(t *testing.T) *ownStore {
 			t.Fatal(err)
 		}
 	}
-	// Containers left running would hold the store's files.
+	// Containers left running would hold the store's files, and so would
+	// shared volumes' servers, until their grace ends.
 	t.Cleanup(func() {
 		for _, id := range strings.Fields(s.cli("", "list", "-q").stdout) {
 			s.cli("", "delete", "-f", id)
 		}
+		stopVolumeServers(s.root)
 	})
 	return s
+}
+
+// stopVolumeServers stops the servers of a store's shared volumes, which
+// serve no container once the test's are gone.
+func stopVolumeServers(root string) {
+	vs, _ := volume.Open(root).List()
+	for _, v := range vs {
+		if v.Shared {
+			v.StopIdleServer()
+		}
+	}
 }
 
 // cli runs runwhp on the store with exactly args, with stdin.

@@ -492,12 +492,6 @@ services:
   udp: {image: "%ALPINE%", ports: ["53:53/udp"]}
   ok: {image: "%ALPINE%", cap_add: [NET_ADMIN]}
 `),
-		"shared.yaml": composeFile(t, `name: e2eref
-services:
-  a: {image: "%ALPINE%", volumes: ["data:/d"]}
-  b: {image: "%ALPINE%", volumes: ["data:/d"]}
-volumes: {data: {}}
-`),
 		"external.yaml": composeFile(t, `name: e2eref
 services:
   a: {image: "%ALPINE%", networks: [x]}
@@ -515,9 +509,6 @@ services:
 		if !strings.Contains(r.stderr, want) {
 			t.Errorf("no %q in:\n%s", want, r.stderr)
 		}
-	}
-	if r := p.run("-f", "shared.yaml", "up", "-d"); r.code != 1 || !strings.Contains(r.stderr, `services "a" and "b" both mount volume e2eref_data`) {
-		t.Errorf("a shared volume: %+v", r)
 	}
 	if r := p.run("-f", "external.yaml", "up", "-d"); r.code != 1 || !strings.Contains(r.stderr, "network e2e-no-such-net declared as external, but could not be found") {
 		t.Errorf("a missing external network: %+v", r)
