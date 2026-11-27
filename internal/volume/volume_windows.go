@@ -4,9 +4,12 @@
 // store's volumes directory holding a sparse ext4 disk image, disk.ext4, and
 // a record of it, volume.json.
 //
-// A volume's disk is attached to a container as a block device, so only one
-// running container can use a volume at a time: its runwhp opens the disk
-// exclusively, and a second one gets disk.ErrInUse.
+// A volume's disk is attached to a container alone as a block device, its
+// runwhp opening the disk exclusively, so that a second one gets
+// disk.ErrInUse. A volume that several containers use at once is shared:
+// its disk is attached to a guest of its own, its server, in a runwhp of
+// its own, which serves the file system to every container using it. Once
+// shared, a volume stays shared, as volume.json records.
 package volume
 
 import (
@@ -24,6 +27,7 @@ import (
 
 	"github.com/quasidock/runwhp/internal/disk"
 	"github.com/quasidock/runwhp/internal/ext4"
+	"github.com/quasidock/runwhp/internal/storefile"
 )
 
 var (
@@ -32,6 +36,29 @@ var (
 	ErrInUse    = errors.New("volume is in use by a running container")
 )
 
+// InUseError says a container cannot have a volume another has: one
+// holding the volume's disk, as a volume not shared is held.
+type InUseError struct {
+	Name string
+	// Holder names the container holding it, if known.
+	Holder string
+	// Hint, if set, says what to do about it.
+	Hint string
+}
+
+func (e *InUseError) Error() string {
+	msg := "volume " + e.Name + " is in use by another container"
+	if e.Holder != "" {
+		msg = "volume " + e.Name + " is in use by container " + e.Holder
+	}
+	if e.Hint != "" {
+		msg += ": " + e.Hint
+	}
+	return msg
+}
+
+func (e *InUseError) Unwrap() error { return ErrInUse }
+
 // Volume is one named volume.
 type Volume struct {
 	Name      string    `json:"name"`
@@ -39,8 +66,18 @@ type Volume struct {
 	Size      int64     `json:"size"` // the file system's size; the disk takes only what is written
 	// Labels are volume create --label's, as Docker keeps them.
 	Labels map[string]string `json:"labels,omitempty"`
+	// Shared says the volume's server serves it to every container using
+	// it, rather than one container's runwhp having its disk.
+	Shared bool `json:"shared,omitempty"`
 
 	dir string
+}
+
+// Options are what a volume is made with.
+type Options struct {
+	Size   int64
+	Labels map[string]string
+	Shared bool
 }
 
 // Disk is the path of the volume's disk image.
@@ -49,8 +86,19 @@ func (v *Volume) Disk() string { return filepath.Join(v.dir, "disk.ext4") }
 // OnDisk returns how many bytes of the host's disk the volume takes.
 func (v *Volume) OnDisk() (int64, error) { return disk.Allocated(v.Disk()) }
 
-// InUse reports whether a running container is using the volume.
-func (v *Volume) InUse() (bool, error) { return disk.InUse(v.Disk()) }
+// InUse reports whether a running container is using the volume: one
+// holding its disk, or the volume's server serving any.
+func (v *Volume) InUse() (bool, error) {
+	busy, err := disk.InUse(v.Disk())
+	if err != nil || !busy {
+		return busy, err
+	}
+	st, err := v.ServerStatus()
+	if err != nil {
+		return true, nil // a container's runwhp has the disk
+	}
+	return st.Clients > 0, nil
+}
 
 // Store is the volumes in one runwhp store.
 type Store struct {
@@ -100,7 +148,7 @@ func (s *Store) Get(name string) (*Volume, error) {
 		return nil, err
 	}
 	dir := s.dir(name)
-	data, err := os.ReadFile(filepath.Join(dir, "volume.json"))
+	data, err := storefile.Read(filepath.Join(dir, "volume.json"))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("%s: %w", name, ErrNotFound)
 	}
@@ -114,6 +162,24 @@ func (s *Store) Get(name string) (*Volume, error) {
 	return v, nil
 }
 
+// SetShared marks the volume called name shared, from now on, and reports
+// whether it was not already.
+func (s *Store) SetShared(name string) (bool, error) {
+	v, err := s.Get(name)
+	if err != nil {
+		return false, err
+	}
+	if v.Shared {
+		return false, nil
+	}
+	v.Shared = true
+	data, _ := json.MarshalIndent(v, "", "  ")
+	if err := storefile.Replace(filepath.Join(v.dir, "volume.json"), append(data, '\n')); err != nil {
+		return false, fmt.Errorf("volume %s: %w", v.Name, err)
+	}
+	return true, nil
+}
+
 // Create makes a new volume with a file system of size bytes. A volume
 // is made in the store's tmp directory and moved into place whole, so a
 // volume is either there and complete or not there at all.
@@ -123,6 +189,12 @@ func (s *Store) Create(name string, size int64) (*Volume, error) {
 
 // CreateWith is Create, the volume labelled with labels.
 func (s *Store) CreateWith(name string, size int64, labels map[string]string) (*Volume, error) {
+	return s.CreateOpts(name, Options{Size: size, Labels: labels})
+}
+
+// CreateOpts makes a new volume as o says.
+func (s *Store) CreateOpts(name string, o Options) (*Volume, error) {
+	size, labels := o.Size, o.Labels
 	if err := CheckName(name); err != nil {
 		return nil, err
 	}
@@ -141,7 +213,7 @@ func (s *Store) CreateWith(name string, size int64, labels map[string]string) (*
 		return nil, err
 	}
 	defer os.RemoveAll(work)
-	v := &Volume{Name: name, CreatedAt: time.Now().UTC().Truncate(time.Second), Size: size, Labels: labels, dir: work}
+	v := &Volume{Name: name, CreatedAt: time.Now().UTC().Truncate(time.Second), Size: size, Labels: labels, Shared: o.Shared, dir: work}
 	f, err := disk.Create(v.Disk(), size, disk.Exclusive)
 	if err != nil {
 		return nil, fmt.Errorf("creating volume %s: %w", name, err)
@@ -180,15 +252,30 @@ func (s *Store) Ensure(name string, size int64) (*Volume, bool, error) {
 
 // EnsureWith is Ensure, a volume it makes labelled with labels.
 func (s *Store) EnsureWith(name string, size int64, labels map[string]string) (*Volume, bool, error) {
+	return s.EnsureOpts(name, Options{Size: size, Labels: labels})
+}
+
+// EnsureOpts returns the volume called name, making it as o says if there
+// is none, and reports whether it did. An existing volume o asks to share
+// is marked shared.
+func (s *Store) EnsureOpts(name string, o Options) (*Volume, bool, error) {
 	v, err := s.Get(name)
-	if err == nil || !errors.Is(err, ErrNotFound) {
+	if err == nil {
+		if o.Shared && !v.Shared {
+			if _, err := s.SetShared(name); err != nil {
+				return nil, false, err
+			}
+			v.Shared = true
+		}
+		return v, false, nil
+	}
+	if !errors.Is(err, ErrNotFound) {
 		return v, false, err
 	}
-	v, err = s.CreateWith(name, size, labels)
+	v, err = s.CreateOpts(name, o)
 	if errors.Is(err, ErrExists) {
 		// Another runwhp made it first.
-		v, err = s.Get(name)
-		return v, false, err
+		return s.EnsureOpts(name, o)
 	}
 	return v, err == nil, err
 }
@@ -224,6 +311,10 @@ func (s *Store) Remove(name string) error {
 	if err != nil {
 		return err
 	}
+	// A server serving no container has the disk only until its grace
+	// ends: stop it now. One serving any keeps it, and the rename below
+	// fails.
+	v.StopIdleServer()
 	// Move it aside first, so that it is gone or complete, never half
 	// removed. Windows will not rename a directory holding a file that
 	// is open without FILE_SHARE_DELETE, as a volume in use is.

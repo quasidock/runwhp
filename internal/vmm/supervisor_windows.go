@@ -202,10 +202,16 @@ func (s *Supervisor) current() *vmBoot {
 // takes it for init, and init waits for it before it starts the process
 // (Spec.ClockSync).
 func (s *Supervisor) clockLoop(b *vmBoot, period time.Duration) {
+	keepClock(b.proxy.queue, b.exited, period, b.proxy.logf)
+}
+
+// keepClock sends the guest the host's time through queue at once, every
+// period and as Windows resumes, until done is closed.
+func keepClock(queue *controlQueue, done <-chan struct{}, period time.Duration, logf func(string, ...any)) {
 	if period <= 0 {
 		return
 	}
-	b.proxy.queue.sendTime()
+	queue.sendTime()
 	wake := make(chan struct{}, 1)
 	stopResume, err := onResume(func() {
 		select {
@@ -214,20 +220,20 @@ func (s *Supervisor) clockLoop(b *vmBoot, period time.Duration) {
 		}
 	})
 	if err != nil {
-		b.proxy.logf("%v; the guest's clock follows the host's every %v only", err, period)
+		logf("%v; the guest's clock follows the host's every %v only", err, period)
 	}
 	defer stopResume()
 	tick := time.NewTicker(period)
 	defer tick.Stop()
 	for {
 		select {
-		case <-b.exited:
+		case <-done:
 			return
 		case <-tick.C:
 		case <-wake:
-			b.proxy.logf("Windows resumed: setting the guest's clock")
+			logf("Windows resumed: setting the guest's clock")
 		}
-		b.proxy.queue.sendTime()
+		queue.sendTime()
 	}
 }
 

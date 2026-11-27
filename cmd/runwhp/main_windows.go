@@ -158,6 +158,8 @@ func realMain(args []string) int {
 		return cmdUnpause(args[1:], os.Stdout)
 	case "__supervise":
 		return cmdSupervise(args[1:])
+	case "__volume":
+		return cmdVolumeServer(args[1:])
 	case "docker-api":
 		return cmdDockerAPI(args[1:])
 	case "__api-job":

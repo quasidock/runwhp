@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Queues of a virtio-fs device (virtio spec 5.11.2).
@@ -54,6 +55,10 @@ type Fs struct {
 	Handler FsHandler
 	// Workers caps the requests served at once. Zero means 16.
 	Workers int
+	// AsyncWait is how long the vCPU that started an FsAsyncHandler's
+	// requests waits for them to complete before it goes back to its
+	// guest. Zero goes back at once.
+	AsyncWait time.Duration
 
 	// Requests counts requests, BytesIn the bytes they carried from the guest
 	// and BytesOut the bytes of their replies, and Inline those served on the
@@ -128,15 +133,29 @@ func (f *Fs) NotifyDeferred(t *Transport, qi int) func() {
 	chains := f.take(t, qi)
 	if _, ok := f.Handler.(FsAsyncHandler); ok {
 		// Starting a request only passes it on, so the vCPU starts them
-		// all.
+		// all. Then it waits a while for their replies: a vCPU that goes
+		// back to its guest halts there, and waking it from the halt
+		// costs more than most replies take to come.
 		if len(chains) == 0 {
 			return nil
 		}
 		f.inflight.Add(len(chains))
 		return func() {
+			var wg sync.WaitGroup
+			wg.Add(len(chains))
 			for _, ch := range chains {
 				f.Inline.Add(1)
-				f.serve(ch)
+				f.serveThen(ch, wg.Done)
+			}
+			if f.AsyncWait > 0 {
+				done := make(chan struct{})
+				go func() { wg.Wait(); close(done) }()
+				t := time.NewTimer(f.AsyncWait)
+				select {
+				case <-done:
+				case <-t.C:
+				}
+				t.Stop()
 			}
 		}
 	}
@@ -226,13 +245,19 @@ func (f *Fs) worker() {
 }
 
 // serve handles a request counted in flight and returns it to the driver.
-func (f *Fs) serve(ch fsChain) {
+func (f *Fs) serve(ch fsChain) { f.serveThen(ch, nil) }
+
+// serveThen serves a request, calling then, if set, once it is complete.
+func (f *Fs) serveThen(ch fsChain, then func()) {
 	if h, ok := f.Handler.(FsAsyncHandler); ok {
 		h.ServeAsync(ch.req, ch.reply, func(written uint32) {
 			f.Requests.Add(1)
 			f.BytesIn.Add(uint64(len(ch.req)))
 			f.BytesOut.Add(uint64(written))
 			f.complete(ch, written)
+			if then != nil {
+				then()
+			}
 		})
 		return
 	}

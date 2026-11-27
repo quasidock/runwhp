@@ -2,6 +2,7 @@ package volfs
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"slices"
 	"strings"
@@ -346,5 +347,26 @@ func TestReaddir(t *testing.T) {
 	s.mu.Unlock()
 	if nodes != 301 {
 		t.Errorf("%d nodes after listing 300 files, want 301", nodes)
+	}
+}
+
+func TestKillSuidgid(t *testing.T) {
+	v, _ := volume(t)
+	s := session(t, v)
+	for _, tc := range []struct{ mode, want uint32 }{
+		{0o6755, 0o755},  // setgid with group execute goes too
+		{0o6644, 0o2644}, // setgid without it marks mandatory locking, and stays
+		{0o755, 0o755},
+	} {
+		e, fh := create(t, s, root, fuse.RootID, fmt.Sprintf("f%o", tc.mode), 0o600)
+		if _, err := s.Setattr(root, e.Node, fuse.SetattrIn{Valid: fuse.SetMode, Mode: tc.mode}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.KillSuidgid(root, e.Node, fh); err != nil {
+			t.Fatal(err)
+		}
+		if a, _ := s.Getattr(root, e.Node); a.Mode&0o7777 != tc.want {
+			t.Errorf("mode %o after killing privileges: %o, want %o", tc.mode, a.Mode&0o7777, tc.want)
+		}
 	}
 }

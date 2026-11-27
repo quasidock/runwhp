@@ -34,5 +34,5 @@ func BootStep(ctx context.Context, root string, s Step) (*Guest, error) {
 	if s.Process {
 		what = "the guest of a build step"
 	}
-	return bootGuest(ctx, root, s.Config, layer, s.Process, s.IO, what)
+	return bootGuest(ctx, root, s.Config, layer, s.Process, nil, s.IO, what)
 }

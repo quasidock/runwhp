@@ -97,6 +97,15 @@ type RangeCopier interface {
 	CopyFileRange(c Context, nodeIn, fhIn, offIn, nodeOut, fhOut, offOut, length uint64, flags uint64) (uint64, error)
 }
 
+// SuidgidKiller is implemented by file systems that clear a file's setuid
+// and setgid bits themselves when it is written to, truncated or given
+// another owner, as Linux does unless the writer may keep them. The kernel
+// then need not ask, before each write, whether the file has privileges to
+// lose: KillSuidgid is called when the kernel says they must go.
+type SuidgidKiller interface {
+	KillSuidgid(c Context, node, fh uint64) error
+}
+
 // Syncer is implemented by file systems that can write everything back at
 // once, as syncfs(2) asks.
 type Syncer interface {
@@ -149,6 +158,18 @@ func (s *Server) logf(format string, a ...any) {
 	if s.Logf != nil {
 		s.Logf(format, a...)
 	}
+}
+
+// killSuidgid has the file system clear node's setuid and setgid bits, if
+// the kernel asked and the file system offered to.
+func (s *Server) killSuidgid(c Context, node, fh uint64, asked bool) error {
+	if !asked {
+		return nil
+	}
+	if k, ok := s.FS.(SuidgidKiller); ok {
+		return k.KillSuidgid(c, node, fh)
+	}
+	return nil
 }
 
 // keepCache returns the open flags that keep a file's cached pages.
@@ -288,6 +309,18 @@ func (s *Server) handle(c Context, op uint32, node uint64, r *reader, room int) 
 		if err != nil {
 			return nil, err
 		}
+		if in.Valid&setKillSuidgid != 0 {
+			fh := uint64(0)
+			if in.Valid&SetHandle != 0 {
+				fh = in.Handle
+			}
+			if err := s.killSuidgid(c, node, fh, true); err != nil {
+				return nil, err
+			}
+			if a, err = s.FS.Getattr(c, node); err != nil {
+				return nil, err
+			}
+		}
 		w.attrOut(&a, t)
 		return w.b, nil
 	case opReadlink:
@@ -345,7 +378,7 @@ func (s *Server) handle(c Context, op uint32, node uint64, r *reader, room int) 
 		}
 		return entry(s.FS.Link(c, old, node, name))
 	case opOpen, opOpendir:
-		flags := r.u32()
+		flags, inFlags := r.u32(), r.u32()
 		if r.bad {
 			return nil, EINVAL
 		}
@@ -354,6 +387,12 @@ func (s *Server) handle(c Context, op uint32, node uint64, r *reader, room int) 
 		var openFlags uint32
 		if op == opOpen {
 			fh, err = s.FS.Open(c, node, flags)
+			if err == nil {
+				if kerr := s.killSuidgid(c, node, fh, inFlags&openKillSuidgid != 0); kerr != nil {
+					s.FS.Release(node, fh)
+					return nil, kerr
+				}
+			}
 			// The page cache survives across opens; with AUTO_INVAL_DATA
 			// the kernel drops it when the file's size or mtime changes.
 			openFlags = s.keepCache()
@@ -384,10 +423,13 @@ func (s *Server) handle(c Context, op uint32, node uint64, r *reader, room int) 
 		w.u32(0)
 		return w.b, nil
 	case opWrite:
-		fh, off, size := r.u64(), r.u64(), r.u32()
-		r.skip(4 + 8 + 4 + 4) // write_flags, lock_owner, flags, padding
+		fh, off, size, writeFlags := r.u64(), r.u64(), r.u32(), r.u32()
+		r.skip(8 + 4 + 4) // lock_owner, flags, padding
 		if r.bad || int(size) > len(r.b) {
 			return nil, EINVAL
+		}
+		if err := s.killSuidgid(c, node, fh, writeFlags&writeKillSuidgid != 0); err != nil {
+			return nil, err
 		}
 		n, err := s.FS.Write(c, node, fh, int64(off), r.b[:size])
 		if err != nil {
@@ -605,6 +647,9 @@ func (s *Server) init(r *reader) ([]byte, error) {
 	}
 	if _, ok := s.FS.(Locker); ok {
 		want |= initPosixLocks | initFlockLocks
+	}
+	if _, ok := s.FS.(SuidgidKiller); ok {
+		want |= initKillprivV2
 	}
 	w.u32(flags & want)
 	w.u16(64)                  // max_background

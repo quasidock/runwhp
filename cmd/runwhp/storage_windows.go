@@ -57,6 +57,17 @@ func parseDiskSize(s string) (int64, error) {
 	return min(int64(size), ext4.MaxSize) &^ 4095, nil
 }
 
+// parseShared reads a volume's shared option: a volume made shared is
+// served by its own guest from its first use, so containers can use it
+// at once without any being started again.
+func parseShared(s string) (bool, error) {
+	v, err := strconv.ParseBool(s)
+	if err != nil {
+		return false, fmt.Errorf("invalid shared=%q: give true or false", s)
+	}
+	return v, nil
+}
+
 // parseStorageOpts reads --storage-opt, of which runwhp knows size=SIZE:
 // how large the container's writable layer may grow.
 func parseStorageOpts(opts []string) (int64, error) {

@@ -809,6 +809,34 @@ func (s *Session) CopyFileRange(c fuse.Context, nodeIn, fhIn, offIn, nodeOut, fh
 	return uint64(n), nil
 }
 
+// KillSuidgid clears a regular file's setuid bit, and its setgid bit if
+// the group may execute it, as Linux does when someone who may not keep
+// them writes to it. The server writes as root, which may, so it does what
+// the guest's kernel asks. File capabilities the server's own kernel
+// removes on every write.
+func (s *Session) KillSuidgid(c fuse.Context, id, fh uint64) error {
+	n, err := s.node(id)
+	if err != nil {
+		return err
+	}
+	st, err := fstat(n.fd)
+	if err != nil {
+		return errno(err)
+	}
+	if st.Mode&fuse.ModeType != fuse.ModeFile {
+		return nil
+	}
+	mode := st.Mode & 0o7777
+	kill := uint32(unix.S_ISUID)
+	if mode&unix.S_IXGRP != 0 {
+		kill |= unix.S_ISGID
+	}
+	if mode&kill == 0 {
+		return nil
+	}
+	return errno(unix.Chmod(procPath(n.fd), mode&^kill))
+}
+
 func (s *Session) Syncfs(c fuse.Context) error {
 	return errno(unix.Syncfs(s.v.rootRD))
 }
@@ -822,3 +850,5 @@ var (
 	_ fuse.RangeCopier = (*Session)(nil)
 	_ fuse.Syncer      = (*Session)(nil)
 )
+
+var _ fuse.SuidgidKiller = (*Session)(nil)

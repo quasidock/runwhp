@@ -155,7 +155,7 @@ type guestOpts struct {
 func bootContainer(ctx context.Context, root string, cfg *container.Config, layer *PendingLayer, opts guestOpts, policy image.Policy, proxy *SignalProxy, bio BootIO, hooks bootHooks, logf func(string, ...any), start time.Time) (int, error) {
 	const fail = guestspec.ExitRuntime
 
-	storage, err := openStorage(root, cfg, logf)
+	storage, err := openStorage(ctx, root, cfg, logf)
 	if err != nil {
 		return fail, err
 	}
@@ -188,7 +188,7 @@ func bootContainer(ctx context.Context, root string, cfg *container.Config, laye
 	spec := guestspec.Spec{
 		Args: cfg.Args, Env: cfg.Env, Cwd: cfg.Cwd, User: cfg.User,
 		Hostname: cfg.Hostname, Hosts: cfg.Hosts, Layers: len(storage.layers), Scratch: lr.file != nil, KeepLayer: keep,
-		Volumes: len(storage.volumes), Debug: cfg.Debug, Stdin: cfg.Stdin, TTY: cfg.TTY,
+		Volumes: len(storage.volumes), SharedVolumes: storage.shared, Debug: cfg.Debug, Stdin: cfg.Stdin, TTY: cfg.TTY,
 		Networks: network.specs, Resolv: network.resolv, HostnameAddrs: network.hostnameAddrs,
 		Mounts: cfg.Mounts, WaitStart: hooks.waitStart, Serve: opts.serve, HideMountPoints: cfg.HideMountPoints,
 		Privileged: cfg.Privileged,
@@ -199,6 +199,13 @@ func bootContainer(ctx context.Context, root string, cfg *container.Config, laye
 		if hasSockets(cfg.Mounts) {
 			spec.SocketToken = socketToken()
 		}
+	}
+	if opts.serve == guestspec.ServeVolume {
+		// A volume's server runs as long as containers use the volume:
+		// it gives back the cache they leave behind, and its clock sets
+		// the times of what they write.
+		spec.Reclaim = reclaimPolicy(logf)
+		spec.ClockSync = clockPeriod(logf) > 0
 	}
 	if cfg.TTY {
 		if bio.Terminal {
@@ -350,13 +357,18 @@ type containerStorage struct {
 	layers  []virtio.Device
 	scratch virtio.Device
 	volumes []virtio.Device
+	// shared lists the volumes served by their servers, whose devices are
+	// virtio-fs rather than disks.
+	shared  []int
 	closers []func()
 }
 
 // openStorage opens a container's storage but its writable layer: its
-// layers, read-only, its volumes, exclusively, as a volume is in one
-// container at a time, and its shares' file systems.
-func openStorage(root string, cfg *container.Config, logf func(string, ...any)) (_ *containerStorage, err error) {
+// layers, read-only, its volumes, and its shares' file systems. A volume
+// that is not shared has its disk opened exclusively, as one container
+// has it; a shared one is reached through its server, started if none
+// runs.
+func openStorage(ctx context.Context, root string, cfg *container.Config, logf func(string, ...any)) (_ *containerStorage, err error) {
 	s := &containerStorage{}
 	defer func() {
 		if err != nil {
@@ -372,9 +384,26 @@ func openStorage(root string, cfg *container.Config, logf func(string, ...any)) 
 		if err != nil {
 			return nil, err
 		}
+		if v.Shared && u.Root == "" && !u.Exclusive {
+			conn, err := connectVolume(ctx, root, v, cfg, logf)
+			if err != nil {
+				return nil, err
+			}
+			fwd := fuse.NewForwarder(conn)
+			fwd.Logf = func(format string, a ...any) {
+				logf("volume %s: "+format, append([]any{v.Name}, a...)...)
+			}
+			s.closers = append(s.closers, func() {
+				logf("volume %s: %s", v.Name, fwd.Stats())
+				fwd.Close()
+			})
+			s.volumes = append(s.volumes, &virtio.Fs{Tag: guestspec.VolumeFSTag(i), Handler: fwd, AsyncWait: volumeAsyncWait()})
+			s.shared = append(s.shared, i)
+			continue
+		}
 		f, err := disk.Open(v.Disk(), disk.Exclusive)
 		if errors.Is(err, disk.ErrInUse) {
-			return nil, fmt.Errorf("volume %s is in use by another container", v.Name)
+			return nil, &volume.InUseError{Name: v.Name}
 		}
 		if err != nil {
 			return nil, fmt.Errorf("volume %s: %w", v.Name, err)

@@ -261,4 +261,9 @@ type Volume struct {
 	// Root, if set, is the store the volume is in, instead of the
 	// container's: a build cache mount's are in the build cache's.
 	Root string `json:"root,omitempty"`
+	// Exclusive says the container has the volume's disk itself, shared
+	// or not, and never shares it: a volume's server's own, and the
+	// BuildKit builder's, whose overlayfs cannot have its upper layer on
+	// FUSE.
+	Exclusive bool `json:"exclusive,omitempty"`
 }

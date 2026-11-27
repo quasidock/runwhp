@@ -113,6 +113,7 @@ const (
 	initPosixLocks      = 1 << 1
 	initAtomicOTrunc    = 1 << 3
 	initFlockLocks      = 1 << 10
+	initKillprivV2      = 1 << 28
 	initBigWrites       = 1 << 5
 	initAutoInvalData   = 1 << 12
 	initDoReaddirplus   = 1 << 13
@@ -134,6 +135,16 @@ const pageSize = 4096
 
 // Open reply flags.
 const fopenKeepCache = 1 << 1
+
+// Flags asking the server to clear a file's setuid and setgid bits, as the
+// kernel asks with HANDLE_KILLPRIV_V2: on a write, in WRITE's write_flags;
+// on an open that truncates, in OPEN's open_flags; on a truncate or chown,
+// in SETATTR's valid.
+const (
+	writeKillSuidgid = 1 << 2
+	openKillSuidgid  = 1 << 0
+	setKillSuidgid   = 1 << 11
+)
 
 // SETATTR valid bits.
 const (

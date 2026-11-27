@@ -58,14 +58,22 @@ func cmdVolume(args []string, stdin io.Reader, stdout io.Writer) int {
 			return 2
 		}
 		size := int64(defaultDiskSize)
+		var shared bool
 		for _, o := range opts {
 			k, v, _ := strings.Cut(o, "=")
-			if k != "size" {
-				errorf("volume create: option %q is not supported; runwhp knows size=SIZE", o)
-				return 2
-			}
-			if size, err = parseDiskSize(v); err != nil {
-				errorf("volume create: %v", err)
+			switch k {
+			case "size":
+				if size, err = parseDiskSize(v); err != nil {
+					errorf("volume create: %v", err)
+					return 2
+				}
+			case "shared":
+				if shared, err = parseShared(v); err != nil {
+					errorf("volume create: %v", err)
+					return 2
+				}
+			default:
+				errorf("volume create: option %q is not supported; runwhp knows size=SIZE and shared=true", o)
 				return 2
 			}
 		}
@@ -80,7 +88,7 @@ func cmdVolume(args []string, stdin io.Reader, stdout io.Writer) int {
 			errorf("volume create: %v", err)
 			return 2
 		}
-		v, err := store.CreateWith(name, size, labels)
+		v, err := store.CreateOpts(name, volume.Options{Size: size, Labels: labels, Shared: shared})
 		if err != nil {
 			errorf("%v", err)
 			return 1

@@ -340,3 +340,38 @@ func TestFrameTooLong(t *testing.T) {
 		t.Fatalf("ServeStream: %v, want errFrameTooLong", err)
 	}
 }
+
+// killFS clears privileges when asked, counting the times.
+type killFS struct {
+	fakeFS
+	kills int
+}
+
+func (f *killFS) KillSuidgid(c Context, node, fh uint64) error { f.kills++; return nil }
+
+func TestKillSuidgid(t *testing.T) {
+	fs := &killFS{fakeFS: fakeFS{write: func(off int64, d []byte) (int, error) { return len(d), nil }}}
+	s := &Server{FS: fs}
+	_, out, _ := serve(t, s, request(opInit, 0, uint32(7), uint32(31), uint32(0), uint32(0xffffffff)))
+	if f := le.Uint32(out[12:]); f&initKillprivV2 == 0 {
+		t.Fatalf("flags %#x: HANDLE_KILLPRIV_V2 not offered", f)
+	}
+	if _, out, _ = serve(t, &Server{FS: &fakeFS{}}, request(opInit, 0, uint32(7), uint32(31), uint32(0), uint32(0xffffffff))); le.Uint32(out[12:])&initKillprivV2 != 0 {
+		t.Fatal("HANDLE_KILLPRIV_V2 offered by a file system that kills nothing")
+	}
+	write := func(flags uint32) {
+		serve(t, s, request(opWrite, 5, uint64(7), uint64(0), uint32(1), flags, uint64(0), uint32(0), uint32(0), []byte("x")))
+	}
+	write(0)
+	if fs.kills != 0 {
+		t.Fatal("a write the kernel did not flag killed privileges")
+	}
+	write(writeKillSuidgid)
+	if fs.kills != 1 {
+		t.Fatalf("%d kills after a flagged write, want 1", fs.kills)
+	}
+	serve(t, s, request(opOpen, 5, uint32(OTrunc), uint32(openKillSuidgid)))
+	if fs.kills != 2 {
+		t.Fatalf("%d kills after a flagged open, want 2", fs.kills)
+	}
+}

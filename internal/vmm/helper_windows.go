@@ -273,7 +273,16 @@ type Guest struct {
 	process bool
 	cancel  context.CancelFunc
 	done    chan guestResult
+	exited  chan struct{} // closed once the guest has stopped
 	logf    func(string, ...any)
+}
+
+// Exited is closed once the guest has stopped.
+func (g *Guest) Exited() <-chan struct{} { return g.exited }
+
+// DialPort connects to port of the guest's vsock device.
+func (g *Guest) DialPort(ctx context.Context, port uint32) (io.ReadWriteCloser, error) {
+	return g.vsock.Dial(ctx, port)
 }
 
 // guestResult is how a guest's boot ended.
@@ -302,14 +311,15 @@ func BootRootServer(ctx context.Context, root string, c *container.Container) (*
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
-	return bootGuest(ctx, root, c.Config, ReadyLayer(rw, false), false, BootIO{}, "the guest serving container "+c.Short()+"'s files")
+	return bootGuest(ctx, root, c.Config, ReadyLayer(rw, false), false, nil, BootIO{}, "the guest serving container "+c.Short()+"'s files")
 }
 
 // bootGuest boots a guest of the root cfg describes, with layer as its
 // writable layer, which the guest closes when it stops, and returns once
 // init is ready: to serve, or, for a process guest, to start the process,
-// whose streams bio holds. what names the guest in errors.
-func bootGuest(ctx context.Context, root string, cfg *container.Config, layer *PendingLayer, process bool, bio BootIO, what string) (*Guest, error) {
+// whose streams bio holds. opts, if set, shape a served guest other than a
+// root server. what names the guest in errors.
+func bootGuest(ctx context.Context, root string, cfg *container.Config, layer *PendingLayer, process bool, opts *guestOpts, bio BootIO, what string) (*Guest, error) {
 	logf := func(string, ...any) {}
 	if cfg.Debug {
 		logf = func(format string, a ...any) { fmt.Fprintf(os.Stderr, format+"\n", a...) }
@@ -318,22 +328,26 @@ func bootGuest(ctx context.Context, root string, cfg *container.Config, layer *P
 	// stop ends it.
 	vmCtx, cancel := context.WithCancel(context.Background())
 	proxy := NewSignalProxy(cancel, logf)
-	g := &Guest{queue: proxy.queue, layer: layer, process: process, cancel: cancel, done: make(chan guestResult, 1), logf: logf}
+	g := &Guest{queue: proxy.queue, layer: layer, process: process, cancel: cancel, done: make(chan guestResult, 1), exited: make(chan struct{}), logf: logf}
 	ready := make(chan struct{})
 	var once sync.Once
 	hooks := bootHooks{
 		ready:    func() { once.Do(func() { close(ready) }) },
 		attached: func(h *vmHandles) { g.vsock = h.vsock },
 	}
-	opts := guestOpts{serve: guestspec.ServeRoot, noNIC: true, noBalloon: true, memory: serverMemory, cpus: min(serverCPUs, runtime.NumCPU())}
-	if process {
-		opts, hooks.waitStart = guestOpts{}, true
+	o := guestOpts{serve: guestspec.ServeRoot, noNIC: true, noBalloon: true, memory: serverMemory, cpus: min(serverCPUs, runtime.NumCPU())}
+	switch {
+	case process:
+		o, hooks.waitStart = guestOpts{}, true
+	case opts != nil:
+		o = *opts
 	}
 	if bio.Diag == nil {
 		bio.Diag = os.Stderr
 	}
 	go func() {
-		code, err := bootContainer(vmCtx, root, cfg, layer, opts, image.PullMissing, proxy, bio, hooks, logf, time.Now())
+		code, err := bootContainer(vmCtx, root, cfg, layer, o, image.PullMissing, proxy, bio, hooks, logf, time.Now())
+		close(g.exited)
 		g.done <- guestResult{code, err}
 	}()
 	select {
