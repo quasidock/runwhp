@@ -296,6 +296,9 @@ func dockerVolume(v *volume.Volume) dvolume.Volume {
 		CreatedAt: v.CreatedAt.UTC().Format(time.RFC3339), Labels: withLabels(map[string]string{}, v.Labels),
 		Options: map[string]string{"size": humanSize(v.Size)},
 	}
+	if v.Shared {
+		dv.Options["shared"] = "true"
+	}
 	return dv
 }
 
@@ -344,12 +347,18 @@ func (s *apiServer) postVolumeCreate(w http.ResponseWriter, r *http.Request) err
 		return badRequest("cluster volumes are not supported")
 	}
 	size := int64(defaultDiskSize)
+	var shared bool
 	for k, v := range req.DriverOpts {
-		if k != "size" {
-			return badRequest("volume option %s is not supported; runwhp knows size", k)
-		}
 		var err error
-		if size, err = parseDiskSize(v); err != nil {
+		switch k {
+		case "size":
+			size, err = parseDiskSize(v)
+		case "shared":
+			shared, err = parseShared(v)
+		default:
+			return badRequest("volume option %s is not supported; runwhp knows size and shared", k)
+		}
+		if err != nil {
 			return badRequest("%v", err)
 		}
 	}
@@ -363,7 +372,7 @@ func (s *apiServer) postVolumeCreate(w http.ResponseWriter, r *http.Request) err
 		return badRequest("%v", err)
 	}
 	store := volume.Open(s.root)
-	v, created, err := store.EnsureWith(name, size, req.Labels)
+	v, created, err := store.EnsureOpts(name, volume.Options{Size: size, Labels: req.Labels, Shared: shared})
 	if err != nil {
 		return err
 	}

@@ -35,6 +35,7 @@ type mountSpec struct {
 	delegated bool
 	noCopy    bool              // volume: leave a new volume empty
 	size      string            // volume: its size, should it be created
+	shared    bool              // volume: make it shared
 	labels    map[string]string // volume: its labels, should it be created
 	options   string            // tmpfs: mount options
 }
@@ -166,13 +167,19 @@ func parseMount(s, cwd string) (mountSpec, error) {
 		case "volume-opt":
 			only[key] = "volume"
 			k, v, _ := strings.Cut(val, "=")
-			if k != "size" {
-				return bad("volume-opt=%s is not supported; runwhp knows volume-opt=size=SIZE", val)
+			switch k {
+			case "size":
+				if _, err := parseDiskSize(v); err != nil {
+					return bad("%v", err)
+				}
+				m.size = v
+			case "shared":
+				if m.shared, err = parseShared(v); err != nil {
+					return bad("%v", err)
+				}
+			default:
+				return bad("volume-opt=%s is not supported; runwhp knows volume-opt=size=SIZE and volume-opt=shared=true", val)
 			}
-			if _, err := parseDiskSize(v); err != nil {
-				return bad("%v", err)
-			}
-			m.size = v
 		case "volume-driver":
 			only[key] = "volume"
 			if val != "local" {
@@ -413,6 +420,7 @@ type volumeUse struct {
 	name   string
 	size   string            // if it has to be created; empty means the default
 	labels map[string]string // if it has to be created
+	shared bool              // make it shared, if it is not
 }
 
 // mountPlan is what -v, --mount and --tmpfs ask for: the host directories to
@@ -528,6 +536,7 @@ func planMounts(specs []mountSpec, apiPipe string) (mountPlan, error) {
 			if plan.volumes[i].labels == nil {
 				plan.volumes[i].labels = m.labels
 			}
+			plan.volumes[i].shared = plan.volumes[i].shared || m.shared
 			gm.Volume, gm.Name = i, m.source
 		}
 		plan.mounts = append(plan.mounts, gm)

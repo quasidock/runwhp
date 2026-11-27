@@ -376,6 +376,10 @@ type runSpec struct {
 	stopTimeout *int
 	health      healthOverrides
 	privileged  bool
+	// exclusiveVolumes gives the container its volumes' disks, and never
+	// shares them: the BuildKit builder's overlayfs cannot have its upper
+	// layer on a shared volume's FUSE.
+	exclusiveVolumes bool
 
 	// Development flags: the kernel, init and kernel modules to use, and
 	// ext4 layers instead of an image.
@@ -553,14 +557,14 @@ func resolveSpec(ctx context.Context, root string, s *runSpec, policy image.Poli
 				return nil, err
 			}
 		}
-		v, created, err := volumes.EnsureWith(u.name, size, u.labels)
+		v, created, err := volumes.EnsureOpts(u.name, volume.Options{Size: size, Labels: u.labels, Shared: u.shared})
 		if err != nil {
 			return nil, err
 		}
 		if created {
 			logf("created volume %s", v.Name)
 		}
-		cfg.Volumes = append(cfg.Volumes, container.Volume{Name: v.Name, Size: size})
+		cfg.Volumes = append(cfg.Volumes, container.Volume{Name: v.Name, Size: size, Exclusive: s.exclusiveVolumes})
 	}
 
 	// The kernel is fetched now, if it has to be, so that booting later

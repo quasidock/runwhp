@@ -83,6 +83,8 @@ type vmHandles struct {
 	guest   *guestStats
 	top     *guestTop
 	freezer *guestFreezer
+	// directVolumes are the volumes whose disks the VM has.
+	directVolumes []string
 }
 
 // Page cache reclaim: once the guest has been idle for reclaimIdle, init
@@ -263,7 +265,7 @@ func bootContainer(ctx context.Context, root string, cfg *container.Config, laye
 		// listener too if it never ran.
 		defer vsock.Drain(context.Background())
 	}
-	handles := &vmHandles{vsock: vsock, probe: &vm.Probe{}, guest: guest, top: top, freezer: freezer}
+	handles := &vmHandles{vsock: vsock, probe: &vm.Probe{}, guest: guest, top: top, freezer: freezer, directVolumes: storage.direct}
 	// The balloon gives back to Windows the memory the guest reports free.
 	devices := []virtio.Device{console, vsock}
 	if !opts.noBalloon {
@@ -358,8 +360,10 @@ type containerStorage struct {
 	scratch virtio.Device
 	volumes []virtio.Device
 	// shared lists the volumes served by their servers, whose devices are
-	// virtio-fs rather than disks.
+	// virtio-fs rather than disks; direct names those whose disks the
+	// container has.
 	shared  []int
+	direct  []string
 	closers []func()
 }
 
@@ -380,11 +384,30 @@ func openStorage(ctx context.Context, root string, cfg *container.Config, logf f
 		return nil, err
 	}
 	for i, u := range cfg.Volumes {
-		v, _, err := volume.Open(cmp.Or(u.Root, root)).Ensure(u.Name, u.Size)
+		store := volume.Open(cmp.Or(u.Root, root))
+		v, _, err := store.Ensure(u.Name, u.Size)
 		if err != nil {
 			return nil, err
 		}
-		if v.Shared && u.Root == "" && !u.Exclusive {
+		// A volume can be shared unless the container needs its disk to
+		// itself, or it is a build cache's.
+		sharable := u.Root == "" && !u.Exclusive
+		var f *disk.File
+		for !(v.Shared && sharable) {
+			f, err = disk.Open(v.Disk(), disk.Exclusive)
+			if !errors.Is(err, disk.ErrInUse) {
+				break
+			}
+			if !sharable {
+				return nil, &volume.InUseError{Name: v.Name}
+			}
+			// Another container has it: the volume becomes shared, if
+			// it can be.
+			if v, err = resolveHeld(ctx, root, v, cfg, logf); err != nil {
+				return nil, err
+			}
+		}
+		if v.Shared && sharable {
 			conn, err := connectVolume(ctx, root, v, cfg, logf)
 			if err != nil {
 				return nil, err
@@ -401,14 +424,13 @@ func openStorage(ctx context.Context, root string, cfg *container.Config, logf f
 			s.shared = append(s.shared, i)
 			continue
 		}
-		f, err := disk.Open(v.Disk(), disk.Exclusive)
-		if errors.Is(err, disk.ErrInUse) {
-			return nil, &volume.InUseError{Name: v.Name}
-		}
 		if err != nil {
 			return nil, fmt.Errorf("volume %s: %w", v.Name, err)
 		}
 		s.closers = append(s.closers, func() { f.Close() })
+		if u.Root == "" {
+			s.direct = append(s.direct, v.Name)
+		}
 		fsize, err := f.Size()
 		if err != nil {
 			return nil, err

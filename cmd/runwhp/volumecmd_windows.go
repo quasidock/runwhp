@@ -20,8 +20,9 @@ import (
 )
 
 const volumeUsage = `Usage:
-  runwhp volume create [--opt size=SIZE] [--label K=V]... [NAME]
-                                                  make a volume (default size 64g, a limit, not what it takes)
+  runwhp volume create [--opt size=SIZE] [--opt shared=true] [--label K=V]... [NAME]
+                                                  make a volume (default size 64g, a limit, not what it takes),
+                                                  shared from the start with shared=true
   runwhp volume ls [-q] [-f FILTER]...            list volumes, or those that match name, label,
                                                   driver or dangling (true: no container uses it)
   runwhp volume inspect NAME...                   describe volumes as JSON
@@ -29,7 +30,9 @@ const volumeUsage = `Usage:
   runwhp volume prune [-a] [-f]                   remove volumes no container uses
 
 A volume is an ext4 file system in a sparse file in the store's volumes
-directory. Mount one with run -v NAME:PATH; a container at a time can use it.
+directory. Mount one with run -v NAME:PATH. A container alone on a volume
+has its disk; once two containers need it at once, it is shared from then
+on, served to each by a guest of its own.
 `
 
 // cmdVolume runs runwhp volume. It returns 1 when a command fails and 2 for
@@ -127,10 +130,10 @@ func cmdVolume(args []string, stdin io.Reader, stdout io.Writer) int {
 			return 0
 		}
 		tw := tabwriter.NewWriter(stdout, 0, 0, 3, ' ', 0)
-		fmt.Fprintln(tw, "NAME\tSIZE\tON DISK\tCREATED")
+		fmt.Fprintln(tw, "NAME\tSIZE\tON DISK\tSHARED\tCREATED")
 		for _, v := range vs {
 			onDisk, _ := v.OnDisk()
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", v.Name, humanSize(v.Size), humanSize(onDisk), v.CreatedAt.Local().Format(time.DateTime))
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%v\t%s\n", v.Name, humanSize(v.Size), humanSize(onDisk), v.Shared, v.CreatedAt.Local().Format(time.DateTime))
 		}
 		tw.Flush()
 	case "inspect":
@@ -145,6 +148,10 @@ func cmdVolume(args []string, stdin io.Reader, stdout io.Writer) int {
 			Size       int64
 			OnDisk     int64
 			InUse      bool
+			// Shared says the volume's server serves it to the
+			// containers using it, which Containers lists while it runs.
+			Shared     bool
+			Containers []string `json:",omitempty"`
 			Labels     map[string]string
 		}
 		var out []info
@@ -158,7 +165,13 @@ func cmdVolume(args []string, stdin io.Reader, stdout io.Writer) int {
 			}
 			onDisk, _ := v.OnDisk()
 			busy, _ := v.InUse()
-			out = append(out, info{v.Name, v.CreatedAt, v.Disk(), v.Size, onDisk, busy, withLabels(map[string]string{}, v.Labels)})
+			var served []string
+			if v.Shared {
+				if st, err := v.ServerStatus(); err == nil {
+					served = st.Containers
+				}
+			}
+			out = append(out, info{v.Name, v.CreatedAt, v.Disk(), v.Size, onDisk, busy, v.Shared, served, withLabels(map[string]string{}, v.Labels)})
 		}
 		data, _ := json.MarshalIndent(out, "", "    ")
 		fmt.Fprintln(stdout, string(data))

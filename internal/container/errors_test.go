@@ -18,6 +18,8 @@ func TestReplyError(t *testing.T) {
 		{"the container is being created or stopped; try again", ErrBusy},
 		{"container is running", ErrRunning},
 		{ErrNetworksRunning.Error(), ErrRunning},
+		{"volume data is in use by another container", ErrVolumeInUse},
+		{"volume data is in use by container web: restart it, then try again", ErrVolumeInUse},
 		{"the image has no command", nil},
 	} {
 		err := ReplyError(Reply{Error: tc.msg})
@@ -25,7 +27,7 @@ func TestReplyError(t *testing.T) {
 			t.Errorf("%q: got %v, want the same words", tc.msg, err)
 			continue
 		}
-		for _, k := range []error{ErrNotRunning, ErrPaused, ErrNotPaused, ErrBusy, ErrRunning} {
+		for _, k := range []error{ErrNotRunning, ErrPaused, ErrNotPaused, ErrBusy, ErrRunning, ErrVolumeInUse} {
 			if got := errors.Is(err, k); got != (k == tc.kind) {
 				t.Errorf("%q: errors.Is(%v) = %v", tc.msg, k, got)
 			}

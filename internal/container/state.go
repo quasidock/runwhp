@@ -68,6 +68,10 @@ type State struct {
 	// VM, as they were bound: a random host port has the one the system
 	// chose, which the next boot may not get again.
 	Ports []netstack.Port `json:"ports,omitempty"`
+	// DirectVolumes are the volumes whose disks the container's VM has to
+	// itself while it has one: those not shared. Another container
+	// needing one of them knows from it whom it has to wait for.
+	DirectVolumes []string `json:"directVolumes,omitempty"`
 }
 
 // Published is a container's published ports: as bound while it has a VM,

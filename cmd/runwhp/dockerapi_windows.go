@@ -777,7 +777,7 @@ func httpStatus(err error) int {
 		errors.Is(err, container.ErrPaused), errors.Is(err, container.ErrNotRunning), errors.Is(err, container.ErrNotPaused),
 		errors.Is(err, network.ErrExists), errors.Is(err, network.ErrActive), errors.Is(err, network.ErrInUse),
 		errors.Is(err, network.ErrPredefined),
-		errors.Is(err, volume.ErrExists), errors.Is(err, volume.ErrInUse):
+		errors.Is(err, volume.ErrExists), errors.Is(err, volume.ErrInUse), errors.Is(err, container.ErrVolumeInUse):
 		return http.StatusConflict
 	case errors.Is(err, container.ErrAmbiguous), errors.Is(err, image.ErrAmbiguous), errors.Is(err, image.ErrNoCommand):
 		return http.StatusBadRequest

@@ -297,7 +297,7 @@ func (s *Supervisor) hooks(b *vmBoot, waitStart bool) bootHooks {
 			// The ports as bound go in the state, which is recorded as the
 			// guest becomes ready or starts its process.
 			ports := h.network.published()
-			s.change(func(st *container.State) { st.Ports = ports })
+			s.change(func(st *container.State) { st.Ports, st.DirectVolumes = ports, h.directVolumes })
 			s.mu.Lock()
 			b.vm = h
 			s.mu.Unlock()
@@ -339,7 +339,7 @@ func (s *Supervisor) endBoot(b *vmBoot, code int, err error) (restart bool, dela
 	s.change(func(st *container.State) {
 		st.GuestPid = 0
 		st.Paused = false
-		st.Ports = nil
+		st.Ports, st.DirectVolumes = nil, nil
 		st.FinishedAt, st.ExitCode, st.Error = now.UTC(), code, ""
 		switch {
 		case b.hardStopped != "":
@@ -681,6 +681,30 @@ func (s *Supervisor) Networks(req container.Request) container.Reply {
 		s.mu.Unlock()
 		return s.reply()
 	}
+	return s.bootAgain(b)
+}
+
+// Reprepare boots a created container's VM again, ready to start, as
+// OpReprepare asks: so that a volume it had to itself it now reaches
+// through the volume's server, since another container needs the volume
+// too.
+func (s *Supervisor) Reprepare() container.Reply {
+	s.mu.Lock()
+	status, b := s.state.Status, s.cur
+	if status != container.Created || b == nil {
+		s.mu.Unlock()
+		if status == container.Creating {
+			return container.Reply{Error: "the container is still being created; try again"}
+		}
+		return container.Reply{Error: fmt.Sprintf("the container is %s, not created", status)}
+	}
+	return s.bootAgain(b)
+}
+
+// bootAgain stops created boot b, whose VM waits to start its process, and
+// waits until the loop has booted it again and it is ready to start. s.mu
+// is held, and released.
+func (s *Supervisor) bootAgain(b *vmBoot) container.Reply {
 	b.reprepare = true
 	s.mu.Unlock()
 	// The VM waits to start its process, which has not run: stop it, and
@@ -712,6 +736,7 @@ func (s *Supervisor) reprepared(b *vmBoot) bool {
 	}
 	s.change(func(st *container.State) {
 		st.Status, st.GuestPid = container.Creating, 0
+		st.Ports, st.DirectVolumes = nil, nil
 		b.vm = nil
 	})
 	close(b.exited)
@@ -773,6 +798,8 @@ func (s *Supervisor) handle(c net.Conn) {
 			rep = s.Unpause()
 		case container.OpNetworks:
 			rep = s.Networks(req)
+		case container.OpReprepare:
+			rep = s.Reprepare()
 		case container.OpControl:
 			switch {
 			case req.Control == nil:

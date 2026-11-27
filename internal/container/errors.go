@@ -16,6 +16,9 @@ var (
 	ErrBusy       = errors.New("container is busy")
 	ErrPaused     = errors.New("container is paused")
 	ErrNotPaused  = errors.New("container is not paused")
+	// ErrVolumeInUse: a volume the container needs is another's, which has
+	// its disk.
+	ErrVolumeInUse = errors.New("volume is in use")
 )
 
 type refusal struct {
@@ -55,6 +58,8 @@ func ReplyError(rep Reply) error {
 		return Refuse(ErrBusy, "%s", msg)
 	case strings.Contains(msg, ErrNetworksRunning.Error()):
 		return Refuse(ErrRunning, "%s", msg)
+	case strings.HasPrefix(msg, "volume ") && strings.Contains(msg, " is in use by "):
+		return Refuse(ErrVolumeInUse, "%s", msg)
 	}
 	return errors.New(msg)
 }

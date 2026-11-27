@@ -445,10 +445,18 @@ func mountFromAPI(mt mount.Mount) (mountSpec, error) {
 					return mountSpec{}, fmt.Errorf("%s: volume-driver=%s is not supported", what, d.Name)
 				}
 				for k, v := range d.Options {
-					if k != "size" {
-						return mountSpec{}, fmt.Errorf("%s: volume-opt=%s is not supported; runwhp knows volume-opt=size=SIZE", what, k)
+					switch k {
+					case "size":
+						m.size = v
+					case "shared":
+						shared, err := parseShared(v)
+						if err != nil {
+							return mountSpec{}, fmt.Errorf("%s: %v", what, err)
+						}
+						m.shared = shared
+					default:
+						return mountSpec{}, fmt.Errorf("%s: volume-opt=%s is not supported; runwhp knows volume-opt=size=SIZE and volume-opt=shared=true", what, k)
 					}
-					m.size = v
 				}
 			}
 		}

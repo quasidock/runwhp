@@ -51,6 +51,11 @@ const (
 	OpControl = "control"
 	// OpTop replies with the running container's processes, in Top.
 	OpTop = "top"
+	// OpReprepare boots a created container's VM again, ready to start,
+	// before the reply: so that it takes a volume that was its own alone
+	// through the volume's server, now that the volume is shared. Any
+	// other container is refused.
+	OpReprepare = "reprepare"
 )
 
 // After the reply to OpAttach, both ends send frames in the log's framing

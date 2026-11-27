@@ -100,6 +100,9 @@ func (s *apiServer) builderVersion() (string, error) {
 			return
 		}
 		io.WriteString(h, "\x00"+builderImageRef())
+		// How the builder is made counts too: since iteration 24 its
+		// volume is its own alone, which one made before is not.
+		io.WriteString(h, "\x00exclusive-volume")
 		b.versionHash = hex.EncodeToString(h.Sum(nil))[:16]
 	})
 	return b.versionHash, b.versionErr
@@ -257,13 +260,14 @@ func (s *apiServer) createBuilder(ctx context.Context) (*container.Container, er
 			"--host-gateway", netstack.Gateway.String(),
 			"--gc-max-used", fmt.Sprint(maxUsed), "--gc-reserved", fmt.Sprint(reserved),
 		},
-		privileged: true,
-		cpus:       min(runtime.NumCPU(), 64),
-		mounts:     mounts,
-		apiPipe:    s.pipe,
-		network:    networkRequest{hosts: []string{gwLine}, hostGateway: true},
-		labels:     map[string]string{guestspec.BuilderLabel: "buildkit", builderVersionLabel: version},
-		hostname:   "buildkitsandbox",
+		privileged:       true,
+		exclusiveVolumes: true,
+		cpus:             min(runtime.NumCPU(), 64),
+		mounts:           mounts,
+		apiPipe:          s.pipe,
+		network:          networkRequest{hosts: []string{gwLine}, hostGateway: true},
+		labels:           map[string]string{guestspec.BuilderLabel: "buildkit", builderVersionLabel: version},
+		hostname:         "buildkitsandbox",
 	}
 	s.logf("making the builder from %s", spec.image)
 	progress := &logLines{s: s, prefix: "builder: "}
