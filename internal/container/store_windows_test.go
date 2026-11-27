@@ -325,6 +325,29 @@ func TestLockedByAnotherProcess(t *testing.T) {
 	}
 }
 
+// TestRemoveWaitsForFiles removes a container one of whose files a process
+// still has open, without FILE_SHARE_DELETE, for a while after it gave the
+// container's lock up, as an exiting runwhp does its log: Remove waits for
+// it rather than failing.
+func TestRemoveWaitsForFiles(t *testing.T) {
+	s := Open(testRoot(t))
+	c := mustCreate(t, s, "", "")
+	f, err := os.OpenFile(filepath.Join(c.Dir(), "held"), os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		f.Close()
+	}()
+	if err := s.Remove(c); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if _, err := os.Stat(c.Dir()); !os.IsNotExist(err) {
+		t.Errorf("still there: %v", err)
+	}
+}
+
 func TestListSweeps(t *testing.T) {
 	s := Open(testRoot(t))
 	keep := mustCreate(t, s, "", "keep")

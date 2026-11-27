@@ -30,6 +30,10 @@ var (
 // locking it, or else a runwhp that died meanwhile.
 const creatingGrace = time.Minute
 
+// removeRetry is how long Remove tries to move a container aside while
+// something other than a running runwhp holds one of its files.
+const removeRetry = 3 * time.Second
+
 // Store is the containers in one runwhp store:
 //
 //	containers\<id>\config.json   Config
@@ -441,15 +445,23 @@ func (s *Store) Remove(c *Container) error {
 	rand.Read(b[:])
 	trash := filepath.Join(s.root, "tmp", "removed-"+hex.EncodeToString(b[:]))
 	os.MkdirAll(filepath.Dir(trash), 0o755)
+	// What still holds one of its files, once no runwhp holds its lock, lets
+	// go soon: the runwhp that ran it, exiting after it gave the lock up,
+	// or an antivirus scanner, say. A runwhp that is busy, as when many
+	// run at once, can take a second or more to exit.
 	var err error
-	for try := 0; try < 3; try++ {
+	delay := 50 * time.Millisecond
+	for deadline := time.Now().Add(removeRetry); ; delay = min(2*delay, 400*time.Millisecond) {
 		if err = os.Rename(c.dir, trash); err == nil || errors.Is(err, os.ErrNotExist) {
 			break
 		}
 		if c.Locked() {
 			return fmt.Errorf("container %s: %w", c.Short(), ErrRunning)
 		}
-		time.Sleep(100 * time.Millisecond) // an antivirus scanner, say
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(delay)
 	}
 	if errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("%s: %w", c.Short(), ErrNotFound)
