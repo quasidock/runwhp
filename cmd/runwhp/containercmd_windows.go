@@ -283,6 +283,10 @@ func pruneContainersExcept(root string, keep map[string]bool) (ids []string, fre
 	return ids, freed, errs
 }
 
+// endedHold bounds how long a delete waits for the runwhp of a container
+// that has ended to let it go: a busy machine's can take seconds to exit.
+const endedHold = 5 * time.Second
+
 func deleteContainer(store *container.Store, ref string, force bool) error {
 	c, err := store.Resolve(ref)
 	if err != nil {
@@ -305,6 +309,11 @@ func deleteContainer(store *container.Store, ref string, force bool) error {
 		}
 		return nil // gone: removed by its runwhp, if it was run with --rm
 	}
+	// A container that has just ended is held a moment more by its runwhp,
+	// which answers those waiting for the end before it exits: Docker's
+	// clients, as docker-py's run does, remove one as soon as their wait
+	// returns, which Docker allows.
+	waitUnlocked(c, endedHold)
 	err = store.Remove(c)
 	if errors.Is(err, container.ErrRunning) {
 		return container.Refuse(container.ErrRunning, "container %s is running: stop it first, or delete it with -f", c.Short())
