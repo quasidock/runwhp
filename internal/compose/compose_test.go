@@ -52,7 +52,7 @@ services:
       GREETING: ${GREETING:-hello}
       UNSET:
     env_file: [web.env]
-    ports: ["8080:80", "127.0.0.2:8443:443/tcp", "9000"]
+    ports: ["8080:80", "127.0.0.2:8443:443/tcp", "9000", "5353:53/udp"]
     expose: ["9100", "9200/udp"]
     extra_hosts: ["h:host-gateway", "x=1.2.3.4"]
     networks:
@@ -154,7 +154,7 @@ func TestTranslate(t *testing.T) {
 		Memory: 512 << 20, CPUs: 2,
 		Networks: []Attachment{{Name: "myapp_x_back", Aliases: []string{"web", "frontend"}, IPv4: "172.30.0.9"},
 			{Name: "myapp_x_front", Aliases: []string{"web", "www", "frontend"}}},
-		Ports:      []Port{{HostPort: 8080, Target: 80}, {HostIP: "127.0.0.2", HostPort: 8443, Target: 443}, {Target: 9000}},
+		Ports:      []Port{{HostPort: 8080, Target: 80, Protocol: "tcp"}, {HostIP: "127.0.0.2", HostPort: 8443, Target: 443, Protocol: "tcp"}, {Target: 9000, Protocol: "tcp"}, {HostPort: 5353, Target: 53, Protocol: "udp"}},
 		Expose:     []string{"9100", "9200/udp"},
 		ExtraHosts: []string{"h:host-gateway", "x:1.2.3.4"},
 		Mounts: []Mount{
@@ -263,7 +263,7 @@ services:
   vf: {image: a, volumes_from: [dev]}
   pid: {image: a, pid: host}
   arm: {image: a, platform: linux/arm64}
-  udp: {image: a, ports: ["53:53/udp"]}
+  sctp: {image: a, ports: ["132:132/sctp"]}
   range: {image: a, ports: ["8000-8001:80-81"]}
   ok: {image: a, links: [range]}
   sub: {image: a, volumes: [{type: volume, source: v, target: /v, volume: {subpath: x}}]}
@@ -293,7 +293,7 @@ secrets:
 		`service "vf": volumes_from is not supported`,
 		`service "pid": pid host is not supported`,
 		`service "arm": platform linux/arm64 is not supported: runwhp runs linux/amd64 only`,
-		`service "udp": port 53/udp cannot be published: runwhp publishes TCP ports only`,
+		`service "sctp": port 132/sctp cannot be published: runwhp publishes TCP and UDP ports`,
 		`service "sub": /v: volume subpath is not supported`,
 		`service "envsecret": secret es: only secrets from a file are supported`,
 		`service "ipv6": network n: IPv6 and link-local addresses are not supported`,
@@ -308,7 +308,7 @@ secrets:
 	}
 	// compose-go makes a range of ports single ones, which runwhp takes.
 	r := Translate(p, p.Services["range"], &Problems{})
-	if !reflect.DeepEqual(r.Ports, []Port{{HostPort: 8000, Target: 80}, {HostPort: 8001, Target: 81}}) {
+	if !reflect.DeepEqual(r.Ports, []Port{{HostPort: 8000, Target: 80, Protocol: "tcp"}, {HostPort: 8001, Target: 81, Protocol: "tcp"}}) {
 		t.Errorf("a range: %+v", r.Ports)
 	}
 }

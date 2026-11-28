@@ -389,7 +389,7 @@ func (c *composeCtx) psJSON(ct *container.Container, now time.Time) map[string]a
 	}
 	publishers := []map[string]any{}
 	for _, p := range container.Published(ct.Config, ct.State) {
-		publishers = append(publishers, map[string]any{"URL": p.Host.Addr().String(), "TargetPort": p.Guest, "PublishedPort": p.Host.Port(), "Protocol": "tcp"})
+		publishers = append(publishers, map[string]any{"URL": p.Host.Addr().String(), "TargetPort": p.Guest, "PublishedPort": p.Host.Port(), "Protocol": p.Protocol()})
 	}
 	health := ""
 	if ct.State.Health != nil {
@@ -603,11 +603,12 @@ List the images the project's containers use.
 }
 
 func (c *composeCtx) cmdPort(args []string) int {
-	fs := composeFlags("port", `Usage: runwhp compose port [--index N] SERVICE PRIVATE_PORT
+	fs := composeFlags("port", `Usage: runwhp compose port [--index N] [--protocol tcp|udp] SERVICE PRIVATE_PORT
 
 Print the host address a container's port is published on.
 `)
 	index := fs.Int("index", 1, "")
+	protocol := fs.String("protocol", "tcp", "")
 	if fs.Parse(args) != nil || fs.NArg() != 2 {
 		fs.Usage()
 		return 2
@@ -623,15 +624,16 @@ Print the host address a container's port is published on.
 		return 1
 	}
 	port, _, _ := strings.Cut(private, "/")
+	proto := strings.ToLower(*protocol)
 	var listed []string
 	for _, p := range container.Published(ct.Config, ct.State) {
-		if strconv.Itoa(int(p.Guest)) == port {
+		if strconv.Itoa(int(p.Guest)) == port && p.Protocol() == proto {
 			fmt.Fprintln(c.stdout, p.Host.String())
 			return 0
 		}
-		listed = append(listed, fmt.Sprintf("%d/tcp", p.Guest))
+		listed = append(listed, fmt.Sprintf("%d/%s", p.Guest, p.Protocol()))
 	}
-	errorf("no port %s/tcp for container %s: %s", port, ct.Name, strings.Join(listed, ", "))
+	errorf("no port %s/%s for container %s: %s", port, proto, ct.Name, strings.Join(listed, ", "))
 	return 1
 }
 

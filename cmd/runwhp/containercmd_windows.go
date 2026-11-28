@@ -381,7 +381,7 @@ func cmdPort(args []string, stdout io.Writer) int {
 }
 
 // portLines is what docker port prints of a running container's ports:
-// each as PORT/tcp -> ADDRESS:PORT, or for one port asked for, only where
+// each as PORT/PROTO -> ADDRESS:PORT, or for one port asked for, only where
 // it is published.
 func portLines(c *container.Container, want string) ([]string, error) {
 	var ps []netstack.Port
@@ -395,7 +395,7 @@ func portLines(c *container.Container, want string) ([]string, error) {
 		}
 		var lines []string
 		for _, p := range ps {
-			if proto == "tcp" && strconv.Itoa(int(p.Guest)) == n {
+			if p.Protocol() == strings.ToLower(proto) && strconv.Itoa(int(p.Guest)) == n {
 				lines = append(lines, p.Host.String())
 			}
 		}
@@ -406,7 +406,7 @@ func portLines(c *container.Container, want string) ([]string, error) {
 	}
 	var lines []string
 	for _, p := range ps {
-		lines = append(lines, fmt.Sprintf("%d/tcp -> %s", p.Guest, p.Host))
+		lines = append(lines, fmt.Sprintf("%d/%s -> %s", p.Guest, p.Protocol(), p.Host))
 	}
 	return lines, nil
 }

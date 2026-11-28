@@ -250,8 +250,8 @@ func (s *apiServer) summaryOf(c *container.Container, size bool) dcontainer.Summ
 	if c.State.Active() {
 		published := map[string]bool{}
 		for _, p := range container.Published(cfg, c.State) {
-			published[fmt.Sprintf("%d/tcp", p.Guest)] = true
-			sum.Ports = append(sum.Ports, dcontainer.PortSummary{IP: p.Host.Addr(), PrivatePort: p.Guest, PublicPort: p.Host.Port(), Type: "tcp"})
+			published[fmt.Sprintf("%d/%s", p.Guest, p.Protocol())] = true
+			sum.Ports = append(sum.Ports, dcontainer.PortSummary{IP: p.Host.Addr(), PrivatePort: p.Guest, PublicPort: p.Host.Port(), Type: p.Protocol()})
 		}
 		// Docker lists the ports exposed and not published too, without
 		// a public port.
@@ -283,7 +283,7 @@ func (s *apiServer) summaryOf(c *container.Container, size bool) dcontainer.Summ
 func portMaps(c *container.Container) (bindings, ports dnetwork.PortMap) {
 	bindings, ports = dnetwork.PortMap{}, dnetwork.PortMap{}
 	for _, p := range c.Config.Publish {
-		port, _ := dnetwork.PortFrom(p.Guest, dnetwork.TCP)
+		port, _ := dnetwork.PortFrom(p.Guest, dnetwork.IPProtocol(p.Protocol()))
 		hp := ""
 		if !p.Random() {
 			hp = strconv.Itoa(int(p.Host.Port()))
@@ -299,7 +299,7 @@ func portMaps(c *container.Container) (bindings, ports dnetwork.PortMap) {
 		}
 	}
 	for _, p := range container.Published(c.Config, c.State) {
-		port, _ := dnetwork.PortFrom(p.Guest, dnetwork.TCP)
+		port, _ := dnetwork.PortFrom(p.Guest, dnetwork.IPProtocol(p.Protocol()))
 		ports[port] = append(ports[port], dnetwork.PortBinding{HostIP: p.Host.Addr(), HostPort: strconv.Itoa(int(p.Host.Port()))})
 	}
 	return bindings, ports

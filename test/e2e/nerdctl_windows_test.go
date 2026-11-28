@@ -306,6 +306,14 @@ func TestNerdctlNetwork(t *testing.T) {
 		t.Errorf("published port served %q", body)
 	}
 
+	// A UDP port, which busybox's nc answers.
+	uport := freeUDPPort(t)
+	e.ok(append(append([]string{"run", "-d", "--name", "udp", "-p", "127.0.0.1:" + uport + ":9999/udp"}, nerdctlRun...), img,
+		"sh", "-c", udpPonger)...)
+	if got := askUDP(t, "127.0.0.1:"+uport, "ping\n"); !strings.HasPrefix(got, "pong\n") {
+		t.Errorf("UDP port answered %q", got)
+	}
+
 	// The container reaches the host through host-gateway.
 	mirrorPort := strings.TrimPrefix(mirror.host, "localhost:")
 	r := e.run("", "--rm", "--add-host", "reg:host-gateway", img, "wget", "-q", "-O-", "http://reg:"+mirrorPort+"/v2/")

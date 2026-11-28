@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -231,4 +232,87 @@ func TestPing(t *testing.T) {
 	r = run(t, "--network", net, "--add-host", hostGateway, alpine, "sh", "-c",
 		"ping -c 1 -W 2 host.docker.internal | grep -c 'bytes from 10.0.2.2'; ping -c 1 -W 2 "+ip+" | grep -c 'bytes from'")
 	expect(t, r, "1\n1\n", 0)
+}
+
+// udpEcho is a container's UDP server on port 9999, answering each
+// datagram upper-cased.
+const udpEcho = `
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(("", 9999))
+while True:
+    d, a = s.recvfrom(65535)
+    s.sendto(d.upper(), a)
+`
+
+// udpPonger is a container's UDP server on port 9999, for images with
+// busybox alone, whose nc cannot run a program for a UDP peer: nc answers
+// the first client with a "pong" line a fifth of a second.
+const udpPonger = "while true; do echo pong; sleep 0.2; done | nc -lu -p 9999"
+
+func freeUDPPort(t *testing.T) string {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	_, port, _ := net.SplitHostPort(pc.LocalAddr().String())
+	return port
+}
+
+// askUDP sends msg to addr until it is answered, as a client of a
+// starting server would, and returns the answer.
+func askUDP(t *testing.T, addr, msg string) string {
+	t.Helper()
+	c, err := net.Dial("udp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	buf := make([]byte, 64<<10)
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); {
+		c.Write([]byte(msg))
+		c.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		if n, err := c.Read(buf); err == nil {
+			return string(buf[:n])
+		}
+	}
+	t.Fatalf("nothing answered %q at %s", msg, addr)
+	return ""
+}
+
+// TestPublishUDP publishes a UDP port, on a random host port, as -p and -P
+// do with Docker: datagrams from clients on the host reach the container's
+// server, each client's answers come back to it, and port and state name
+// the port with its protocol.
+func TestPublishUDP(t *testing.T) {
+	parallel(t)
+	name := newName(t)
+	detached(t, "--name", name, "-p", "9999/udp", "--expose", "9998/udp", "-P", "python:3.12-slim", "python3", "-c", udpEcho)
+	r := cli(t, "port", name, "9999/udp")
+	addr := strings.TrimSpace(r.stdout)
+	if r.code != 0 || !strings.HasPrefix(addr, "127.0.0.1:") || strings.HasSuffix(addr, ":0") {
+		t.Fatalf("port 9999/udp: %+v", r)
+	}
+	if got := askUDP(t, addr, "hello"); got != "HELLO" {
+		t.Errorf("got %q", got)
+	}
+	done := make(chan string, 2)
+	for _, msg := range []string{"one", "two"} {
+		go func() { done <- askUDP(t, addr, msg) }()
+	}
+	if a, b := <-done, <-done; a+b != "ONETWO" && a+b != "TWOONE" {
+		t.Errorf("two clients at once got %q and %q", a, b)
+	}
+	r = cli(t, "port", name)
+	if !strings.Contains(r.stdout, "9999/udp -> "+addr) || !strings.Contains(r.stdout, "9998/udp -> 127.0.0.1:") {
+		t.Errorf("port: %q", r.stdout)
+	}
+	if r := cli(t, "port", name, "9999"); r.code == 0 || !strings.Contains(r.stderr, "no public port '9999/tcp'") {
+		t.Errorf("port 9999, TCP: %+v", r)
+	}
+	if s := stateOf(t, name); !slices.Contains(s.Ports, addr+"->9999/udp") {
+		t.Errorf("state's ports %q, want %s->9999/udp", s.Ports, addr)
+	}
 }

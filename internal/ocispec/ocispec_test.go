@@ -90,7 +90,8 @@ func TestPlain(t *testing.T) {
 
 func TestDetached(t *testing.T) {
 	ports := `{"portMappings":[{"HostPort":8080,"ContainerPort":80,"Protocol":"tcp","HostIP":"0.0.0.0"},` +
-		`{"HostPort":8081,"ContainerPort":81,"Protocol":"tcp","HostIP":"127.0.0.1"}]}`
+		`{"HostPort":8081,"ContainerPort":81,"Protocol":"tcp","HostIP":"127.0.0.1"},` +
+		`{"HostPort":5353,"ContainerPort":53,"Protocol":"udp","HostIP":"0.0.0.0"}]}`
 	cfg, err := Config(Task{Spec: loadSpec(t, "detached.json", ports), Rootfs: testRootfs, Stdin: true, Terminal: true})
 	if err != nil {
 		t.Fatal(err)
@@ -110,6 +111,7 @@ func TestDetached(t *testing.T) {
 	want := []netstack.Port{
 		{Host: netip.MustParseAddrPort("0.0.0.0:8080"), Guest: 80},
 		{Host: netip.MustParseAddrPort("127.0.0.1:8081"), Guest: 81},
+		{Host: netip.MustParseAddrPort("0.0.0.0:5353"), Guest: 53, Proto: "udp"},
 	}
 	if !reflect.DeepEqual(cfg.Publish, want) {
 		t.Errorf("publish %v", cfg.Publish)
@@ -175,7 +177,7 @@ func TestNetworkNone(t *testing.T) {
 
 func TestPortErrors(t *testing.T) {
 	for _, ports := range []string{
-		`{"portMappings":[{"HostPort":53,"ContainerPort":53,"Protocol":"udp"}]}`,
+		`{"portMappings":[{"HostPort":132,"ContainerPort":132,"Protocol":"sctp"}]}`,
 		`{"portMappings":[{"HostPort":-1,"ContainerPort":80,"Protocol":"tcp"}]}`,
 		`{"portMappings":[{"HostPort":80,"ContainerPort":80,"Protocol":"tcp","HostIP":"nowhere"}]}`,
 		`{"portMappings":`,

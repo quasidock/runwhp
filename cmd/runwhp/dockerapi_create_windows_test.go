@@ -72,6 +72,7 @@ func TestSpecFromCreate(t *testing.T) {
 		// Random host ports, as Docker Compose and testcontainers-go ask.
 		dnetwork.MustParsePort("5432/tcp"): {{}},
 		dnetwork.MustParsePort("6379/tcp"): {{HostPort: "0"}},
+		dnetwork.MustParsePort("5353/udp"): {{HostPort: "53"}},
 		// No bindings: only exposed.
 		dnetwork.MustParsePort("9000/tcp"): {},
 	}
@@ -115,11 +116,11 @@ func TestSpecFromCreate(t *testing.T) {
 		ports[p.String()] = true
 	}
 	if !ports["127.0.0.1:8080->80/tcp"] || !ports["0.0.0.0:8443->443/tcp"] || !ports["127.0.0.1:0->5432/tcp"] ||
-		!ports["127.0.0.1:0->6379/tcp"] || len(ports) != 4 || !s.network.hostGateway {
+		!ports["127.0.0.1:0->6379/tcp"] || !ports["127.0.0.1:53->5353/udp"] || len(ports) != 5 || !s.network.hostGateway {
 		t.Errorf("ports %v, host gateway %v", s.network.publish, s.network.hostGateway)
 	}
 	exposed := exposedPorts(nil, s.network.expose, nil)
-	if want := []string{"53/udp", "80/tcp", "443/tcp", "5432/tcp", "6379/tcp", "7000/tcp", "9000/tcp"}; !reflect.DeepEqual(exposed, want) || !s.network.publishAll {
+	if want := []string{"53/udp", "80/tcp", "443/tcp", "5353/udp", "5432/tcp", "6379/tcp", "7000/tcp", "9000/tcp"}; !reflect.DeepEqual(exposed, want) || !s.network.publishAll {
 		t.Errorf("exposed %q, publish all %v; want %q", exposed, s.network.publishAll, want)
 	}
 	kinds := map[string]string{}
@@ -234,9 +235,9 @@ func TestSpecFromCreateRefusals(t *testing.T) {
 		{"host network", func(r *dcontainer.CreateRequest) { r.HostConfig.NetworkMode = "host" }, "--network host"},
 		{"container network", func(r *dcontainer.CreateRequest) { r.HostConfig.NetworkMode = "container:x" }, "container:x"},
 		{"dns", func(r *dcontainer.CreateRequest) { r.HostConfig.DNS = []netip.Addr{netip.MustParseAddr("1.1.1.1")} }, "--dns"},
-		{"udp", func(r *dcontainer.CreateRequest) {
-			r.HostConfig.PortBindings = dnetwork.PortMap{dnetwork.MustParsePort("53/udp"): {{HostPort: "53"}}}
-		}, "only tcp"},
+		{"sctp", func(r *dcontainer.CreateRequest) {
+			r.HostConfig.PortBindings = dnetwork.PortMap{dnetwork.MustParsePort("132/sctp"): {{HostPort: "132"}}}
+		}, "sctp ports cannot be published"},
 		{"relative bind", func(r *dcontainer.CreateRequest) { r.HostConfig.Binds = []string{"./src:/src"} }, "relative"},
 		{"rm and restart", func(r *dcontainer.CreateRequest) {
 			r.HostConfig.RestartPolicy = dcontainer.RestartPolicy{Name: "always"}

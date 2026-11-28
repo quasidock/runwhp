@@ -198,16 +198,18 @@ func planNetwork(root string, r networkRequest) (networkOptions, error) {
 	return n, nil
 }
 
-// parsePublish reads -p [[IP:][HOSTPORT]:]CONTAINERPORT[/tcp]. Without an
-// IP the port listens on 127.0.0.1 only; without a host port, or with 0,
-// on any port the system has free, as Docker's random host ports.
+// parsePublish reads -p [[IP:][HOSTPORT]:]CONTAINERPORT[/tcp|/udp].
+// Without an IP the port listens on 127.0.0.1 only; without a host port,
+// or with 0, on any port the system has free, as Docker's random host
+// ports.
 func parsePublish(s string) (netstack.Port, error) {
 	bad := func(format string, a ...any) (netstack.Port, error) {
 		return netstack.Port{}, fmt.Errorf("-p %s: "+format, append([]any{s}, a...)...)
 	}
-	spec, proto, _ := strings.Cut(s, "/")
-	if proto != "" && proto != "tcp" {
-		return bad("only tcp ports can be published so far")
+	spec, protocol, _ := strings.Cut(s, "/")
+	proto, err := netstack.ParseProto(protocol)
+	if err != nil {
+		return bad("%v", err)
 	}
 	i := strings.LastIndex(spec, ":")
 	rest, guestPort := "", spec
@@ -236,7 +238,7 @@ func parsePublish(s string) (netstack.Port, error) {
 	if err != nil {
 		return bad("container port: %v", err)
 	}
-	return netstack.Port{Host: netip.AddrPortFrom(ip, hp), Guest: gp}, nil
+	return netstack.Port{Host: netip.AddrPortFrom(ip, hp), Guest: gp, Proto: proto}, nil
 }
 
 // parseExpose reads --expose PORT[-PORT][/PROTO], as Docker's: ports the
@@ -290,7 +292,7 @@ func exposedPorts(image map[string]struct{}, asked []string, publish []netstack.
 		add(p)
 	}
 	for _, p := range publish {
-		add(fmt.Sprintf("%d/tcp", p.Guest))
+		add(fmt.Sprintf("%d/%s", p.Guest, p.Protocol()))
 	}
 	slices.SortFunc(ps, comparePorts)
 	return ps
@@ -308,25 +310,26 @@ func comparePorts(a, b string) int {
 	return cmp.Compare(ap, bp)
 }
 
-// publishAll is -P: every exposed TCP port not already published, on a
-// random host port of 127.0.0.1, and the UDP ones it cannot publish.
+// publishAll is -P: every exposed TCP and UDP port not already published,
+// on a random host port of 127.0.0.1, and the SCTP ones it cannot publish.
 func publishAll(exposed []string, publish []netstack.Port) (more []netstack.Port, skipped []string) {
-	have := map[uint16]bool{}
+	have := map[string]bool{}
 	for _, p := range publish {
-		have[p.Guest] = true
+		have[fmt.Sprintf("%d/%s", p.Guest, p.Protocol())] = true
 	}
 	for _, e := range exposed {
-		n, proto, _ := strings.Cut(e, "/")
-		if proto != "tcp" {
+		n, protocol, _ := strings.Cut(e, "/")
+		proto, err := netstack.ParseProto(protocol)
+		if err != nil {
 			skipped = append(skipped, e)
 			continue
 		}
 		port, err := parsePort(n)
-		if err != nil || have[port] {
+		if err != nil || have[e] {
 			continue
 		}
-		have[port] = true
-		more = append(more, netstack.Port{Host: netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), 0), Guest: port})
+		have[e] = true
+		more = append(more, netstack.Port{Host: netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), 0), Guest: port, Proto: proto})
 	}
 	return more, skipped
 }

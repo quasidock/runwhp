@@ -21,7 +21,7 @@ func TestSpecOf(t *testing.T) {
 		Env: []string{"A=1"}, WorkingDir: "/w", User: "1000", Hostname: "h", TTY: true, StdinOpen: true,
 		Memory: 512 << 20, CPUs: 2,
 		Networks:   []compose.Attachment{{Name: "p_back", Aliases: []string{"db"}, IPv4: "172.30.0.9"}},
-		Ports:      []compose.Port{{HostPort: 8080, Target: 80}, {HostIP: "0.0.0.0", HostPort: 8443, Target: 443}},
+		Ports:      []compose.Port{{HostPort: 8080, Target: 80}, {HostIP: "0.0.0.0", HostPort: 8443, Target: 443, Protocol: "tcp"}, {HostPort: 5353, Target: 53, Protocol: "udp"}},
 		ExtraHosts: []string{"h:host-gateway"},
 		Mounts: []compose.Mount{
 			{Kind: compose.MountBind, Source: dir, Target: "/data/", ReadOnly: true, Create: true},
@@ -48,7 +48,7 @@ func TestSpecOf(t *testing.T) {
 	}
 	n := s.network
 	if len(n.attach) != 1 || n.attach[0].name != "p_back" || n.attach[0].ip != "172.30.0.9" || !reflect.DeepEqual(n.attach[0].aliases, []string{"db"}) ||
-		n.publish[0].String() != "127.0.0.1:8080->80/tcp" || n.publish[1].String() != "0.0.0.0:8443->443/tcp" || !n.hostGateway || len(n.hosts) != 1 {
+		n.publish[0].String() != "127.0.0.1:8080->80/tcp" || n.publish[1].String() != "0.0.0.0:8443->443/tcp" || n.publish[2].String() != "127.0.0.1:5353->53/udp" || !n.hostGateway || len(n.hosts) != 1 {
 		t.Errorf("network %+v", n)
 	}
 	want := []mountSpec{

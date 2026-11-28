@@ -97,6 +97,9 @@ func TestParsePublish(t *testing.T) {
 		"0.0.0.0::80":         "0.0.0.0:0->80/tcp",
 		"0:80":                "127.0.0.1:0->80/tcp",
 		"[::1]::80":           "[::1]:0->80/tcp",
+		"53:53/udp":           "127.0.0.1:53->53/udp",
+		"53/udp":              "127.0.0.1:0->53/udp",
+		"0.0.0.0:5353:53/UDP": "0.0.0.0:5353->53/udp",
 	} {
 		got, err := parsePublish(in)
 		if err != nil || got.String() != want {
@@ -104,8 +107,7 @@ func TestParsePublish(t *testing.T) {
 		}
 	}
 	for in, msg := range map[string]string{
-		"53:53/udp":       "only tcp",
-		"53/udp":          "only tcp",
+		"9:9/sctp":        "sctp ports cannot be published",
 		"8000-8010:80":    "ranges",
 		"8080:0":          "not a port",
 		"8080:70000":      "not a port",
@@ -141,10 +143,10 @@ func TestExposeAndPublishAll(t *testing.T) {
 		}
 		return p
 	}
-	image := map[string]struct{}{"6379/tcp": {}, "53/udp": {}, "9000": {}}
-	published := []netstack.Port{pub("8080:80")}
-	exposed := exposedPorts(image, []string{"443/tcp", "6379/tcp"}, published)
-	if want := []string{"53/udp", "80/tcp", "443/tcp", "6379/tcp", "9000/tcp"}; !reflect.DeepEqual(exposed, want) {
+	image := map[string]struct{}{"6379/tcp": {}, "53/udp": {}, "9000": {}, "132/sctp": {}}
+	published := []netstack.Port{pub("8080:80"), pub("5000:5000/udp")}
+	exposed := exposedPorts(image, []string{"443/tcp", "6379/tcp", "53/tcp"}, published)
+	if want := []string{"53/tcp", "53/udp", "80/tcp", "132/sctp", "443/tcp", "5000/udp", "6379/tcp", "9000/tcp"}; !reflect.DeepEqual(exposed, want) {
 		t.Errorf("exposed %q, want %q", exposed, want)
 	}
 	more, skipped := publishAll(exposed, published)
@@ -152,10 +154,10 @@ func TestExposeAndPublishAll(t *testing.T) {
 	for _, p := range more {
 		got = append(got, p.String())
 	}
-	if want := []string{"127.0.0.1:0->443/tcp", "127.0.0.1:0->6379/tcp", "127.0.0.1:0->9000/tcp"}; !reflect.DeepEqual(got, want) {
+	if want := []string{"127.0.0.1:0->53/tcp", "127.0.0.1:0->53/udp", "127.0.0.1:0->443/tcp", "127.0.0.1:0->6379/tcp", "127.0.0.1:0->9000/tcp"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("-P published %q, want %q", got, want)
 	}
-	if !reflect.DeepEqual(skipped, []string{"53/udp"}) {
+	if !reflect.DeepEqual(skipped, []string{"132/sctp"}) {
 		t.Errorf("-P skipped %q", skipped)
 	}
 

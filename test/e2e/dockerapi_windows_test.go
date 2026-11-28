@@ -185,7 +185,7 @@ func TestDockerRun(t *testing.T) {
 	}{
 		{[]string{"--network", "host"}, "--network host"},
 		{[]string{"--dns", "1.1.1.1"}, "--dns"},
-		{[]string{"-p", "53:53/udp"}, "only tcp"},
+		{[]string{"-p", "132:132/sctp"}, "sctp ports cannot be published"},
 		{[]string{"--cap-add", "NET_ADMIN"}, "--cap-add"},
 		{[]string{"--mount", "type=npipe,source=C:\\x,target=/x"}, "not a named pipe"},
 	} {
@@ -640,6 +640,26 @@ func TestDockerNetworksVolumes(t *testing.T) {
 	}
 	if _, ok := insp[0].Config.ExposedPorts["9000/tcp"]; !ok {
 		t.Errorf("ExposedPorts %v", insp[0].Config.ExposedPorts)
+	}
+
+	// A UDP port, which busybox's nc answers.
+	d.dok("run", "-d", "--name", "udp", "-p", "9999/udp", img, "sh", "-c", udpPonger)
+	uaddr := strings.TrimSpace(d.dok("port", "udp", "9999/udp"))
+	if !strings.HasPrefix(uaddr, "127.0.0.1:") || strings.HasSuffix(uaddr, ":0") {
+		t.Fatalf("port udp 9999/udp: %q", uaddr)
+	}
+	if got := askUDP(t, uaddr, "ping\n"); !strings.HasPrefix(got, "pong\n") {
+		t.Errorf("UDP port %s answered %q", uaddr, got)
+	}
+	insp = nil
+	if err := json.Unmarshal([]byte(d.dok("inspect", "udp")), &insp); err != nil || len(insp) != 1 {
+		t.Fatalf("inspect udp: %v", err)
+	}
+	if p := insp[0].NetworkSettings.Ports["9999/udp"]; len(p) != 1 || "127.0.0.1:"+p[0].HostPort != uaddr {
+		t.Errorf("Ports %+v: want 9999/udp at %s", insp[0].NetworkSettings.Ports, uaddr)
+	}
+	if _, ok := insp[0].HostConfig.PortBindings["9999/udp"]; !ok {
+		t.Errorf("PortBindings %+v", insp[0].HostConfig.PortBindings)
 	}
 }
 

@@ -74,6 +74,7 @@ type Port struct {
 	HostIP   string // empty: runwhp's default, 127.0.0.1
 	HostPort uint16 // 0: any free port, as "80" alone asks
 	Target   uint16
+	Protocol string // "tcp" or "udp"
 }
 
 // The kinds of Mount.
@@ -393,11 +394,16 @@ func networks(p *types.Project, s types.ServiceConfig, c *Container, pr *Problem
 	}
 }
 
-// publish turns a published port into runwhp's: TCP, on the host port
-// given, or any free one.
+// publish turns a published port into runwhp's: TCP or UDP, on the host
+// port given, or any free one.
 func publish(p types.ServicePortConfig) (Port, error) {
-	if p.Protocol != "" && p.Protocol != "tcp" {
-		return Port{}, fmt.Errorf("port %d/%s cannot be published: runwhp publishes TCP ports only", p.Target, p.Protocol)
+	proto := strings.ToLower(p.Protocol)
+	switch proto {
+	case "":
+		proto = "tcp"
+	case "tcp", "udp":
+	default:
+		return Port{}, fmt.Errorf("port %d/%s cannot be published: runwhp publishes TCP and UDP ports", p.Target, p.Protocol)
 	}
 	var hp uint64
 	if p.Published != "" {
@@ -409,7 +415,7 @@ func publish(p types.ServicePortConfig) (Port, error) {
 	if p.Target == 0 || p.Target > math.MaxUint16 {
 		return Port{}, fmt.Errorf("port %d is not a port", p.Target)
 	}
-	return Port{HostIP: p.HostIP, HostPort: uint16(hp), Target: uint16(p.Target)}, nil
+	return Port{HostIP: p.HostIP, HostPort: uint16(hp), Target: uint16(p.Target), Protocol: proto}, nil
 }
 
 // mounts fills a container's mounts: volumes, tmpfs, secrets and configs.

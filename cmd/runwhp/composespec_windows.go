@@ -99,7 +99,11 @@ func networkOf(c compose.Container) (networkRequest, error) {
 				return r, fmt.Errorf("port %d: %q is not an IP address", p.Target, p.HostIP)
 			}
 		}
-		r.publish = append(r.publish, netstack.Port{Host: netip.AddrPortFrom(ip, p.HostPort), Guest: p.Target})
+		proto, err := netstack.ParseProto(p.Protocol)
+		if err != nil {
+			return r, fmt.Errorf("port %d: %v", p.Target, err)
+		}
+		r.publish = append(r.publish, netstack.Port{Host: netip.AddrPortFrom(ip, p.HostPort), Guest: p.Target, Proto: proto})
 	}
 	for _, e := range c.Expose {
 		ps, err := parseExpose(e)

@@ -533,7 +533,7 @@ func resolveSpec(ctx context.Context, root string, s *runSpec, policy image.Poli
 		more, skipped := publishAll(cfg.Expose, cfg.Publish)
 		cfg.Publish, cfg.PublishAll = append(cfg.Publish, more...), true
 		if len(skipped) > 0 && out != nil {
-			fmt.Fprintf(out, "WARNING: -P publishes TCP ports only; not %s\n", strings.Join(skipped, ", "))
+			fmt.Fprintf(out, "WARNING: -P publishes TCP and UDP ports only; not %s\n", strings.Join(skipped, ", "))
 		}
 	}
 	if s.stopSignal != "" {

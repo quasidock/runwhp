@@ -17,6 +17,7 @@ import (
 
 	"github.com/quasidock/runwhp/internal/container"
 	"github.com/quasidock/runwhp/internal/guestspec"
+	"github.com/quasidock/runwhp/internal/netstack"
 	"github.com/quasidock/runwhp/internal/network"
 )
 
@@ -305,8 +306,8 @@ func networkFromCreate(cfg *dcontainer.Config, hc *dcontainer.HostConfig, nc *dn
 		}
 	}
 	for port, bindings := range hc.PortBindings {
-		if port.Proto() != dnetwork.TCP {
-			return networkRequest{}, badRequest("-p %s: only tcp ports can be published so far", port)
+		if _, err := netstack.ParseProto(string(port.Proto())); err != nil {
+			return networkRequest{}, badRequest("-p %s: %v", port, err)
 		}
 		// A port with no bindings is only exposed, as Docker's daemon
 		// takes it, unless -P publishes it below.
@@ -319,7 +320,7 @@ func networkFromCreate(cfg *dcontainer.Config, hc *dcontainer.HostConfig, nc *dn
 				}
 			}
 			// An empty host port, or 0, is a random one.
-			f.publish = append(f.publish, fmt.Sprintf("%s:%s:%d", host, b.HostPort, port.Num()))
+			f.publish = append(f.publish, fmt.Sprintf("%s:%s:%d/%s", host, b.HostPort, port.Num(), port.Proto()))
 		}
 		f.expose = append(f.expose, port.String())
 	}

@@ -257,8 +257,9 @@ func network(cfg *container.Config, ann map[string]string) error {
 		return fmt.Errorf("nerdctl's network-config.json: %w", err)
 	}
 	for _, pm := range nc.PortMappings {
-		if pm.Protocol != "" && !strings.EqualFold(pm.Protocol, "tcp") {
-			return fmt.Errorf("-p %d:%d/%s: runwhp publishes TCP ports only", pm.HostPort, pm.ContainerPort, pm.Protocol)
+		proto, err := netstack.ParseProto(pm.Protocol)
+		if err != nil {
+			return fmt.Errorf("-p %d:%d/%s: %v", pm.HostPort, pm.ContainerPort, pm.Protocol, err)
 		}
 		// A host port of 0 is any free one.
 		if pm.HostPort < 0 || pm.HostPort > 65535 || pm.ContainerPort < 1 || pm.ContainerPort > 65535 {
@@ -270,7 +271,7 @@ func network(cfg *container.Config, ann map[string]string) error {
 				return fmt.Errorf("-p %s:%d:%d: %w", pm.HostIP, pm.HostPort, pm.ContainerPort, err)
 			}
 		}
-		cfg.Publish = append(cfg.Publish, netstack.Port{Host: netip.AddrPortFrom(ip, uint16(pm.HostPort)), Guest: uint16(pm.ContainerPort)})
+		cfg.Publish = append(cfg.Publish, netstack.Port{Host: netip.AddrPortFrom(ip, uint16(pm.HostPort)), Guest: uint16(pm.ContainerPort), Proto: proto})
 	}
 	if !cfg.Network && (len(cfg.Publish) > 0 || cfg.HostGateway) {
 		return fmt.Errorf("%s=none cannot be combined with -p or --add-host NAME:host-gateway", NetworkAnnotation)

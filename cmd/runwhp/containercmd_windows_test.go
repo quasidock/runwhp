@@ -3,10 +3,13 @@
 package main
 
 import (
+	"net/netip"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/quasidock/runwhp/internal/container"
+	"github.com/quasidock/runwhp/internal/netstack"
 )
 
 func TestStatusTextRestarting(t *testing.T) {
@@ -45,5 +48,29 @@ func TestStatusPaused(t *testing.T) {
 	c.State.Status = container.Running // CreateWith records it as creating
 	if s := stateOf(c); s.Status != container.Paused {
 		t.Errorf("state's status = %q", s.Status)
+	}
+}
+
+// docker port lists each port with its protocol, and finds one asked for
+// by number and protocol, TCP when none is given.
+func TestPortLines(t *testing.T) {
+	ports := []netstack.Port{
+		{Host: netip.MustParseAddrPort("127.0.0.1:8080"), Guest: 80},
+		{Host: netip.MustParseAddrPort("127.0.0.1:5353"), Guest: 53, Proto: "udp"},
+		{Host: netip.MustParseAddrPort("127.0.0.1:5354"), Guest: 53},
+	}
+	c := &container.Container{ID: "0123456789abcdef", Name: "web", Config: &container.Config{Publish: ports},
+		State: container.State{Status: container.Running, Ports: ports}}
+	lines, err := portLines(c, "")
+	if want := []string{"80/tcp -> 127.0.0.1:8080", "53/udp -> 127.0.0.1:5353", "53/tcp -> 127.0.0.1:5354"}; err != nil || !reflect.DeepEqual(lines, want) {
+		t.Errorf("all: %q, %v", lines, err)
+	}
+	for want, port := range map[string]string{"127.0.0.1:5353": "53/udp", "127.0.0.1:5354": "53", "127.0.0.1:8080": "80/TCP"} {
+		if lines, err := portLines(c, port); err != nil || !reflect.DeepEqual(lines, []string{want}) {
+			t.Errorf("%s: %q, %v", port, lines, err)
+		}
+	}
+	if _, err := portLines(c, "80/udp"); err == nil || err.Error() != "no public port '80/udp' published for web" {
+		t.Errorf("80/udp: %v", err)
 	}
 }
