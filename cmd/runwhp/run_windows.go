@@ -23,6 +23,7 @@ import (
 	"github.com/quasidock/runwhp/internal/gc"
 	"github.com/quasidock/runwhp/internal/guestspec"
 	"github.com/quasidock/runwhp/internal/image"
+	"github.com/quasidock/runwhp/internal/netstack"
 	"github.com/quasidock/runwhp/internal/vm"
 	"github.com/quasidock/runwhp/internal/vmm"
 	"github.com/quasidock/runwhp/internal/volume"
@@ -530,7 +531,11 @@ func resolveSpec(ctx context.Context, root string, s *runSpec, policy image.Poli
 	}
 	cfg.Expose = exposedPorts(imageExposed, s.network.expose, cfg.Publish)
 	if s.network.publishAll && cfg.Network {
-		more, skipped := publishAll(cfg.Expose, cfg.Publish)
+		addr, err := netstack.DefaultPublishAddress()
+		if err != nil {
+			return nil, fmt.Errorf("-P: %w", err)
+		}
+		more, skipped := publishAll(cfg.Expose, cfg.Publish, addr)
 		cfg.Publish, cfg.PublishAll = append(cfg.Publish, more...), true
 		if len(skipped) > 0 && out != nil {
 			fmt.Fprintf(out, "WARNING: -P publishes TCP and UDP ports only; not %s\n", strings.Join(skipped, ", "))

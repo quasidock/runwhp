@@ -9,6 +9,7 @@ import (
 	"os"
 	"reflect"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -266,5 +267,41 @@ func TestPipePath(t *testing.T) {
 		if got := pipePath(in); got != `\\.\pipe\runwhp_engine-x` {
 			t.Errorf("pipePath(%q) = %q", in, got)
 		}
+	}
+}
+
+// RUNWHP_PUBLISH_ADDRESS is where ports listen that were published with no
+// address: by -p, by -P, by the API and by compose. One given stays.
+func TestPublishAddressSetting(t *testing.T) {
+	t.Setenv("RUNWHP_PUBLISH_ADDRESS", "0.0.0.0")
+	for in, want := range map[string]string{"8080:80": "0.0.0.0:8080->80/tcp", "53/udp": "0.0.0.0:0->53/udp", "127.0.0.1:8080:80": "127.0.0.1:8080->80/tcp"} {
+		if got, err := parsePublish(in); err != nil || got.String() != want {
+			t.Errorf("-p %s: %v, %v; want %s", in, got, err, want)
+		}
+	}
+	req := createRun(t)
+	req.HostConfig.PortBindings = dnetwork.PortMap{
+		dnetwork.MustParsePort("80/tcp"):  {{HostPort: "8080"}},
+		dnetwork.MustParsePort("443/tcp"): {{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: "8443"}},
+	}
+	s, _, err := specFromCreate(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, p := range s.network.publish {
+		got = append(got, p.String())
+	}
+	sort.Strings(got)
+	if want := []string{"0.0.0.0:8080->80/tcp", "127.0.0.1:8443->443/tcp"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("API ports %q, want %q", got, want)
+	}
+
+	t.Setenv("RUNWHP_PUBLISH_ADDRESS", "localhost")
+	if _, err := parsePublish("8080:80"); err == nil || !strings.Contains(err.Error(), `RUNWHP_PUBLISH_ADDRESS="localhost" is not an IP address`) {
+		t.Errorf("a bad setting: %v", err)
+	}
+	if _, err := parsePublish("127.0.0.1:8080:80"); err != nil {
+		t.Errorf("a bad setting, with an address given: %v", err)
 	}
 }

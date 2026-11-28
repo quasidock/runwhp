@@ -149,7 +149,7 @@ func TestExposeAndPublishAll(t *testing.T) {
 	if want := []string{"53/tcp", "53/udp", "80/tcp", "132/sctp", "443/tcp", "5000/udp", "6379/tcp", "9000/tcp"}; !reflect.DeepEqual(exposed, want) {
 		t.Errorf("exposed %q, want %q", exposed, want)
 	}
-	more, skipped := publishAll(exposed, published)
+	more, skipped := publishAll(exposed, published, netip.MustParseAddr("127.0.0.1"))
 	var got []string
 	for _, p := range more {
 		got = append(got, p.String())

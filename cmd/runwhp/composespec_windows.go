@@ -92,12 +92,14 @@ func networkOf(c compose.Container) (networkRequest, error) {
 		}
 	}
 	for _, p := range c.Ports {
-		ip := netip.MustParseAddr("127.0.0.1")
-		if p.HostIP != "" {
-			var err error
-			if ip, err = netip.ParseAddr(p.HostIP); err != nil {
-				return r, fmt.Errorf("port %d: %q is not an IP address", p.Target, p.HostIP)
+		var ip netip.Addr
+		var err error
+		if p.HostIP == "" {
+			if ip, err = netstack.DefaultPublishAddress(); err != nil {
+				return r, fmt.Errorf("port %d: %v", p.Target, err)
 			}
+		} else if ip, err = netip.ParseAddr(p.HostIP); err != nil {
+			return r, fmt.Errorf("port %d: %q is not an IP address", p.Target, p.HostIP)
 		}
 		proto, err := netstack.ParseProto(p.Protocol)
 		if err != nil {

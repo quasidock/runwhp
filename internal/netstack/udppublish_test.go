@@ -172,3 +172,19 @@ func TestPublishUDP(t *testing.T) {
 		t.Errorf("busy port: %v", err)
 	}
 }
+
+// RUNWHP_PUBLISH_ADDRESS sets the address of ports published without one.
+func TestDefaultPublishAddress(t *testing.T) {
+	for v, want := range map[string]string{"": "127.0.0.1", "0.0.0.0": "0.0.0.0", "::": "::", "[::]": "::", " 192.168.2.10 ": "192.168.2.10", "::ffff:127.0.0.2": "127.0.0.2"} {
+		t.Setenv(PublishAddressEnv, v)
+		if got, err := DefaultPublishAddress(); err != nil || got.String() != want {
+			t.Errorf("%q: %v, %v; want %s", v, got, err, want)
+		}
+	}
+	for _, v := range []string{"localhost", "fe80::1%eth0", "1.2.3"} {
+		t.Setenv(PublishAddressEnv, v)
+		if _, err := DefaultPublishAddress(); err == nil || !strings.Contains(err.Error(), "is not an IP address") {
+			t.Errorf("%q: %v", v, err)
+		}
+	}
+}

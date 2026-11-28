@@ -312,7 +312,7 @@ func networkFromCreate(cfg *dcontainer.Config, hc *dcontainer.HostConfig, nc *dn
 		// A port with no bindings is only exposed, as Docker's daemon
 		// takes it, unless -P publishes it below.
 		for _, b := range bindings {
-			host := "127.0.0.1"
+			host := "" // the server's RUNWHP_PUBLISH_ADDRESS, as parsePublish takes it
 			if b.HostIP.IsValid() {
 				host = b.HostIP.String()
 				if b.HostIP.Is6() {

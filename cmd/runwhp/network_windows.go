@@ -199,9 +199,9 @@ func planNetwork(root string, r networkRequest) (networkOptions, error) {
 }
 
 // parsePublish reads -p [[IP:][HOSTPORT]:]CONTAINERPORT[/tcp|/udp].
-// Without an IP the port listens on 127.0.0.1 only; without a host port,
-// or with 0, on any port the system has free, as Docker's random host
-// ports.
+// Without an IP the port listens on RUNWHP_PUBLISH_ADDRESS, 127.0.0.1
+// unless set; without a host port, or with 0, on any port the system has
+// free, as Docker's random host ports.
 func parsePublish(s string) (netstack.Port, error) {
 	bad := func(format string, a ...any) (netstack.Port, error) {
 		return netstack.Port{}, fmt.Errorf("-p %s: "+format, append([]any{s}, a...)...)
@@ -216,16 +216,17 @@ func parsePublish(s string) (netstack.Port, error) {
 	if i >= 0 {
 		rest, guestPort = spec[:i], spec[i+1:]
 	}
-	hostIP, hostPort := "127.0.0.1", rest
+	hostIP, hostPort := "", rest
 	if j := strings.LastIndex(rest, ":"); j >= 0 {
 		hostIP, hostPort = rest[:j], rest[j+1:]
 		hostIP = strings.TrimSuffix(strings.TrimPrefix(hostIP, "["), "]")
-		if hostIP == "" {
-			hostIP = "127.0.0.1"
-		}
 	}
-	ip, err := netip.ParseAddr(hostIP)
-	if err != nil {
+	var ip netip.Addr
+	if hostIP == "" {
+		if ip, err = netstack.DefaultPublishAddress(); err != nil {
+			return bad("%v", err)
+		}
+	} else if ip, err = netip.ParseAddr(hostIP); err != nil {
 		return bad("%q is not an IP address", hostIP)
 	}
 	var hp uint16
@@ -311,8 +312,8 @@ func comparePorts(a, b string) int {
 }
 
 // publishAll is -P: every exposed TCP and UDP port not already published,
-// on a random host port of 127.0.0.1, and the SCTP ones it cannot publish.
-func publishAll(exposed []string, publish []netstack.Port) (more []netstack.Port, skipped []string) {
+// on a random host port of addr, and the SCTP ones it cannot publish.
+func publishAll(exposed []string, publish []netstack.Port, addr netip.Addr) (more []netstack.Port, skipped []string) {
 	have := map[string]bool{}
 	for _, p := range publish {
 		have[fmt.Sprintf("%d/%s", p.Guest, p.Protocol())] = true
@@ -329,7 +330,7 @@ func publishAll(exposed []string, publish []netstack.Port) (more []netstack.Port
 			continue
 		}
 		have[e] = true
-		more = append(more, netstack.Port{Host: netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), 0), Guest: port, Proto: proto})
+		more = append(more, netstack.Port{Host: netip.AddrPortFrom(addr, 0), Guest: port, Proto: proto})
 	}
 	return more, skipped
 }

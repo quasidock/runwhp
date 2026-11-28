@@ -316,3 +316,36 @@ func TestPublishUDP(t *testing.T) {
 		t.Errorf("state's ports %q, want %s->9999/udp", s.Ports, addr)
 	}
 }
+
+// TestPublishAddress sets the address of ports published without one, as
+// Docker's daemon's --ip does, here to another loopback address, which
+// Windows Firewall does not ask about; an address given stays, and a
+// setting that is not an address fails the run.
+func TestPublishAddress(t *testing.T) {
+	parallel(t)
+	setEnv(t, "RUNWHP_PUBLISH_ADDRESS", "127.0.0.2")
+	name := newName(t)
+	detached(t, "--name", name, "-p", "8080", "-p", "127.0.0.1::8081", alpine, "sh", "-c", "nc -lk -p 8081 -e echo served & exec nc -lk -p 8080 -e echo served")
+	for guest, prefix := range map[string]string{"8080": "127.0.0.2:", "8081": "127.0.0.1:"} {
+		addr := strings.TrimSpace(cli(t, "port", name, guest).stdout)
+		if !strings.HasPrefix(addr, prefix) {
+			t.Fatalf("port %s at %q, want %s", guest, addr, prefix)
+		}
+		var got string
+		for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline) && got != "served\n"; time.Sleep(100 * time.Millisecond) {
+			if c, err := net.DialTimeout("tcp", addr, time.Second); err == nil {
+				c.SetReadDeadline(time.Now().Add(2 * time.Second))
+				b, _ := io.ReadAll(c)
+				c.Close()
+				got = string(b)
+			}
+		}
+		if got != "served\n" {
+			t.Errorf("%s served %q", addr, got)
+		}
+	}
+	setEnv(t, "RUNWHP_PUBLISH_ADDRESS", "nowhere")
+	if r := run(t, "-p", "80", alpine, "true"); r.code != 125 || !strings.Contains(r.stderr, `RUNWHP_PUBLISH_ADDRESS="nowhere" is not an IP address`) {
+		t.Errorf("a bad setting: %+v", r)
+	}
+}
