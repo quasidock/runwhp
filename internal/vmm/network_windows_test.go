@@ -3,6 +3,7 @@
 package vmm
 
 import (
+	"fmt"
 	"net/netip"
 	"reflect"
 	"strings"
@@ -146,5 +147,26 @@ func TestResolvFromDNSFlags(t *testing.T) {
 	}
 	if got := defaultResolv(ndots); !reflect.DeepEqual(got.Nameservers, []string{"10.0.2.3"}) || got.Search != nil {
 		t.Errorf("default network, no servers, search .: %+v", got)
+	}
+}
+
+// --dns's servers on a user-defined network are asked from the host: a
+// loopback address is the host's, the gateway the host's loopback with
+// host-gateway, and another container's address is left out.
+func TestDNSUpstream(t *testing.T) {
+	subnets := []netip.Prefix{netip.MustParsePrefix("172.18.0.0/16")}
+	var logged []string
+	logf := func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) }
+	cfg := &container.Config{DNS: []string{"192.0.2.53", "127.0.0.77", "10.0.2.2", "172.18.0.1", "172.18.0.9"}, HostGateway: true}
+	got := dnsUpstream(cfg, subnets, logf)
+	want := []netip.AddrPort{netip.MustParseAddrPort("192.0.2.53:53"), netip.MustParseAddrPort("127.0.0.77:53"),
+		netip.MustParseAddrPort("127.0.0.1:53"), netip.MustParseAddrPort("127.0.0.1:53")}
+	if !reflect.DeepEqual(got, want) || len(logged) != 1 || !strings.Contains(logged[0], "172.18.0.9") {
+		t.Errorf("with host-gateway: %v, logged %q", got, logged)
+	}
+	logged = nil
+	cfg.HostGateway = false
+	if got := dnsUpstream(cfg, subnets, logf); len(got) != 2 || len(logged) != 3 {
+		t.Errorf("without host-gateway: %v, logged %q", got, logged)
 	}
 }

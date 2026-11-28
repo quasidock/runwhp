@@ -8,12 +8,16 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/net/dns/dnsmessage"
 )
 
 // newNetwork makes a network of the test's own, removed when the test
@@ -424,4 +428,73 @@ func TestUserNetworkSystemPrune(t *testing.T) {
 	if ls := s.ok("network", "ls", "-q").stdout; strings.Count(ls, "\n") != 3 {
 		t.Errorf("left:\n%s", ls)
 	}
+}
+
+// hostDNS is a DNS server on the host's 127.0.0.77, answering
+// fixture.test. with 192.0.2.7 and nothing else, as a server of the user's
+// own would; one for every test that asks.
+var hostDNS struct {
+	once sync.Once
+	err  error
+}
+
+func startHostDNS(t *testing.T) string {
+	t.Helper()
+	hostDNS.once.Do(func() {
+		pc, err := net.ListenPacket("udp", "127.0.0.77:53")
+		if err != nil {
+			hostDNS.err = err
+			return
+		}
+		go func() {
+			buf := make([]byte, 1500)
+			for {
+				n, from, err := pc.ReadFrom(buf)
+				if err != nil {
+					return
+				}
+				var m dnsmessage.Message
+				if m.Unpack(buf[:n]) != nil || len(m.Questions) != 1 {
+					continue
+				}
+				q := m.Questions[0]
+				m.Header.Response, m.Header.RecursionAvailable = true, true
+				switch {
+				case q.Name.String() == "fixture.test." && q.Type == dnsmessage.TypeA:
+					m.Answers = []dnsmessage.Resource{{
+						Header: dnsmessage.ResourceHeader{Name: q.Name, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 60},
+						Body:   &dnsmessage.AResource{A: [4]byte{192, 0, 2, 7}},
+					}}
+				case q.Name.String() != "fixture.test.":
+					m.Header.RCode = dnsmessage.RCodeNameError
+				}
+				if reply, err := m.Pack(); err == nil {
+					pc.WriteTo(reply, from)
+				}
+			}
+		}()
+	})
+	if hostDNS.err != nil {
+		t.Skipf("no DNS server of the test's own on the host: %v", hostDNS.err)
+	}
+	return "127.0.0.77"
+}
+
+// TestDNSForward gives a container on a user-defined network a DNS server
+// of its own, as --dns does with Docker: resolv.conf still names the
+// embedded server, which answers the containers' names itself and asks the
+// server, from the host, for others; a loopback address being the host's.
+func TestDNSForward(t *testing.T) {
+	parallel(t)
+	server := startHostDNS(t)
+	net := newNetwork(t)
+	peer := serving(t, "--network", net)
+	waitServing(t, net, peer)
+	ip := networksOf(t, peer).Networks[net].IPAddress
+	// musl's resolver, as getent uses it, tries the name as given, then
+	// with the search domain; busybox's nslookup tries only the latter.
+	r := run(t, "--network", net, "--dns", server, "--dns-search", "corp.test", alpine, "sh", "-c",
+		"cat /etc/resolv.conf; getent hosts fixture.test | awk '{print $1}'; getent hosts "+peer+" | awk '{print $1}'; "+
+			"getent hosts missing.test >/dev/null || echo missing")
+	expect(t, r, "nameserver 127.0.0.11\nsearch corp.test\noptions ndots:0\n192.0.2.7\n"+ip+"\nmissing\n", 0)
 }

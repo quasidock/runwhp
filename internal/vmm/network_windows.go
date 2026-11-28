@@ -136,6 +136,35 @@ func userResolvFor(cfg *container.Config, gateway netip.Addr) *guestspec.Resolv 
 	}
 }
 
+// dnsUpstream maps --dns's servers to where the host reaches them, for the
+// embedded server, which asks them from the host, as Docker's asks from the
+// daemon's namespace: a loopback address is the host's own; the gateway,
+// the host's loopback through host-gateway; and an address on runwhp's
+// networks, another container's, which the host cannot reach, is left out.
+func dnsUpstream(cfg *container.Config, subnets []netip.Prefix, logf func(string, ...any)) []netip.AddrPort {
+	var out []netip.AddrPort
+	for _, s := range cfg.DNS {
+		ip, err := netip.ParseAddr(s)
+		if err != nil {
+			continue
+		}
+		onNetwork := netstack.Subnet.Contains(ip) || slices.ContainsFunc(subnets, func(p netip.Prefix) bool { return p.Contains(ip) })
+		gateway := ip == netstack.Gateway || onNetwork && slices.ContainsFunc(subnets, func(p netip.Prefix) bool { return p.Addr().Next() == ip })
+		switch {
+		case gateway && cfg.HostGateway:
+			ip = netip.AddrFrom4([4]byte{127, 0, 0, 1})
+		case gateway:
+			logf("--dns %s: the host is closed to the container without --add-host NAME:host-gateway; not asked", s)
+			continue
+		case onNetwork:
+			logf("--dns %s: an address on a network of runwhp's, which the embedded DNS server, on the host, cannot reach; not asked", s)
+			continue
+		}
+		out = append(out, netip.AddrPortFrom(ip, 53))
+	}
+	return out
+}
+
 // searchDomains are --dns-search's domains, none if one is ".", as Docker
 // takes it.
 func searchDomains(cfg *container.Config) []string {
@@ -188,6 +217,11 @@ func (n *guestNetwork) join(root string, cfg *container.Config, logf func(string
 		n.nics = append(n.nics, &guestNIC{dir: d})
 	}
 	names := &netswitch.Names{Networks: dirs, Next: net.DefaultResolver}
+	if len(cfg.DNS) > 0 {
+		// As Docker's embedded server asks --dns's servers, from the
+		// host, for names that are not containers'.
+		names.Next = netstack.Upstream(dnsUpstream(cfg, refuse, logf), nil)
+	}
 	routers := map[string]*guestNIC{}
 	for i, l := range n.leases {
 		nic := n.nics[i]
