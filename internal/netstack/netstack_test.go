@@ -512,8 +512,8 @@ func TestPublish(t *testing.T) {
 		t.Fatalf("published %v", pub)
 	}
 	hostAddr := pub[0].Host.String()
-	if hostAddr != g.host.listeners[0].Addr().String() {
-		t.Errorf("published %s, listening on %s", hostAddr, g.host.listeners[0].Addr())
+	if hostAddr != g.host.published[0].ln.Addr().String() {
+		t.Errorf("published %s, listening on %s", hostAddr, g.host.published[0].ln.Addr())
 	}
 	c, err := net.DialTimeout("tcp", hostAddr, 5*time.Second)
 	if err != nil {
@@ -529,7 +529,7 @@ func TestPublish(t *testing.T) {
 
 	// Nothing listens on guest port 9090: the host connection is closed.
 	g2 := newGuest(t, Config{Publish: []Port{{Host: netip.MustParseAddrPort("127.0.0.1:0"), Guest: 9090}}})
-	c2, err := net.DialTimeout("tcp", g2.host.listeners[0].Addr().String(), 5*time.Second)
+	c2, err := net.DialTimeout("tcp", g2.host.published[0].ln.Addr().String(), 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -723,7 +723,7 @@ func TestOtherAddresses(t *testing.T) {
 			c.Close()
 		}
 	}()
-	c, err := net.DialTimeout("tcp", g.host.listeners[0].Addr().String(), 5*time.Second)
+	c, err := net.DialTimeout("tcp", g.host.published[0].ln.Addr().String(), 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}

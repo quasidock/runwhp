@@ -16,6 +16,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -74,17 +75,40 @@ const (
 	tcpInFlight  = 256
 )
 
-// Port is a guest TCP port published on the host. A Host port of 0 asks
-// for any port the system has free, as Docker's random host ports do.
+// Port is a guest port published on the host. A Host port of 0 asks for
+// any port the system has free, as Docker's random host ports do.
 type Port struct {
 	Host  netip.AddrPort
 	Guest uint16
+	// Proto is "udp" for a UDP port, and empty for TCP, so that records of
+	// TCP ports read the same as before there were others.
+	Proto string `json:",omitempty"`
 }
 
 // Random reports whether the port asks for any free host port.
 func (p Port) Random() bool { return p.Host.Port() == 0 }
 
-func (p Port) String() string { return fmt.Sprintf("%s->%d/tcp", p.Host, p.Guest) }
+// Protocol is the port's protocol: "tcp" or "udp".
+func (p Port) Protocol() string {
+	if p.Proto == "" {
+		return "tcp"
+	}
+	return p.Proto
+}
+
+func (p Port) String() string { return fmt.Sprintf("%s->%d/%s", p.Host, p.Guest, p.Protocol()) }
+
+// ParseProto reads a port's protocol as Docker writes it, into Port.Proto:
+// "" or "tcp" is TCP, "udp" UDP; nothing else can be published.
+func ParseProto(s string) (string, error) {
+	switch strings.ToLower(s) {
+	case "", "tcp":
+		return "", nil
+	case "udp":
+		return "udp", nil
+	}
+	return "", fmt.Errorf("%s ports cannot be published: runwhp publishes TCP and UDP ports", s)
+}
 
 // Config configures a Stack.
 type Config struct {
@@ -131,7 +155,7 @@ type Stack struct {
 
 	dnsUDP    *gonet.UDPConn
 	dnsTCP    *gonet.TCPListener
-	listeners []net.Listener
+	published []publishedSocket // one for each of cfg.Publish, in its order
 
 	mu      sync.Mutex
 	closed  bool
@@ -142,6 +166,23 @@ type Stack struct {
 	tcpFlows, udpFlows, publishedConns, dnsQueries atomic.Uint64
 	refused, dialFailures, inDropped               atomic.Uint64
 	pingsSent, pingsDropped                        atomic.Uint64
+	udpFlowsIn, udpInDropped                       atomic.Uint64
+}
+
+// publishedSocket is a published port's host socket: a TCP listener or a
+// UDP socket.
+type publishedSocket struct {
+	ln net.Listener
+	pc *net.UDPConn
+}
+
+func (p publishedSocket) close() {
+	if p.ln != nil {
+		p.ln.Close()
+	}
+	if p.pc != nil {
+		p.pc.Close()
+	}
 }
 
 // New builds the stack, opens the published ports' listeners, and starts
@@ -173,12 +214,18 @@ func New(cfg Config) (*Stack, error) {
 
 	// Listeners first, so a busy port fails before anything else starts.
 	for _, p := range cfg.Publish {
-		ln, err := net.Listen("tcp", p.Host.String())
+		var ps publishedSocket
+		var err error
+		if p.Protocol() == "udp" {
+			ps.pc, err = net.ListenUDP("udp", net.UDPAddrFromAddrPort(p.Host))
+		} else {
+			ps.ln, err = net.Listen("tcp", p.Host.String())
+		}
 		if err != nil {
 			s.closeListeners()
 			return nil, fmt.Errorf("publishing port %s: %w", p, err)
 		}
-		s.listeners = append(s.listeners, ln)
+		s.published = append(s.published, ps)
 	}
 
 	s.stack = stack.New(stack.Options{
@@ -193,13 +240,17 @@ func New(cfg Config) (*Stack, error) {
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 
-	s.loops.Add(4 + len(s.listeners))
+	s.loops.Add(4 + len(s.published))
 	go s.inbound()
 	go s.outbound()
 	go s.serveDNSUDP()
 	go s.serveDNSTCP()
-	for i, ln := range s.listeners {
-		go s.servePort(ln, cfg.Publish[i].Guest)
+	for i, ps := range s.published {
+		if ps.pc != nil {
+			go s.serveUDPPort(ps.pc, cfg.Publish[i].Guest)
+		} else {
+			go s.servePort(ps.ln, cfg.Publish[i].Guest)
+		}
 	}
 	return s, nil
 }
@@ -328,10 +379,12 @@ func (s *Stack) Close() {
 // Published returns the ports the stack listens on, as they were bound:
 // one asked for as port 0 has the port the system chose.
 func (s *Stack) Published() []Port {
-	ps := make([]Port, 0, len(s.listeners))
-	for i, ln := range s.listeners {
+	ps := make([]Port, 0, len(s.published))
+	for i, sock := range s.published {
 		p := s.cfg.Publish[i]
-		if a, ok := ln.Addr().(*net.TCPAddr); ok {
+		if sock.pc != nil {
+			p.Host = netip.AddrPortFrom(p.Host.Addr(), uint16(sock.pc.LocalAddr().(*net.UDPAddr).Port))
+		} else if a, ok := sock.ln.Addr().(*net.TCPAddr); ok {
 			p.Host = netip.AddrPortFrom(p.Host.Addr(), uint16(a.Port))
 		}
 		ps = append(ps, p)
@@ -340,15 +393,15 @@ func (s *Stack) Published() []Port {
 }
 
 func (s *Stack) closeListeners() {
-	for _, ln := range s.listeners {
-		ln.Close()
+	for _, ps := range s.published {
+		ps.close()
 	}
 }
 
 // Stats summarises the stack's activity.
 func (s *Stack) Stats() string {
-	return fmt.Sprintf("network: %d tcp and %d udp flows out, %d connections in, %d dns queries, %d pings out (%d dropped), %d refused, %d dial failures, %d frames dropped",
-		s.tcpFlows.Load(), s.udpFlows.Load(), s.publishedConns.Load(), s.dnsQueries.Load(),
+	return fmt.Sprintf("network: %d tcp and %d udp flows out, %d connections and %d udp flows in (%d dropped), %d dns queries, %d pings out (%d dropped), %d refused, %d dial failures, %d frames dropped",
+		s.tcpFlows.Load(), s.udpFlows.Load(), s.publishedConns.Load(), s.udpFlowsIn.Load(), s.udpInDropped.Load(), s.dnsQueries.Load(),
 		s.pingsSent.Load(), s.pingsDropped.Load(),
 		s.refused.Load(), s.dialFailures.Load(), s.inDropped.Load())
 }
