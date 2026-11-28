@@ -45,7 +45,10 @@ type Container struct {
 	Ports          []Port
 	Expose         []string // as --expose takes them
 	ExtraHosts     []string // NAME:IP, as --add-host takes them
-	Mounts         []Mount
+	// DNS, DNSSearch and DNSOptions are dns, dns_search and dns_opt, as
+	// --dns, --dns-search and --dns-option take them.
+	DNS, DNSSearch, DNSOptions []string
+	Mounts                     []Mount
 
 	Restart     string // as --restart takes it
 	Health      *Health
@@ -199,7 +202,6 @@ func Translate(p *types.Project, s types.ServiceConfig, pr *Problems) Container 
 		{"blkio_config", s.BlkioConfig != nil}, {"mem_reservation", s.MemReservation != 0}, {"memswap_limit", s.MemSwapLimit != 0},
 		{"mem_swappiness", s.MemSwappiness != 0}, {"cgroup_parent", s.CgroupParent != ""}, {"cgroup", s.Cgroup != ""},
 		{"group_add", len(s.GroupAdd) > 0}, {"isolation", s.Isolation != ""}, {"read_only", s.ReadOnly},
-		{"dns", len(s.DNS) > 0}, {"dns_search", len(s.DNSSearch) > 0}, {"dns_opt", len(s.DNSOpts) > 0},
 		{"domainname", s.DomainName != ""}, {"mac_address", s.MacAddress != ""}, {"external_links", len(s.ExternalLinks) > 0},
 		{"credential_spec", s.CredentialSpec != nil}, {"runtime", s.Runtime != ""}, {"umask", s.Umask != nil},
 		{"develop", s.Develop != nil},
@@ -272,6 +274,7 @@ func Translate(p *types.Project, s types.ServiceConfig, pr *Problems) Container 
 		c.Ports = append(c.Ports, pt)
 	}
 	c.Expose = append(c.Expose, s.Expose...)
+	c.DNS, c.DNSSearch, c.DNSOptions = s.DNS, s.DNSSearch, s.DNSOpts
 	for _, name := range sortedKeys(s.ExtraHosts) {
 		for _, ip := range s.ExtraHosts[name] {
 			c.ExtraHosts = append(c.ExtraHosts, name+":"+ip)

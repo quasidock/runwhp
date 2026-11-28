@@ -125,3 +125,26 @@ func TestCheckDevicesNetworks(t *testing.T) {
 		t.Errorf("one network: %v", err)
 	}
 }
+
+// --dns, --dns-search and --dns-option make resolv.conf as Docker's does:
+// on the default network as given; on a user-defined one, the embedded
+// server with the search domains and the options, and ndots:0 after them
+// unless they set ndots. A search domain of "." means none.
+func TestResolvFromDNSFlags(t *testing.T) {
+	cfg := &container.Config{DNS: []string{"192.0.2.53", "192.0.2.54"}, DNSSearch: []string{"corp.test", "ex.test"}, DNSOptions: []string{"timeout:1"}}
+	if got, want := defaultResolv(cfg), (&guestspec.Resolv{Nameservers: cfg.DNS, Search: cfg.DNSSearch, Options: cfg.DNSOptions}); !reflect.DeepEqual(got, want) {
+		t.Errorf("default network: %+v", got)
+	}
+	gw := netip.MustParseAddr("172.18.0.1")
+	if got, want := userResolvFor(cfg, gw), (&guestspec.Resolv{Nameservers: []string{"172.18.0.1"}, Embedded: "172.18.0.1",
+		Search: cfg.DNSSearch, Options: []string{"timeout:1", "ndots:0"}}); !reflect.DeepEqual(got, want) {
+		t.Errorf("user network: %+v", got)
+	}
+	ndots := &container.Config{DNSSearch: []string{"."}, DNSOptions: []string{"ndots:3"}}
+	if got := userResolvFor(ndots, gw); got.Search != nil || !reflect.DeepEqual(got.Options, []string{"ndots:3"}) {
+		t.Errorf("ndots given, search .: %+v", got)
+	}
+	if got := defaultResolv(ndots); !reflect.DeepEqual(got.Nameservers, []string{"10.0.2.3"}) || got.Search != nil {
+		t.Errorf("default network, no servers, search .: %+v", got)
+	}
+}

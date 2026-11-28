@@ -54,6 +54,9 @@ type runOptions struct {
 	publishAll  bool
 	expose      listFlag
 	addHosts    listFlag
+	dns         listFlag
+	dnsSearch   listFlag
+	dnsOptions  listFlag
 	volumes     listFlag
 	mounts      listFlag
 	tmpfs       listFlag
@@ -115,6 +118,10 @@ func runFlags(o *runOptions) *flag.FlagSet {
 	fs.BoolVar(&o.publishAll, "publish-all", false, "")
 	fs.Var(&o.expose, "expose", "")
 	fs.Var(&o.addHosts, "add-host", "")
+	fs.Var(&o.dns, "dns", "")
+	fs.Var(&o.dnsSearch, "dns-search", "")
+	fs.Var(&o.dnsOptions, "dns-option", "")
+	fs.Var(&o.dnsOptions, "dns-opt", "") // Docker's older name, hidden as Docker hides it
 	fs.Var(&o.volumes, "v", "")
 	fs.Var(&o.volumes, "volume", "")
 	fs.Var(&o.mounts, "mount", "")
@@ -184,15 +191,20 @@ Flags:
                          its own alias and address
       --network-alias NAME  another name for the container on its first network (repeatable)
       --ip ADDRESS       the container's address on its first network
-  -p, --publish [IP:][HOSTPORT:]PORT  forward a host port to a container TCP port (repeatable);
-                         IP defaults to 127.0.0.1, and without HOSTPORT any free port is
-                         taken, which runwhp port shows
-  -P, --publish-all      publish every exposed TCP port, the image's and --expose's, on
-                         a free host port
+  -p, --publish [IP:][HOSTPORT:]PORT[/tcp|/udp]  forward a host port to a container port
+                         (repeatable); IP defaults to RUNWHP_PUBLISH_ADDRESS or 127.0.0.1,
+                         and without HOSTPORT any free port is taken, which runwhp port shows
+  -P, --publish-all      publish every exposed TCP and UDP port, the image's and --expose's,
+                         on a free host port
       --expose PORT[/PROTO]  a port the container listens on, published only with -P
                          (repeatable)
       --add-host NAME:IP add an /etc/hosts entry (repeatable); IP host-gateway reaches
                          this machine's 127.0.0.1
+      --dns ADDRESS      a DNS server for the container (repeatable); on a user-defined
+                         network, the embedded server asks it for names that are not
+                         containers'
+      --dns-search DOMAIN  a search domain for resolv.conf (repeatable); . for none
+      --dns-option OPTION  a resolv.conf option, such as ndots:2 (repeatable)
   -v, --volume HOSTPATH:PATH[:ro]  bind a host directory or file into the container (repeatable);
                          HOSTPATH is absolute or starts with a dot, and is created if missing
   -v, --volume NAME:PATH[:ro]  mount a named volume, created if missing; PATH alone makes an
@@ -419,7 +431,8 @@ func parseRunOptions(o *runOptions, entrypointSet bool, args []string) (runSpec,
 	if s.cpus, err = parseCPUs(o.cpus, runtime.NumCPU()); err != nil {
 		return s, err
 	}
-	if s.network, err = parseNetworkRequest(networkFlags{modes: o.networks, aliases: o.aliases, ip: o.ip, publish: o.publish, addHosts: o.addHosts, expose: o.expose, publishAll: o.publishAll}); err != nil {
+	if s.network, err = parseNetworkRequest(networkFlags{modes: o.networks, aliases: o.aliases, ip: o.ip, publish: o.publish, addHosts: o.addHosts, expose: o.expose, publishAll: o.publishAll,
+		dns: o.dns, dnsSearch: o.dnsSearch, dnsOptions: o.dnsOptions}); err != nil {
 		return s, err
 	}
 	if s.mounts, err = parseMountFlags(o.volumes, o.mounts, o.tmpfs); err != nil {
@@ -481,6 +494,7 @@ func resolveSpec(ctx context.Context, root string, s *runSpec, policy image.Poli
 		Version: container.ConfigVersion, ID: container.NewID(), Created: time.Now().UTC(),
 		Stdin: s.interactive, TTY: s.tty,
 		Hosts: network.hosts, Network: network.enabled, NetworkMode: network.mode, Networks: network.networks, Publish: network.publish, HostGateway: network.hostGateway,
+		DNS: network.dns.servers, DNSSearch: network.dns.search, DNSOptions: network.dns.options,
 		Shares: plan.shares, Mounts: plan.mounts,
 		Memory: s.memory, CPUs: s.cpus, StorageSize: s.storageSize, Debug: s.debug,
 		LogDriver: s.logs.driver, LogMaxSize: s.logs.maxSize, LogMaxFiles: s.logs.maxFiles,

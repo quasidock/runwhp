@@ -178,13 +178,22 @@ func TestDockerRun(t *testing.T) {
 	if out != "1 /tmp 65534 box\n" {
 		t.Errorf("env, workdir, user, hostname: %q", out)
 	}
+	// --dns and its kin, which inspect reports as Docker's does.
+	d.dok("run", "--name", "dnsbox", "--dns", "192.0.2.53", "--dns-search", "corp.test", "--dns-option", "timeout:1", img, "true")
+	if out := d.dok("inspect", "-f", "{{json .HostConfig.Dns}} {{json .HostConfig.DnsSearch}} {{json .HostConfig.DnsOptions}}", "dnsbox"); out != `["192.0.2.53"] ["corp.test"] ["timeout:1"]`+"\n" {
+		t.Errorf("inspect's DNS: %q", out)
+	}
+	d.dok("rm", "dnsbox")
+	if out := d.dok("run", "--rm", "--dns", "192.0.2.53", "--dns-search", "corp.test", "--dns-option", "timeout:1", img, "cat", "/etc/resolv.conf"); out != "nameserver 192.0.2.53\nsearch corp.test\noptions timeout:1\n" {
+		t.Errorf("resolv.conf: %q", out)
+	}
 	before := d.dok("ps", "-aq")
 	for _, tc := range []struct {
 		args []string
 		want string
 	}{
 		{[]string{"--network", "host"}, "--network host"},
-		{[]string{"--dns", "1.1.1.1"}, "--dns"},
+		{[]string{"--dns", "2606:4700::1111"}, "IPv4 only"},
 		{[]string{"-p", "132:132/sctp"}, "sctp ports cannot be published"},
 		{[]string{"--cap-add", "NET_ADMIN"}, "--cap-add"},
 		{[]string{"--mount", "type=npipe,source=C:\\x,target=/x"}, "not a named pipe"},

@@ -122,7 +122,9 @@ func networkOf(c compose.Container) (networkRequest, error) {
 		r.hosts = append(r.hosts, line)
 		r.hostGateway = r.hostGateway || gateway
 	}
-	return r, nil
+	var err error
+	r.dns, err = parseDNS(c.DNS, c.DNSSearch, c.DNSOptions)
+	return r, err
 }
 
 // mountOf is a compose mount as run's flags would give it.

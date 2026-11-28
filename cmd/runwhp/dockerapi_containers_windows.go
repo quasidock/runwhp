@@ -522,6 +522,14 @@ func (s *apiServer) inspectOf(c *container.Container, size bool) dcontainer.Insp
 			}
 		}
 	}
+	// As Docker 29 gives them: Dns null when none was asked for, the others
+	// empty lists.
+	for _, d := range cfg.DNS {
+		if a, err := netip.ParseAddr(d); err == nil {
+			hc.DNS = append(hc.DNS, a)
+		}
+	}
+	hc.DNSSearch, hc.DNSOptions = append([]string{}, cfg.DNSSearch...), append([]string{}, cfg.DNSOptions...)
 	resp.HostConfig = hc
 	resp.NetworkSettings = &dcontainer.NetworkSettings{Ports: ports, Networks: s.endpointsOf(c)}
 	if size {

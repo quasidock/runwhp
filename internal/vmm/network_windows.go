@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
+	"strings"
 	"sync"
 
 	"github.com/quasidock/runwhp/internal/container"
@@ -68,7 +70,7 @@ func openNetwork(root string, cfg *container.Config, devices bool, logf func(str
 		}
 		return n, nil
 	}
-	n.resolv = &guestspec.Resolv{Nameservers: []string{netstack.DNS.String()}}
+	n.resolv = defaultResolv(cfg)
 	if !devices {
 		return n, nil
 	}
@@ -97,28 +99,60 @@ func openNetwork(root string, cfg *container.Config, devices bool, logf func(str
 	return n, nil
 }
 
+// defaultResolv is the resolv.conf of a container on the default network,
+// as Docker writes one on its default bridge: --dns's servers, or the
+// stack's, and --dns-search's and --dns-option's as given.
+func defaultResolv(cfg *container.Config) *guestspec.Resolv {
+	r := &guestspec.Resolv{Nameservers: cfg.DNS, Search: searchDomains(cfg), Options: cfg.DNSOptions}
+	if len(r.Nameservers) == 0 {
+		r.Nameservers = []string{netstack.DNS.String()}
+	}
+	return r
+}
+
 // userResolv is the resolv.conf of a container on user-defined networks,
 // for a guest that has no network devices.
 func userResolv(root string, cfg *container.Config) *guestspec.Resolv {
 	nw, err := network.Open(root).Get(cfg.Networks[0].Network)
 	if err != nil {
-		return &guestspec.Resolv{Options: []string{"ndots:0"}}
+		return &guestspec.Resolv{Search: searchDomains(cfg), Options: userOptions(cfg)}
 	}
-	return userResolvFor(nw.Gateway)
+	return userResolvFor(cfg, nw.Gateway)
 }
 
 // userResolvFor is the resolv.conf of a container whose primary network's
 // gateway is gateway: the gateway answers DNS, for the names of every
 // network the container is on, through init's embedded server at
 // 127.0.0.11, as Docker's answers there, or asked directly should that
-// server not start; and names are tried as given first, as Docker's
-// ndots:0 has them.
-func userResolvFor(gateway netip.Addr) *guestspec.Resolv {
+// server not start; --dns's servers are the embedded server's to ask, not
+// the container's. Names are tried as given first, as Docker's ndots:0 has
+// them, unless --dns-option says otherwise.
+func userResolvFor(cfg *container.Config, gateway netip.Addr) *guestspec.Resolv {
 	return &guestspec.Resolv{
 		Nameservers: []string{gateway.String()},
 		Embedded:    gateway.String(),
-		Options:     []string{"ndots:0"},
+		Search:      searchDomains(cfg),
+		Options:     userOptions(cfg),
 	}
+}
+
+// searchDomains are --dns-search's domains, none if one is ".", as Docker
+// takes it.
+func searchDomains(cfg *container.Config) []string {
+	if slices.Contains(cfg.DNSSearch, ".") {
+		return nil
+	}
+	return cfg.DNSSearch
+}
+
+// userOptions are --dns-option's, then ndots:0 unless they set ndots, as
+// Docker writes them on a user-defined network.
+func userOptions(cfg *container.Config) []string {
+	opts := slices.Clone(cfg.DNSOptions)
+	if !slices.ContainsFunc(opts, func(o string) bool { return strings.HasPrefix(o, "ndots:") }) {
+		opts = append(opts, "ndots:0")
+	}
+	return opts
 }
 
 // join leases the container an address on each of its networks, as its VM
@@ -200,7 +234,7 @@ func (n *guestNetwork) join(root string, cfg *container.Config, logf func(string
 		n.hostnameAddrs = append(n.hostnameAddrs, l.IP.String())
 		logf("network %s: %s, gateway %s", l.Net.Name, spec.Address, l.Net.Gateway)
 	}
-	n.resolv = userResolvFor(n.leases[0].Net.Gateway)
+	n.resolv = userResolvFor(cfg, n.leases[0].Net.Gateway)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	n.cancel = cancel

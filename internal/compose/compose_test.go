@@ -322,6 +322,8 @@ services:
     cap_add: [NET_ADMIN]
     init: true
     dns: [1.1.1.1]
+    dns_search: [corp.test]
+    dns_opt: [ndots:2]
     read_only: true
     expose: ["80"]
     logging: {driver: syslog}
@@ -339,14 +341,17 @@ services:
 	if strings.Contains(all, "privileged") {
 		t.Errorf("privileged warned of: %s", all)
 	}
-	for _, want := range []string{"cap_add is ignored", "init is ignored", "dns is ignored", "read_only is ignored",
+	if !reflect.DeepEqual(c.DNS, []string{"1.1.1.1"}) || !reflect.DeepEqual(c.DNSSearch, []string{"corp.test"}) || !reflect.DeepEqual(c.DNSOptions, []string{"ndots:2"}) {
+		t.Errorf("dns %q, dns_search %q, dns_opt %q", c.DNS, c.DNSSearch, c.DNSOptions)
+	}
+	for _, want := range []string{"cap_add is ignored", "init is ignored", "read_only is ignored",
 		"logging driver syslog is runwhp's local log here", "deploy.resources.reservations is ignored"} {
 		if !strings.Contains(all, want) {
 			t.Errorf("no warning saying %q in:\n%s", want, all)
 		}
 	}
-	if strings.Contains(all, "expose") {
-		t.Errorf("expose warned of: %s", all)
+	if strings.Contains(all, "expose") || strings.Contains(all, "dns") {
+		t.Errorf("expose or dns warned of: %s", all)
 	}
 }
 

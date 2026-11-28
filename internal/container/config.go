@@ -91,6 +91,14 @@ type Config struct {
 	// host port is 0, and State.Ports has what each boot bound.
 	Publish     []netstack.Port `json:"publish,omitempty"`
 	HostGateway bool            `json:"hostGateway,omitempty"`
+	// DNS, DNSSearch and DNSOptions are --dns, --dns-search and
+	// --dns-option's, as Docker's HostConfig keeps them: on the default
+	// network resolv.conf's servers, search domains and options; on a
+	// user-defined one, where the embedded server answers, the servers it
+	// passes other names to. A search domain of "." means none.
+	DNS        []string `json:"dns,omitempty"`
+	DNSSearch  []string `json:"dnsSearch,omitempty"`
+	DNSOptions []string `json:"dnsOptions,omitempty"`
 	// Expose are the ports the container says it listens on, "80/tcp", as
 	// Docker's ExposedPorts: its image's, --expose's and the published
 	// ones. Containers made before iteration 21 have none.

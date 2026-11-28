@@ -349,3 +349,18 @@ func TestPublishAddress(t *testing.T) {
 		t.Errorf("a bad setting: %+v", r)
 	}
 }
+
+// TestDNSDefaultNetwork gives a container on the default network DNS
+// servers, search domains and options of its own, which resolv.conf lists
+// as given, as Docker's does on its default bridge; and refuses them with
+// --network none, as Docker does.
+func TestDNSDefaultNetwork(t *testing.T) {
+	parallel(t)
+	r := run(t, "--dns", "10.0.2.3", "--dns", "192.0.2.53", "--dns-search", "corp.test", "--dns-option", "ndots:2", "--dns-option", "timeout:1",
+		alpine, "sh", "-c", "cat /etc/resolv.conf; nslookup localhost. | grep -o 'Address: 127.0.0.1'")
+	expect(t, r, "nameserver 10.0.2.3\nnameserver 192.0.2.53\nsearch corp.test\noptions ndots:2 timeout:1\nAddress: 127.0.0.1\n", 0)
+	r = run(t, "--network", "none", "--dns", "1.1.1.1", alpine, "true")
+	if r.code != 125 || !strings.Contains(r.stderr, "conflicting options: dns and the network mode") {
+		t.Errorf("--network none --dns: %+v", r)
+	}
+}

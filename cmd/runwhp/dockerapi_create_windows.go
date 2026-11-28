@@ -199,9 +199,6 @@ func refuseUnsupported(cfg *dcontainer.Config, hc *dcontainer.HostConfig) error 
 	add(hc.IpcMode != "" && hc.IpcMode != "private" && hc.IpcMode != "shareable", "--ipc "+string(hc.IpcMode))
 	add(hc.UTSMode != "", "--uts "+string(hc.UTSMode))
 	add(hc.UsernsMode != "", "--userns "+string(hc.UsernsMode))
-	add(len(hc.DNS) > 0, "--dns")
-	add(len(hc.DNSSearch) > 0, "--dns-search")
-	add(len(hc.DNSOptions) > 0, "--dns-option")
 	add(len(hc.Links) > 0, "--link")
 	add(len(hc.VolumesFrom) > 0, "--volumes-from")
 	add(hc.VolumeDriver != "" && hc.VolumeDriver != "local", "--volume-driver "+hc.VolumeDriver)
@@ -332,6 +329,10 @@ func networkFromCreate(cfg *dcontainer.Config, hc *dcontainer.HostConfig, nc *dn
 	f.publishAll = hc.PublishAllPorts
 	sort.Strings(f.publish)
 	f.addHosts = hc.ExtraHosts
+	for _, a := range hc.DNS {
+		f.dns = append(f.dns, a.String())
+	}
+	f.dnsSearch, f.dnsOptions = hc.DNSSearch, hc.DNSOptions
 	r, err := parseNetworkRequest(f)
 	if err != nil {
 		return r, badRequest("%v", err)

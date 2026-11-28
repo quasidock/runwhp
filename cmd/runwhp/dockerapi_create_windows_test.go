@@ -235,7 +235,9 @@ func TestSpecFromCreateRefusals(t *testing.T) {
 		{"cap-add", func(r *dcontainer.CreateRequest) { r.HostConfig.CapAdd = []string{"NET_ADMIN"} }, "--cap-add"},
 		{"host network", func(r *dcontainer.CreateRequest) { r.HostConfig.NetworkMode = "host" }, "--network host"},
 		{"container network", func(r *dcontainer.CreateRequest) { r.HostConfig.NetworkMode = "container:x" }, "container:x"},
-		{"dns", func(r *dcontainer.CreateRequest) { r.HostConfig.DNS = []netip.Addr{netip.MustParseAddr("1.1.1.1")} }, "--dns"},
+		{"dns over IPv6", func(r *dcontainer.CreateRequest) {
+			r.HostConfig.DNS = []netip.Addr{netip.MustParseAddr("2606:4700::1111")}
+		}, "IPv4 only"},
 		{"sctp", func(r *dcontainer.CreateRequest) {
 			r.HostConfig.PortBindings = dnetwork.PortMap{dnetwork.MustParsePort("132/sctp"): {{HostPort: "132"}}}
 		}, "sctp ports cannot be published"},

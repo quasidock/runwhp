@@ -24,6 +24,16 @@ type networkOptions struct {
 	publish     []netstack.Port
 	hosts       []string // /etc/hosts lines
 	hostGateway bool
+	dns         dnsOptions
+}
+
+// dnsOptions are --dns, --dns-search and --dns-option's, checked.
+type dnsOptions struct {
+	servers, search, options []string
+}
+
+func (d dnsOptions) given() bool {
+	return len(d.servers) > 0 || len(d.search) > 0 || len(d.options) > 0
 }
 
 // networkFlags are run's network flags: --network, repeatable, which takes
@@ -31,6 +41,7 @@ type networkOptions struct {
 // and --ip, which go with the first network named, as Docker's do.
 type networkFlags struct {
 	modes, aliases, publish, addHosts, expose []string
+	dns, dnsSearch, dnsOptions                []string
 	ip                                        string
 	publishAll                                bool
 }
@@ -50,6 +61,7 @@ type networkRequest struct {
 	// host port, as -P does.
 	expose     []string
 	publishAll bool
+	dns        dnsOptions
 }
 
 // networkWant is one network a container joins, with its aliases and
@@ -134,13 +146,48 @@ func parseNetworkRequest(f networkFlags) (networkRequest, error) {
 		r.hosts = append(r.hosts, line)
 		r.hostGateway = r.hostGateway || gateway
 	}
-	return r, nil
+	var err error
+	r.dns, err = parseDNS(f.dns, f.dnsSearch, f.dnsOptions)
+	return r, err
+}
+
+// parseDNS checks --dns, --dns-search and --dns-option, as Docker does:
+// servers are IPv4 addresses, as runwhp's network is IPv4 alone; a search
+// domain is a domain name, or "." for none; options pass as given.
+func parseDNS(servers, search, options []string) (dnsOptions, error) {
+	var d dnsOptions
+	for _, s := range servers {
+		a, err := netip.ParseAddr(s)
+		switch {
+		case err != nil:
+			return d, fmt.Errorf("--dns %s: not an IP address", s)
+		case !a.Unmap().Is4():
+			return d, fmt.Errorf("--dns %s: runwhp's network is IPv4 only", s)
+		}
+		d.servers = append(d.servers, a.Unmap().String())
+	}
+	for _, s := range search {
+		if s != "." {
+			if s == "" || len(s) > 255 || strings.ContainsAny(s, " \t\n/") || strings.HasPrefix(s, "-") || strings.HasPrefix(s, ".") {
+				return d, fmt.Errorf("--dns-search %s: not a domain name", s)
+			}
+			s = strings.TrimSuffix(s, ".")
+		}
+		d.search = append(d.search, s)
+	}
+	for _, s := range options {
+		if strings.TrimSpace(s) == "" || strings.ContainsAny(s, " \t\n") {
+			return d, fmt.Errorf("--dns-option %q: an option is one word, such as ndots:2", s)
+		}
+		d.options = append(d.options, s)
+	}
+	return d, nil
 }
 
 // planNetwork checks what a container asks of the network together,
 // resolving the networks it names in the store at root.
 func planNetwork(root string, r networkRequest) (networkOptions, error) {
-	n := networkOptions{publish: r.publish, hosts: r.hosts, hostGateway: r.hostGateway}
+	n := networkOptions{publish: r.publish, hosts: r.hosts, hostGateway: r.hostGateway, dns: r.dns}
 	ws := r.attach
 	if len(ws) == 0 {
 		ws = []networkWant{{name: network.User}}
@@ -194,6 +241,9 @@ func planNetwork(root string, r networkRequest) (networkOptions, error) {
 	container.SortNetworks(n.networks)
 	if !n.enabled && (len(n.publish) > 0 || n.hostGateway) {
 		return n, fmt.Errorf("--network none cannot be combined with -p or --add-host NAME:host-gateway")
+	}
+	if !n.enabled && n.dns.given() {
+		return n, errors.New("conflicting options: dns and the network mode")
 	}
 	return n, nil
 }

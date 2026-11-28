@@ -305,3 +305,40 @@ func TestParseRunOptions(t *testing.T) {
 		}
 	}
 }
+
+// --dns, --dns-search and --dns-option are checked as Docker checks them,
+// reach the container's config from run's flags, the API and compose, and
+// are refused with --network none in Docker's words.
+func TestDNSFlags(t *testing.T) {
+	d, err := parseDNS([]string{"192.0.2.53", "::ffff:192.0.2.54"}, []string{"corp.test.", "."}, []string{"ndots:2", "timeout:1"})
+	if err != nil || !reflect.DeepEqual(d.servers, []string{"192.0.2.53", "192.0.2.54"}) ||
+		!reflect.DeepEqual(d.search, []string{"corp.test", "."}) || !reflect.DeepEqual(d.options, []string{"ndots:2", "timeout:1"}) {
+		t.Errorf("parsed %+v, %v", d, err)
+	}
+	for _, bad := range []struct{ servers, search, options []string }{
+		{servers: []string{"dns.example"}}, {servers: []string{"2001:db8::53"}},
+		{search: []string{"-bad"}}, {search: []string{"a b"}}, {search: []string{".x"}},
+		{options: []string{"ndots:1 timeout:2"}}, {options: []string{""}},
+	} {
+		if _, err := parseDNS(bad.servers, bad.search, bad.options); err == nil {
+			t.Errorf("%+v was taken", bad)
+		}
+	}
+
+	root := t.TempDir()
+	n, err := parseNetworkFlags(root, networkFlags{dns: []string{"192.0.2.53"}, dnsSearch: []string{"corp.test"}})
+	if err != nil || !reflect.DeepEqual(n.dns.servers, []string{"192.0.2.53"}) || !reflect.DeepEqual(n.dns.search, []string{"corp.test"}) {
+		t.Errorf("run's flags: %+v, %v", n.dns, err)
+	}
+	if _, err := parseNetworkFlags(root, networkFlags{modes: []string{"none"}, dnsOptions: []string{"ndots:1"}}); err == nil || err.Error() != "conflicting options: dns and the network mode" {
+		t.Errorf("--network none --dns-option: %v", err)
+	}
+
+	req := createRun(t)
+	req.HostConfig.DNS = []netip.Addr{netip.MustParseAddr("192.0.2.53")}
+	req.HostConfig.DNSSearch, req.HostConfig.DNSOptions = []string{"."}, []string{"attempts:3"}
+	s, _, err := specFromCreate(req)
+	if err != nil || !reflect.DeepEqual(s.network.dns, dnsOptions{servers: []string{"192.0.2.53"}, search: []string{"."}, options: []string{"attempts:3"}}) {
+		t.Errorf("API: %+v, %v", s.network.dns, err)
+	}
+}
