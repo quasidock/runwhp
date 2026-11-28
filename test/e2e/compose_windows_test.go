@@ -537,3 +537,79 @@ services:
 		t.Errorf("no file: %s", out)
 	}
 }
+
+// nginxConf proxies to web, which nginx resolves as requests come, at
+// Docker's embedded DNS, as such configurations behind compose do.
+const nginxConf = `server {
+    listen 8080;
+    resolver 127.0.0.11 valid=5s ipv6=off;
+    location / {
+        set $upstream http://web;
+        proxy_pass $upstream;
+    }
+}
+`
+
+// TestComposeNginxResolver runs nginx in front of a web server, nginx
+// asking 127.0.0.11 for web's address, as with Docker Compose; and, in the
+// same project, a service with dns, dns_search and dns_opt, and a UDP
+// port, which compose port and ps report.
+func TestComposeNginxResolver(t *testing.T) {
+	parallel(t)
+	s := newOwnStore(t)
+	dns := startHostDNS(t)
+	port, uport := freePort(t), freeUDPPort(t)
+	p := newComposeProject(t, s, map[string]string{
+		"compose.yaml": strings.ReplaceAll(composeFile(t, `name: e2enginx
+services:
+  web:
+    image: %BUSYBOX%
+    command: ["sh", "-c", "mkdir -p /www && echo web-ok > /www/index.html && exec httpd -f -p 80 -h /www"]
+  proxy:
+    image: %NGINX%
+    ports: ["`+port+`:8080"]
+    volumes: ["./nginx.conf:/etc/nginx/conf.d/default.conf:ro"]
+    depends_on: [web]
+  udp:
+    image: %BUSYBOX%
+    command: ["sh", "-c", "`+udpPonger+`"]
+    ports: ["127.0.0.1:`+uport+`:9999/udp"]
+    dns: [`+dns+`]
+    dns_search: [corp.test]
+    dns_opt: ["timeout:1"]
+`), "%NGINX%", mirrored(t, "nginx:alpine")),
+		"nginx.conf": nginxConf,
+	})
+	p.ok("up", "-d")
+
+	var body string
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline) && body != "web-ok\n"; time.Sleep(200 * time.Millisecond) {
+		if resp, err := http.Get("http://127.0.0.1:" + port + "/"); err == nil {
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			body = string(b)
+		}
+	}
+	if body != "web-ok\n" {
+		t.Errorf("nginx, resolving web at 127.0.0.11, gave %q; its log:\n%s", body, p.run("logs", "proxy").stdout)
+	}
+
+	if got := p.ok("exec", "-T", "udp", "cat", "/etc/resolv.conf").stdout; got != "nameserver 127.0.0.11\nsearch corp.test\noptions timeout:1 ndots:0\n" {
+		t.Errorf("resolv.conf: %q", got)
+	}
+	if got := p.ok("exec", "-T", "udp", "nslookup", "fixture.test.").stdout; !strings.Contains(got, "Address: 192.0.2.7") {
+		t.Errorf("fixture.test through dns: %q", got)
+	}
+	if got := askUDP(t, "127.0.0.1:"+uport, "ping\n"); !strings.HasPrefix(got, "pong\n") {
+		t.Errorf("the UDP port answered %q", got)
+	}
+	if got := p.ok("port", "--protocol", "udp", "udp", "9999").stdout; got != "127.0.0.1:"+uport+"\n" {
+		t.Errorf("port --protocol udp: %q", got)
+	}
+	if r := p.run("port", "udp", "9999"); r.code == 0 {
+		t.Errorf("port 9999/tcp of a UDP port: %+v", r)
+	}
+	if got := p.ok("ps", "--format", "json", "udp").stdout; !strings.Contains(got, `"Protocol":"udp"`) {
+		t.Errorf("ps --format json: %s", got)
+	}
+}

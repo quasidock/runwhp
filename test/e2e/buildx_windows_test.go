@@ -285,13 +285,18 @@ func TestBuildxContainerDriver(t *testing.T) {
 }
 
 // TestDockerInDocker runs docker:dind privileged, as Docker's own image
-// for Docker in Docker: its daemon runs containers and builds.
+// for Docker in Docker: its daemon runs containers and builds. It runs on a
+// network of the user's, as Docker Compose would run it, where init's
+// nftables table for 127.0.0.11 meets dockerd's own iptables: each keeps
+// working.
 func TestDockerInDocker(t *testing.T) {
 	parallel(t)
 	d := newDockerAPI(t)
 	dind := d.image("docker:29-dind")
-	d.image(alpine)
-	d.dok("run", "-d", "--privileged", "--name", "dind", "-v", "dindstate:/var/lib/docker", dind)
+	img := d.image(alpine)
+	d.dok("network", "create", "dindnet")
+	d.dok("run", "-d", "--name", "peer", "--network", "dindnet", img, "sleep", "600")
+	d.dok("run", "-d", "--privileged", "--name", "dind", "--network", "dindnet", "-v", "dindstate:/var/lib/docker", dind)
 	waitFor(t, time.Minute, func() bool { return d.docker1("exec", "dind", "docker", "info").code == 0 })
 	r := d.docker1("exec", "dind", "docker", "info", "--format", "{{.CgroupVersion}} {{.Driver}}")
 	if r.code != 0 || !strings.HasPrefix(r.stdout, "2 ") {
@@ -300,5 +305,10 @@ func TestDockerInDocker(t *testing.T) {
 	build := "printf 'FROM scratch\\nCOPY f /f\\n' > /tmp/Dockerfile && echo built > /tmp/f && docker build -q -t inner /tmp && docker image ls -q inner"
 	if r := d.docker1("exec", "dind", "sh", "-c", build); r.code != 0 || strings.TrimSpace(r.stdout) == "" {
 		t.Errorf("a build in dind: %+v", r)
+	}
+	r = d.docker1("exec", "dind", "sh", "-c", "cat /etc/resolv.conf; nslookup -type=a peer 127.0.0.11 | grep -c 'Address: 172'; iptables -t nat -S | grep -c DOCKER")
+	lines := strings.Split(strings.TrimSpace(r.stdout), "\n")
+	if r.code != 0 || len(lines) < 3 || lines[0] != "nameserver 127.0.0.11" || lines[len(lines)-2] != "1" || lines[len(lines)-1] == "0" {
+		t.Errorf("DNS at 127.0.0.11 beside dockerd's iptables: %+v", r)
 	}
 }
