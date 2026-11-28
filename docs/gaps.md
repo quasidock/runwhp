@@ -97,12 +97,23 @@
   delegated ones, one fewer for each volume, and one fewer for each network
   beyond the first: each device, the writable layer, the vsock device and
   the balloon included, takes an I/O APIC line.
-- The network is IPv4 only, and carries no ICMP to the host or beyond it:
-  only containers on a user-defined network ping each other. Only TCP
-  ports can be published, and there is no `--dns` or `--dns-search`. A
-  random host port, as `-p PORT` and `-P` take, listens on 127.0.0.1
-  alone, where Docker's listens on every IPv4 and IPv6 address; a
-  container started again may get another, as with Docker.
+- The network is IPv4 only: there are no IPv6 addresses, AAAA answers
+  or IPv6 `--dns` servers.
+- Of ICMP, only echo requests go beyond the gateway, sent again from the
+  host, so `ping` and `traceroute -I` work, but traceroute's UDP probes,
+  whose TTL the host's sockets do not keep, and other ICMP stop there. A
+  ping waits on a thread of its own, and a container has at most 64 out
+  at once.
+- A port published without an address listens on 127.0.0.1, or
+  `RUNWHP_PUBLISH_ADDRESS`, where Docker's listens on every IPv4 and IPv6
+  address; a container started again may get another random port, as
+  with Docker. SCTP ports cannot be published. A UDP port's datagrams come
+  to the container from the gateway, as a TCP port's connections do, not
+  from their client's address, and a client's flow ends after 60 s with
+  nothing sent; at most 1024 clients a port have flows at once.
+- nerdctl's containers listen on every address for a port given without
+  one: nerdctl says `0.0.0.0` either way, which runwhp cannot tell from
+  one given, so `RUNWHP_PUBLISH_ADDRESS` does not apply to them.
 - `network connect` and `disconnect` refuse a running container: its VM
   cannot take or give up a network device while it runs. A created
   container's VM is booted again for them.
@@ -119,11 +130,19 @@
   always `eth0`.
 - nerdctl's containers, and build steps, cannot join a user-defined
   network.
-- DNS on a user-defined network is answered at its gateway, not at
-  `127.0.0.11` as Docker's is, so a program told to ask `127.0.0.11`, as
-  nginx often is, gets no answer. Answers live 60 s, not 600. A name no
-  container has goes to Windows's resolver, which takes about 2.7 s to give
-  up on a single-label one.
+- DNS on a user-defined network answers at `127.0.0.11` through a table
+  of runwhp's own in nftables, which the container's root can remove, as
+  `nft flush ruleset` does; resolv.conf then names a server that does not
+  answer. Docker's rules in a container's namespace can be removed so
+  too. On a kernel without nftables' NAT, resolv.conf names the gateway,
+  as before iteration 26. Answers live 60 s, not 600. A name no container
+  has goes to Windows's resolver, which takes about 2.7 s to give up on a
+  single-label one, or to `--dns`'s servers.
+- `--dns`'s servers on a user-defined network are asked from the host, so
+  one at another container's address, which the host cannot reach, is
+  left out, with a line in the log; the host's hosts file still answers
+  first, as Go's resolver reads it. A server that does not answer costs
+  its first lookup the resolver's 5 s, before the next is asked.
 - Network names are case-insensitive, as container names are, where
   Docker's are not. Networks belong to a store: containers run with
   different `RUNWHP_ROOT`s do not meet.
@@ -138,9 +157,9 @@
   in the container's writable layer, and go with it, where Docker Compose
   carries them over to the new container.
 - `compose` takes no volume driver option but `shared`.
-- `compose` refuses UDP ports, as `run` does, and publishes ports on
-  127.0.0.1 unless an address is given, where Docker publishes them on
-  every address.
+- `compose` publishes ports on 127.0.0.1, or `RUNWHP_PUBLISH_ADDRESS`,
+  unless an address is given, where Docker publishes them on every
+  address.
 - `compose build` builds one service after another, a step at a time, where
   BuildKit builds them at once. `cpus` is rounded up to whole vCPUs.
 - There is no `compose watch`, `top`, `events`, `cp`, `attach`, `stats`,

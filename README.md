@@ -8,7 +8,8 @@ HCS, and no administrator rights at run time.
 ## Status
 
 `runwhp` is experimental. It runs Linux containers from registry images,
-interactively or not, with a network, the host's files and volumes of their
+interactively or not, with a network, TCP and UDP ports published on the
+host, Docker's DNS and ping beyond the host, the host's files and volumes of their
 own, which containers running at once share, each volume served to them
 by a guest of its own, on a kernel of its own and on several
 processors. Containers on a
@@ -202,10 +203,13 @@ A container's files:
 | `--network`, `--net` | `user` | `user` gives the container a network of its own through runwhp; `none` leaves it only loopback; a network's name puts it on that network, with the containers there, as `name=NAME,alias=ALIAS,ip=ADDRESS` does with an alias and an address; repeatable for networks of the user's. See **User-defined networks** under [Networking](#networking) |
 | `--network-alias` | | Another name for the container on its first network; repeatable |
 | `--ip` | | The container's address on its first network |
-| `-p`, `--publish` | | `[IP:][HOSTPORT:]PORT[/tcp]`: listen on the host and forward to the container's TCP port; repeatable. IP defaults to `127.0.0.1`; without `HOSTPORT`, or with `0`, any free port is taken, which `port` shows |
-| `-P`, `--publish-all` | | Publish every exposed TCP port, the image's `EXPOSE` and `--expose`'s, on a free host port of `127.0.0.1` |
+| `-p`, `--publish` | | `[IP:][HOSTPORT:]PORT[/tcp\|/udp]`: listen on the host and forward to the container's TCP or UDP port; repeatable. IP defaults to `RUNWHP_PUBLISH_ADDRESS`, `127.0.0.1` unless set; without `HOSTPORT`, or with `0`, any free port is taken, which `port` shows |
+| `-P`, `--publish-all` | | Publish every exposed TCP and UDP port, the image's `EXPOSE` and `--expose`'s, on a free host port of the default address |
 | `--expose` | | `PORT[-PORT][/PROTO]`: a port the container listens on, published only by `-P`; repeatable |
 | `--add-host` | | `NAME:IP` or `NAME=IP`, added to `/etc/hosts`; repeatable. `NAME:host-gateway` also lets the container reach the host's `127.0.0.1` at that name |
+| `--dns` | | An IPv4 DNS server: in `/etc/resolv.conf` on the default network; on a user-defined one, a server the embedded DNS asks for names that are not containers'. Repeatable. See **DNS** under [Networking](#networking) |
+| `--dns-search` | | A search domain for `/etc/resolv.conf`, or `.` for none; repeatable |
+| `--dns-option` | | A `/etc/resolv.conf` option, such as `ndots:2`; repeatable |
 | `-v`, `--volume` | | `HOSTPATH:PATH[:ro][,delegated]`: bind a host directory or file at `PATH`; a missing `HOSTPATH` is made as a directory, and `delegated` lets the guest cache writes; see [Delegated mounts](#delegated-mounts). `NAME:PATH[:ro][,nocopy]`: mount the named volume `NAME`, made if missing. `PATH` alone: an anonymous volume, removed with the container. Repeatable. See [Host files](#host-files) and [Volumes](#volumes) |
 | `--mount` | | Docker's long form of `-v` and `--tmpfs`: `type=bind,source=HOSTPATH,target=PATH[,readonly][,consistency=delegated]`, where `HOSTPATH` must exist; `type=volume[,source=NAME],target=PATH[,readonly][,volume-nocopy][,volume-opt=size=SIZE]`; `type=tmpfs,target=PATH[,tmpfs-size=SIZE][,tmpfs-mode=MODE]` |
 | `--tmpfs` | | `PATH[:OPTIONS]`: mount a tmpfs, `noexec`, `nosuid` and `nodev` unless the options say `exec`, `suid` or `dev`; repeatable. See [Volumes](#volumes) |
@@ -490,21 +494,49 @@ The host's loopback is closed to the container unless `host-gateway` opens
 it. A service that listens on all of the host's interfaces can still be
 reached at the host's LAN address, as with Docker.
 
-`-p 8080:80` listens on the host's `127.0.0.1:8080` and forwards each
-connection to port 80 in the container, which sees it come from `10.0.2.2`.
-`-p 0.0.0.0:8080:80` listens on every interface; Windows Firewall then asks,
-once, whether to allow it, and allowing it on public networks needs an
-administrator. A connection that arrives before anything in the container
-listens on the port is accepted and then closed, as with Docker.
+**Published ports.** `-p 8080:80` listens on the host's `127.0.0.1:8080`
+and forwards each connection to port 80 in the container, which sees it
+come from `10.0.2.2`. `-p 5353:53/udp` does the same for UDP: each client
+of the host's port has a flow of its own to the container's, from the
+gateway, which carries the container's answers back to that client and
+ends after 60 s with nothing sent either way. A connection that arrives
+before anything in the container listens on the port is accepted and
+then closed, and a datagram lost, as with Docker.
 
 `-p 80`, without a host port, takes any free one, as Docker's random host
-ports do; `-P` publishes every port the image exposes, or `--expose`
-names, so. Each boot binds them anew, so a container started again may
-get other ports; `runwhp port` and the Engine API's inspect give those
-bound now.
+ports do; `-P` publishes every TCP and UDP port the image exposes, or
+`--expose` names, so. Each boot binds them anew, so a container started
+again may get other ports; `runwhp port` and the Engine API's inspect give
+those bound now, with their protocols.
 
-`ping` gets answers only from the gateway: runwhp carries TCP and UDP, not
-ICMP. Containers on a network of their own ping each other.
+A port published without an address listens on `127.0.0.1`, where
+Docker's listens on every address, unless `RUNWHP_PUBLISH_ADDRESS` names
+another, as Docker's daemon's `--ip` does: `0.0.0.0` for every IPv4
+address, `::` for every address. Listening on more than the loopback,
+`-p 0.0.0.0:8080:80` included, has Windows Firewall ask, once for each
+runwhp.exe, whether to allow it, and allowing it on public networks needs
+an administrator. The setting is read by the process that makes the
+container: `runwhp run` or `create`, `runwhp compose`, or the
+`docker-api` server, which reads it as it starts. nerdctl gives runwhp
+`0.0.0.0` for a port given without an address, as for one given with
+it, so its containers listen on every address either way.
+
+**DNS.** `--dns`, `--dns-search` and `--dns-option`, and compose's `dns`,
+`dns_search` and `dns_opt`, set a container's `/etc/resolv.conf` as
+Docker's do on its default bridge: the servers, reached from the host as
+any other, the search domains, `.` for none, and the options, as given.
+On a user-defined network the container keeps the embedded server, below,
+which asks `--dns`'s servers for names that are not containers', from the
+host, as Docker's does: a server at a loopback address is the host's own,
+and one at the gateway the host's loopback, with `host-gateway`.
+
+**ping.** An echo request to an address beyond the gateway is sent again
+from the host, through Windows's ICMP helper, which needs no
+administrator, and the reply comes back from where it went, as do the
+"time exceeded" messages `traceroute -I` relies on. Other ICMP, and
+traceroute's UDP probes, go no further than the gateway. What the
+container may not reach, as for TCP and UDP, gets no reply.
+Containers on a network of their own ping each other directly.
 
 #### User-defined networks
 
@@ -550,10 +582,18 @@ routes through that network, and the others after it.
 names, aliases, 12-digit IDs and hostnames of the containers running on
 its networks, in any case, alone or followed by a dot and the network's
 name, then everything else through Windows's resolver, as on the default
-network. Addresses resolve back to `NAME.NETWORK`. `/etc/resolv.conf`
-names the gateway with `options ndots:0`, and `/etc/hosts` gives the
-container's hostname its addresses, as Docker's do. The host is
-`host-gateway`, `10.0.2.2`, on every network.
+network, or `--dns`'s servers. Addresses resolve back to `NAME.NETWORK`.
+The container asks at `127.0.0.11`, as on Docker, where nginx's
+`resolver 127.0.0.11` and programs told to ask there find it:
+`/etc/resolv.conf` names it, with `options ndots:0`, and `/etc/hosts`
+gives the container's hostname its addresses, as Docker's do. runwhp-init
+serves it, passing each query to the gateway: it listens at ports of its
+own, and has the kernel send what goes to `127.0.0.11:53`, UDP and TCP,
+there, through a table of runwhp's own in nftables, as Docker does with
+iptables, so that the container may serve port 53 itself and its own
+iptables rules, Docker in Docker's included, leave the table alone. On a
+kernel without nftables' NAT, resolv.conf names the gateway instead. The
+host is `host-gateway`, `10.0.2.2`, on every network.
 
 **How frames move.** A network has no switch. Each container's runwhp
 routes its guest's frames for the others on the network straight to their
@@ -1268,9 +1308,9 @@ longer has are warned of, and `--remove-orphans` removes them.
 
 | | |
 | --- | --- |
-| Taken as `run` takes it | `image`, `build`, `command`, `privileged`, `entrypoint`, `environment`, `env_file`, `ports` (TCP, on 127.0.0.1 unless an address is given, as `-p`, on a free host port without one), `expose`, `extra_hosts`, `networks` with `aliases` and `ipv4_address`, `links` (as aliases), `volumes` (bind, named, anonymous, tmpfs; `consistency: delegated` for [Delegated mounts](#delegated-mounts)), `tmpfs`, `secrets` and `configs` from files (bound read-only), `use_api_socket` (Docker's socket, reaching the store's Engine API, and the docker CLI's credentials, as Docker Compose gives them), `restart`, `deploy.restart_policy`, `deploy.replicas`, `scale`, `mem_limit`, `cpus` and `deploy.resources.limits` (`cpus` rounded up to whole vCPUs), `healthcheck`, `depends_on`, `hostname`, `user`, `working_dir`, `tty`, `stdin_open`, `stop_signal`, `stop_grace_period`, `labels`, `logging` (`local`, `json-file` and `none`; `max-size` and `max-file`), `pull_policy`, `platform: linux/amd64`, `storage_opt: size`, `attach`, `profiles`, `extends`, `include` |
-| Refused, before anything is made | `network_mode` other than `none` or `bridge`; `devices`, `gpus`, `volumes_from`, `ipc`, `pid` and `uts` of other containers or the host; UDP ports; IPv6 and link-local addresses; network drivers other than `bridge`, `ipam`, `internal` and IPv6 networks; volume drivers and `driver_opts`; a volume two services would mount at once; secrets and configs other than from files; build `ssh`, `additional_contexts`, `cache_to`, other platforms, and git or URL contexts; lifecycle hooks, `provider`, `models` and `jobs` |
-| Ignored, with a warning | `cap_add`, `cap_drop`, `security_opt`, `ulimits`, `sysctls`, `shm_size`, `init`, `userns_mode`, the `oom_*`, `pids_limit`, the CPU shares, sets and quotas, `blkio_config`, `mem_reservation`, `memswap_limit`, `read_only`, `dns`, `dns_search`, `dns_opt`, `domainname`, `mac_address`, `develop`, `deploy.resources.reservations`, other log drivers, build `cache_from` and `privileged` |
+| Taken as `run` takes it | `image`, `build`, `command`, `privileged`, `entrypoint`, `environment`, `env_file`, `ports` (TCP and UDP, on `RUNWHP_PUBLISH_ADDRESS` or 127.0.0.1 unless an address is given, as `-p`, on a free host port without one), `expose`, `extra_hosts`, `dns`, `dns_search`, `dns_opt`, `networks` with `aliases` and `ipv4_address`, `links` (as aliases), `volumes` (bind, named, anonymous, tmpfs; `consistency: delegated` for [Delegated mounts](#delegated-mounts)), `tmpfs`, `secrets` and `configs` from files (bound read-only), `use_api_socket` (Docker's socket, reaching the store's Engine API, and the docker CLI's credentials, as Docker Compose gives them), `restart`, `deploy.restart_policy`, `deploy.replicas`, `scale`, `mem_limit`, `cpus` and `deploy.resources.limits` (`cpus` rounded up to whole vCPUs), `healthcheck`, `depends_on`, `hostname`, `user`, `working_dir`, `tty`, `stdin_open`, `stop_signal`, `stop_grace_period`, `labels`, `logging` (`local`, `json-file` and `none`; `max-size` and `max-file`), `pull_policy`, `platform: linux/amd64`, `storage_opt: size`, `attach`, `profiles`, `extends`, `include` |
+| Refused, before anything is made | `network_mode` other than `none` or `bridge`; `devices`, `gpus`, `volumes_from`, `ipc`, `pid` and `uts` of other containers or the host; SCTP ports; IPv6 and link-local addresses; network drivers other than `bridge`, `ipam`, `internal` and IPv6 networks; volume drivers and `driver_opts`; a volume two services would mount at once; secrets and configs other than from files; build `ssh`, `additional_contexts`, `cache_to`, other platforms, and git or URL contexts; lifecycle hooks, `provider`, `models` and `jobs` |
+| Ignored, with a warning | `cap_add`, `cap_drop`, `security_opt`, `ulimits`, `sysctls`, `shm_size`, `init`, `userns_mode`, the `oom_*`, `pids_limit`, the CPU shares, sets and quotas, `blkio_config`, `mem_reservation`, `memswap_limit`, `read_only`, `domainname`, `mac_address`, `develop`, `deploy.resources.reservations`, other log drivers, build `cache_from` and `privileged` |
 
 Containers run on runwhp's kernel, or `RUNWHP_KERNEL`'s, never with
 `--module`, and with half this machine's memory and up to 4 vCPUs unless a
@@ -1333,8 +1373,8 @@ prints a create's warnings:
 
 | | |
 | --- | --- |
-| Taken | image, command, `--entrypoint`, `-e`, `-w`, `-u`, `--hostname`, `-i`, `-t`, `-l`, `--stop-signal`, `--stop-timeout`, the `--health-*` flags, `-m`, `--cpus` (rounded up to whole vCPUs, with a warning), `--network` (Docker's `bridge` and `default` are runwhp's default network) with `--network-alias` and `--ip`, `-p` (on 127.0.0.1 unless an address is given; without a host port, or with `0`, on a free one), `-P` and `--expose`, `--add-host`, `-v`, `--mount` (Docker's socket and named pipes as [host pipes](#host-pipes)), `--tmpfs`, anonymous volumes, `--restart`, `--rm`, `--privileged`, `--security-opt label=...` (SELinux's, which change nothing) and `seccomp=unconfined`, `apparmor=unconfined` and `no-new-privileges=false` (the container has none of them), `--log-driver json-file` (Docker's default, and the API's: runwhp's own log under Docker's name), `local` or `none` with `--log-opt`, `--storage-opt size` |
-| Refused | `--cap-add`, `--device`, `--gpus`, `--pid`, `--ipc`, `--uts` and `--userns` of the host, `--network host` and `container:`, `--dns*`, `--link`, `--volumes-from`, volume drivers, `--cpuset-*`, `--cpu-quota`, `--sysctl`, `--security-opt` other than labels and `seccomp`, `apparmor` or `no-new-privileges` unconfined, `--runtime` other than runwhp, UDP ports, `--group-add`, `--pids-limit`, `--mac-address`, `--domainname`, IPv6 addresses, relative bind paths, platforms other than `linux/amd64` |
+| Taken | image, command, `--entrypoint`, `-e`, `-w`, `-u`, `--hostname`, `-i`, `-t`, `-l`, `--stop-signal`, `--stop-timeout`, the `--health-*` flags, `-m`, `--cpus` (rounded up to whole vCPUs, with a warning), `--network` (Docker's `bridge` and `default` are runwhp's default network) with `--network-alias` and `--ip`, `-p`, TCP and UDP (on the server's `RUNWHP_PUBLISH_ADDRESS`, or 127.0.0.1, unless an address is given; without a host port, or with `0`, on a free one), `-P` and `--expose`, `--add-host`, `--dns`, `--dns-search` and `--dns-option`, `-v`, `--mount` (Docker's socket and named pipes as [host pipes](#host-pipes)), `--tmpfs`, anonymous volumes, `--restart`, `--rm`, `--privileged`, `--security-opt label=...` (SELinux's, which change nothing) and `seccomp=unconfined`, `apparmor=unconfined` and `no-new-privileges=false` (the container has none of them), `--log-driver json-file` (Docker's default, and the API's: runwhp's own log under Docker's name), `local` or `none` with `--log-opt`, `--storage-opt size` |
+| Refused | `--cap-add`, `--device`, `--gpus`, `--pid`, `--ipc`, `--uts` and `--userns` of the host, `--network host` and `container:`, `--link`, `--volumes-from`, volume drivers, `--cpuset-*`, `--cpu-quota`, `--sysctl`, `--security-opt` other than labels and `seccomp`, `apparmor` or `no-new-privileges` unconfined, `--runtime` other than runwhp, SCTP ports, `--group-add`, `--pids-limit`, `--mac-address`, `--domainname`, IPv6 addresses, `--dns` included, relative bind paths, platforms other than `linux/amd64` |
 | Warned of | `--init` (runwhp's init is always there), `--shm-size`, `--oom-score-adj`, `--ulimit`, `--memory-swap`, `--cpu-shares`, `--blkio-weight`, `--cgroupns`, `--read-only` |
 
 A missing image is a 404, as Docker's daemon answers it, and the docker CLI
@@ -1491,8 +1531,8 @@ PATH or given with `--containerd`. runwhp works with neither unless asked.
 - **The network.** nerdctl's own networks need HNS, which needs an
   administrator, so runs say `--network none`, and every container gets
   runwhp's network anyway, with nerdctl's `-p` ports published on the host
-  as `runwhp run -p` publishes them, TCP only, on `0.0.0.0` unless an
-  address is given. `--annotation io.runwhp.network=none` leaves a container
+  as `runwhp run -p` publishes them, TCP and UDP, on `0.0.0.0` unless an
+  address is given, `RUNWHP_PUBLISH_ADDRESS` or not. `--annotation io.runwhp.network=none` leaves a container
   with loopback alone. `--add-host NAME:host-gateway` reaches the host's
   loopback with `host_gateway_ip = '10.0.2.2'` in nerdctl.toml.
 - **Mounts.** nerdctl on Windows takes `-v` destinations as Windows paths:
@@ -1656,9 +1696,11 @@ bzImage.
    frames with them left partial, and frames for it come marked valid,
    since every frame ends in the stack. The stack takes packets for any
    address, and for each new TCP connection or UDP flow it opens a host
-   socket to the same destination and copies between the two. Published
-   ports are host listeners whose connections the stack opens towards the
-   guest.
+   socket to the same destination and copies between the two; an echo
+   request beyond it goes out through Windows's ICMP helper, and its reply
+   is written to the guest from where it came. Published ports are host
+   listeners, TCP, or sockets, UDP, whose connections and flows the stack
+   opens towards the guest.
 6. The virtio-fs device's far end is a FUSE server inside runwhp, which
    serves every mount at once: its root, which only init sees, holds them as
    entries `0`, `1`, and so on. The vCPU that submits requests serves the
@@ -1676,7 +1718,8 @@ bzImage.
    volumes from the image. Then, parents first, it binds each share, each
    volume's `_data` and each anonymous volume onto its target, mounts each
    tmpfs, and binds its own `/etc/hostname`, `/etc/hosts` and, with a
-   network, `/etc/resolv.conf` over the image's. It moves the overlay over
+   network, `/etc/resolv.conf` over the image's, having started, on a
+   user-defined network, the embedded DNS server at 127.0.0.11. It moves the overlay over
    the initramfs as the root, as `switch_root` does, which leaves the
    virtio-fs root and the volumes' file systems out of the container's
    reach. For `create` it then says it is ready and waits to be started.

@@ -1,5 +1,22 @@
 # Status
 
+- **Iteration 26** (2026-11-28): networking as Docker's. UDP ports are
+  published, by `-p 53:53/udp`, `-P`, compose, the Engine API and
+  nerdctl, each client of the host's port in a flow of its own, and
+  reported with their protocol everywhere. On a user-defined network, as
+  in every compose project, the container asks DNS at `127.0.0.11`, as on
+  Docker, so nginx's `resolver 127.0.0.11` works: runwhp-init serves it,
+  having the kernel redirect port 53 there through a table of its own in
+  nftables, as Docker does with iptables, so that the container may still
+  serve port 53 and Docker in Docker's rules leave it alone. `--dns`,
+  `--dns-search` and `--dns-option`, and compose's `dns`, `dns_search` and
+  `dns_opt`, set resolv.conf as Docker's do, and on a user-defined network
+  the servers answer what is not a container's name. `ping` and
+  `traceroute -I` reach beyond the host, through Windows's ICMP helper,
+  unelevated. `RUNWHP_PUBLISH_ADDRESS` sets where ports published without
+  an address listen, 127.0.0.1 unless set. A boot costs what it did. See
+  [Networking](../README.md#networking) and
+  [Iteration 26 results](#iteration-26-results).
 - **Iteration 25** (2026-11-28): faster tests. The end-to-end tests run
   in parallel, 8 at a time, but for those that measure time or the
   machine, or touch what is global to the user's store, which run first,
@@ -2368,3 +2385,91 @@ TestSharedVolume, before the fixes above. Six runs of the default
 configuration alone passed after TestHostPipes' fixes. With
 `RUNWHP_E2E_SERIAL=1` it runs one test at a time, as before, and passes in
 667 s, shorter than 779 s for the serial tests' shorter waits.
+
+## Iteration 26 results
+
+Measured on the test machine with runwhp's kernel, from Git Bash, with
+the store on NTFS (`C:`), over five runs but where said. "Iteration 25"
+is that iteration's build, run in turn with this one. Docker is Docker
+29.10 in WSL on the same machine.
+
+A boot costs what it did. On a user-defined network, init's embedded DNS
+binds its two ports and installs its nftables batch in about 1.2 ms, 1.6
+ms on WSL's kernel, while the interfaces are set up, so nothing of it
+shows:
+
+| `run --rm -m 512m alpine:3.20 true`, ten runs | Iteration 25 | Iteration 26 |
+| --- | --- | --- |
+| default network | 186-219 ms | 188-209 ms |
+| a user-defined network | 195-217 ms | 192-210 ms |
+
+Nor does the nat chain, which has conntrack follow every connection in a
+user-defined network's guest, as Docker's does, slow one: 200 MB to
+another container takes 0.43-0.49 s, against 0.45-0.51 s.
+
+DNS for another container's name, 2000 UDP queries from a container,
+the median and the 99th percentile:
+
+| Asked at | Iteration 25 | Iteration 26 | Docker |
+| --- | --- | --- | --- |
+| the gateway | 131-209 µs, 345-424 µs | 134-216 µs, 354-465 µs | |
+| `127.0.0.11` | | 420-453 µs, 807-884 µs | 254-261 µs, 532-545 µs |
+
+A query to 127.0.0.11 is one to the gateway, relayed by init: the relay
+doubles its cost, against Docker's, which answers it in the daemon.
+
+Through published ports, a round trip from the host, the mean of 10,000,
+as Windows's clock ticks every 0.5 ms:
+
+| Port | runwhp | Docker |
+| --- | --- | --- |
+| UDP | 260-315 µs | |
+| TCP, on one connection | 298-359 µs | 743 µs |
+
+WSL forwards TCP from the host's loopback to Docker's ports, but not UDP.
+
+`ping -c 20` from a container, against Windows's `ping -n 20`: to the
+host's own LAN address, 0.9-3.9 ms, 1.4 ms on average, where Windows
+answers itself at once; to 1.1.1.1, 47-53 ms, 48 ms on average, against
+45-47 ms.
+
+runwhp.exe is 24.6 MB, 0.2 MB more than in iteration 25, and runwhp-init
+3.6 MB, 123 KB more: half of it is Go's TCP and UDP sockets, which init
+did not use before, and the rest the nftables batch and the relay.
+
+The new tests cover:
+
+- **UDP ports:** a flow a client, a guest not listening yet, 60 KB
+  datagrams, TCP and UDP on one port number, a random port, Close ending
+  the flows, a busy port; records of TCP ports reading and writing as
+  before; `-p` and `-P` with UDP and SCTP, the API's bindings and inspect,
+  compose's ports and nerdctl's mappings; `runwhp port`. End to end, with
+  runwhp, the docker CLI, compose and nerdctl, and `compose port
+  --protocol udp` and `ps`.
+- **The publish address:** `RUNWHP_PUBLISH_ADDRESS` for `-p`, `-P`, the
+  API and compose, an address given winning, and a bad one refused; end
+  to end on 127.0.0.2.
+- **DNS at 127.0.0.11:** the nftables batch's messages, the relay over UDP
+  and TCP, resolv.conf with and without the embedded server; end to end
+  over UDP and TCP, beside a container serving port 53 itself, nginx's
+  resolver in a compose project, and Docker in Docker on a user-defined
+  network, whose dockerd's iptables and runwhp's table both work.
+- **`--dns` and its kin:** their checks and Docker's refusals, resolv.conf
+  on either kind of network as Docker writes it, which servers the
+  embedded DNS asks and from where, a server that fails giving way to the
+  next; end to end with a DNS server of the test's own on the host's
+  127.0.0.77.
+- **ping:** an echo beyond the link with its TTL less one and its reply
+  from where it went, the reply's TTL, time exceeded from a router and
+  from the gateway, refused destinations, the gateway still answering
+  itself, host-gateway on a user-defined network, and the system's
+  pinger; end to end to the host's LAN address and with `traceroute -I`.
+
+The whole suite passes with 1, the default and 16 vCPUs on runwhp's
+kernel, and on the WSL kernel with its vsock modules, nerdctl's tests
+included, with the stores on ReFS (`E:`) but for nerdctl's, on NTFS: two
+runs of the matrix, taking 163-167 s, 176-179 s, 236-251 s and 195-196 s,
+and nerdctl's tests 18-19 s each time. In the first, with the default
+vCPUs, TestSharedVolumeCreated waited more than its 15 s for a
+container's log once; it passed six times on its own and in the second
+run, and nothing of this iteration's is on its path.

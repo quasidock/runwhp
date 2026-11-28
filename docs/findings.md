@@ -887,3 +887,52 @@
   being read stale. The kernel counts timeouts in jiffies, 4 ms at the
   guest kernel's default 250 Hz, and rounds any timeout up to one, so the
   smallest cache short of none is a 4 ms window.
+- **A container's own namespace can redirect 127.0.0.11 with nftables
+  alone.** runwhp's kernel has `NFT_NAT` and conntrack but no `REDIRECT`;
+  a nat chain on the output hook, at -100 (nftables's `dstnat`), DNATs
+  127.0.0.11:53 to 127.0.0.11 at another port, and conntrack un-NATs the
+  replies, with no rule for them, as Docker's DOCKER_OUTPUT does. The
+  batch, a table, its chain and two rules, is a single netlink message to
+  `NETLINK_NETFILTER`, built from x/sys's constants, which alpine's
+  `nft list ruleset` reads back as `ip daddr 127.0.0.11 udp dport 53 dnat
+  to 127.0.0.11:38214`. Setting it up and binding the two listeners takes
+  1.2 ms on runwhp's kernel and 1.6 ms on WSL's 6.6, which has it all too;
+  started beside the interfaces' setup, it costs a boot nothing
+  measurable. A container that binds 0.0.0.0:53, UDP and TCP, still
+  resolves through 127.0.0.11, and dockerd's iptables in docker:dind,
+  whose tables are its own, leave the table alone.
+- **gVisor answers no echo request for an address it does not have**, even
+  on a promiscuous NIC that spoofs: it hands the request to the ICMP
+  transport's default handler, which runs only if the ICMPv4 transport is
+  registered, and answers it itself afterwards only if the handler returns
+  false, for its own addresses alone. A handler that returns true for
+  those too silences the gateway. `WritePacketToRemote` writes an IPv4
+  packet from any source to a link address, through the stack's own
+  output, so a reply joins the other frames for the guest.
+- **IcmpSendEcho2 pings from an unelevated process**, at ping.exe's
+  latency, sub-millisecond to the host's own address and 3.7 ms to the
+  router; one handle serves 16 calls at once. With a TTL of 1, it returns
+  status 11013 and the address of the router where the TTL ran out, which
+  is what traceroute needs. The host's own LAN address answers with
+  Windows Firewall on, so a ping needs no internet to be tested.
+- **Go's UDP sockets on Windows ignore port unreachable**, with
+  `SIO_UDP_CONNRESET` off, so a published UDP port's socket is not
+  disturbed by a client that has gone, and a DNS server that is not there
+  costs Go's resolver its full 5 s timeout rather than failing at once.
+- **Go's resolver on Windows takes a dialler of the caller's** with
+  `PreferGo`: it then reads the hosts file first and asks whatever the
+  dialler connects to, framing DNS for UDP only on a `net.PacketConn`.
+- **busybox's `nc -lu -e` answers nothing, and its `nslookup` does not fall
+  back**: `nc` with `-e` connects to a UDP client and runs the program,
+  whose output never reaches the client, while `nc -lu` fed from a pipe
+  does; and `nslookup NAME`, given a search domain, asks only for
+  NAME.DOMAIN, where musl's resolver, as `getent` and `ping` use it, asks
+  for NAME too.
+- **Docker writes resolv.conf from --dns's flags so**, recorded with Docker
+  29.10 in WSL: on a user-defined network, `nameserver 127.0.0.11`, the
+  search domains, and the options with `ndots:0` after them unless they
+  set ndots, while the servers become the embedded server's; on the
+  default bridge, all three as given. `--dns-search .` writes no search
+  line, and inspect keeps it as `["."]`; `Dns` is null when unset, the
+  others empty lists. nerdctl's `network-config.json` names a UDP port's
+  protocol `udp`, and gives `0.0.0.0` for a port with no address.
